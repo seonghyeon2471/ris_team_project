@@ -1,14 +1,16 @@
 # =========================================================
-# LiDAR Obstacle Avoidance (Diff Drive)
-# Raspberry Pi Python Code
+# FOOTPRINT-AWARE LiDAR NAVIGATION
+# Raspberry Pi Obstacle Avoidance
 #
-# 특징
-# - 전방 180도만 사용 (0~90, 270~360)
-# - 로봇 크기 고려
-# - 안전한 통로 탐색
-# - 가장 좋은 방향 선택
-# - Diff Drive용 v,w 생성
-# - UART로 Arduino 전송
+# 방식:
+# - 전방 180도 LiDAR 사용
+# - Polar Costmap 생성
+# - Obstacle Inflation 적용
+# - 로봇 footprint 고려
+# - 안전한 방향 선택
+# - Diff Drive v,w 생성
+#
+# Raspberry Pi -> Arduino UART
 #
 # 실행:
 # python3 obstacle_avoid.py
@@ -20,7 +22,7 @@ import math
 import time
 
 # =========================================================
-# UART 설정
+# UART
 # =========================================================
 
 SERIAL_PORT = '/dev/serial0'
@@ -29,7 +31,7 @@ BAUDRATE = 115200
 ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1)
 
 # =========================================================
-# LiDAR 설정
+# LiDAR
 # =========================================================
 
 LIDAR_PORT = '/dev/ttyUSB0'
@@ -37,7 +39,7 @@ LIDAR_PORT = '/dev/ttyUSB0'
 lidar = RPLidar(LIDAR_PORT)
 
 # =========================================================
-# 로봇 크기
+# ROBOT FOOTPRINT
 # =========================================================
 
 # 실제 크기:
@@ -45,41 +47,44 @@ lidar = RPLidar(LIDAR_PORT)
 # 좌우 16cm
 # 라이다는 앞에서 2.6cm 뒤
 
-ROBOT_WIDTH = 0.16
-ROBOT_LENGTH = 0.20
+# footprint inflation용 안전 반경
+SAFE_RADIUS = 0.23
 
-# 충돌 반경 (충분히 여유 있게)
-SAFE_RADIUS = 0.24
-
-# 긴급 정지 거리
-EMERGENCY_DIST = 0.16
+# 긴급 거리
+EMERGENCY_DIST = 0.14
 
 # =========================================================
-# 주행 파라미터
+# DRIVING PARAMETER
 # =========================================================
 
-BASE_SPEED = 0.16
-TURN_GAIN = 1.4
+BASE_SPEED = 0.18
 
-MAX_W = 1.2
+MAX_W = 1.3
+
+TURN_GAIN = 1.5
 
 # 탐색 범위
-SEARCH_MIN = -80
-SEARCH_MAX = 80
+SEARCH_MIN = -85
+SEARCH_MAX = 85
 
-SEARCH_STEP = 4
-
-# 방향 주변 검사 각도
-CHECK_SPREAD = 14
+# 방향 부드럽게
+SMOOTHING = 0.75
 
 # =========================================================
-# LiDAR 데이터
+# COSTMAP
 # =========================================================
 
+# -90 ~ +90 사용
+cost_map = [0.0] * 360
+
+# LiDAR raw
 scan_data = [10.0] * 360
 
+# 이전 방향
+prev_angle = 0
+
 # =========================================================
-# 각도 보정
+# ANGLE
 # =========================================================
 
 def normalize_angle(angle):
@@ -93,7 +98,7 @@ def normalize_angle(angle):
     return int(angle)
 
 # =========================================================
-# 전방 시야인지 검사
+# FRONT FOV
 # =========================================================
 
 def is_front_angle(angle):
@@ -103,93 +108,174 @@ def is_front_angle(angle):
     return (0 <= angle <= 90) or (270 <= angle <= 359)
 
 # =========================================================
-# 안전 방향 검사
+# COSTMAP RESET
 # =========================================================
 
-def is_safe_direction(center_angle):
+def clear_costmap():
 
-    for a in range(center_angle - CHECK_SPREAD,
-                   center_angle + CHECK_SPREAD + 1):
+    global cost_map
+
+    for i in range(360):
+        cost_map[i] = 0.0
+
+# =========================================================
+# INFLATION
+# =========================================================
+
+def inflate_obstacle(angle, dist):
+
+    global cost_map
+
+    # 너무 가까우면 전체 차단
+    if dist < 0.05:
+
+        for a in range(-90, 91):
+
+            idx = normalize_angle(a)
+
+            cost_map[idx] += 999
+
+        return
+
+    # obstacle inflation angle
+    spread = math.degrees(
+        math.atan(SAFE_RADIUS / dist)
+    )
+
+    spread = int(spread)
+
+    # obstacle cost 증가
+    for a in range(angle - spread,
+                   angle + spread + 1):
 
         idx = normalize_angle(a)
 
-        # 전방 시야만 사용
         if not is_front_angle(idx):
             continue
 
-        dist = scan_data[idx]
+        # 가까울수록 cost 증가
+        cost = (1.0 / max(dist, 0.05)) * 8.0
 
-        if dist < SAFE_RADIUS:
-            return False
+        # 중심부 가중치
+        center_weight = (
+            1.0 -
+            abs(a - angle) / max(spread, 1)
+        )
 
-    return True
+        cost *= (1.0 + center_weight)
 
-# =========================================================
-# 방향 점수 계산
-# =========================================================
-
-def direction_score(angle):
-
-    idx = normalize_angle(angle)
-
-    front_dist = scan_data[idx]
-
-    # 직진 우선 + 먼 거리 우선
-    score = (
-        front_dist * 1.5
-        - abs(angle) * 0.03
-    )
-
-    return score
+        cost_map[idx] += cost
 
 # =========================================================
-# 최적 방향 탐색
+# BUILD COSTMAP
+# =========================================================
+
+def build_costmap():
+
+    clear_costmap()
+
+    for angle in range(360):
+
+        if not is_front_angle(angle):
+            continue
+
+        dist = scan_data[angle]
+
+        # ignore invalid
+        if dist < 0.03:
+            continue
+
+        if dist > 4.0:
+            continue
+
+        inflate_obstacle(angle, dist)
+
+# =========================================================
+# FIND BEST DIRECTION
 # =========================================================
 
 def find_best_direction():
 
+    global prev_angle
+
     best_angle = None
-    best_score = -999
+    best_score = -999999
 
     for angle in range(SEARCH_MIN,
-                       SEARCH_MAX + 1,
-                       SEARCH_STEP):
+                       SEARCH_MAX + 1):
 
-        if not is_safe_direction(angle):
+        idx = normalize_angle(angle)
+
+        if not is_front_angle(idx):
             continue
 
-        score = direction_score(angle)
+        # cost
+        cost = cost_map[idx]
+
+        # 거리 bonus
+        front_dist = scan_data[idx]
+
+        # 직진 선호
+        straight_bonus = abs(angle) * 0.05
+
+        # 최종 score
+        score = (
+            front_dist * 5.0
+            - cost * 2.5
+            - straight_bonus
+        )
 
         if score > best_score:
 
             best_score = score
             best_angle = angle
 
+    # smoothing
+    best_angle = (
+        prev_angle * SMOOTHING
+        + best_angle * (1.0 - SMOOTHING)
+    )
+
+    prev_angle = best_angle
+
     return best_angle
 
 # =========================================================
-# v,w 생성
+# COMPUTE CMD
 # =========================================================
 
-def compute_cmd(best_angle):
+def compute_cmd(angle):
 
-    # 회전량 생성
-    w = math.radians(best_angle) * TURN_GAIN
+    # 회전량
+    w = math.radians(angle) * TURN_GAIN
 
-    # 제한
+    # limit
     w = max(min(w, MAX_W), -MAX_W)
 
-    # 회전 클수록 감속
-    speed_scale = 1.0 - (abs(best_angle) / 100.0)
+    # 회전 많으면 감속
+    speed_scale = (
+        1.0 -
+        min(abs(angle) / 90.0, 0.7)
+    )
 
-    speed_scale = max(speed_scale, 0.45)
+    # 정면 거리 기반 감속
+    front_idx = normalize_angle(0)
+
+    front_dist = scan_data[front_idx]
+
+    obstacle_scale = min(front_dist / 0.8, 1.0)
+
+    speed_scale *= obstacle_scale
+
+    # 최소 속도
+    speed_scale = max(speed_scale, 0.35)
 
     v = BASE_SPEED * speed_scale
 
     return v, w
 
 # =========================================================
-# UART 전송
+# UART SEND
 # =========================================================
 
 def send_cmd(v, w):
@@ -199,7 +285,7 @@ def send_cmd(v, w):
     ser.write(msg.encode())
 
 # =========================================================
-# 정지
+# STOP
 # =========================================================
 
 def stop_robot():
@@ -207,63 +293,62 @@ def stop_robot():
     send_cmd(0.0, 0.0)
 
 # =========================================================
-# 긴급 회피
+# EMERGENCY ESCAPE
 # =========================================================
 
 def emergency_escape():
 
-    print("EMERGENCY ESCAPE")
+    print("EMERGENCY")
 
-    # 살짝 후진
+    # 후진
     send_cmd(-0.05, 0.0)
-    time.sleep(0.15)
+    time.sleep(0.18)
 
-    # 랜덤성 대신 항상 강한 좌회전
-    send_cmd(0.03, 1.1)
+    # 강회전
+    send_cmd(0.02, 1.2)
     time.sleep(0.45)
 
 # =========================================================
-# 메인
+# MAIN
 # =========================================================
 
-print("===================================")
-print(" LiDAR Obstacle Avoidance START ")
-print("===================================")
+print("====================================")
+print(" FOOTPRINT NAVIGATION START ")
+print("====================================")
 
 try:
 
     for scan in lidar.iter_scans():
 
         # -------------------------------------------------
-        # LiDAR 업데이트
+        # UPDATE SCAN
         # -------------------------------------------------
 
         for (_, angle, distance) in scan:
 
             angle = int(angle)
 
-            # 전방 180도만 사용
             if not is_front_angle(angle):
                 continue
 
-            dist_m = distance / 1000.0
+            dist = distance / 1000.0
 
-            # 이상값 제거
-            if dist_m <= 0.03:
+            # filtering
+            if dist < 0.03:
                 continue
 
-            if dist_m >= 6.0:
+            if dist > 6.0:
                 continue
 
-            scan_data[angle] = dist_m
+            scan_data[angle] = dist
 
         # -------------------------------------------------
-        # 정면 최소 거리
+        # FRONT MIN
         # -------------------------------------------------
 
         front_min = 10.0
 
-        for a in range(-12, 13):
+        for a in range(-10, 11):
 
             idx = normalize_angle(a)
 
@@ -273,7 +358,7 @@ try:
                 front_min = d
 
         # -------------------------------------------------
-        # 긴급 회피
+        # EMERGENCY
         # -------------------------------------------------
 
         if front_min < EMERGENCY_DIST:
@@ -282,43 +367,43 @@ try:
             continue
 
         # -------------------------------------------------
-        # 최적 방향 탐색
+        # BUILD COSTMAP
+        # -------------------------------------------------
+
+        build_costmap()
+
+        # -------------------------------------------------
+        # FIND DIRECTION
         # -------------------------------------------------
 
         best_angle = find_best_direction()
 
-        # -------------------------------------------------
-        # 갈 곳 없음
-        # -------------------------------------------------
-
+        # fail-safe
         if best_angle is None:
 
-            print("NO PATH")
-
-            # 제자리 회전 탐색
             send_cmd(0.0, 1.0)
-            time.sleep(0.25)
+            time.sleep(0.3)
 
             continue
 
         # -------------------------------------------------
-        # v,w 생성
+        # CMD
         # -------------------------------------------------
 
         v, w = compute_cmd(best_angle)
 
         # -------------------------------------------------
-        # UART 전송
+        # SEND
         # -------------------------------------------------
 
         send_cmd(v, w)
 
         # -------------------------------------------------
-        # 디버그 출력
+        # DEBUG
         # -------------------------------------------------
 
         print(
-            f"DIR:{best_angle:4d} | "
+            f"DIR:{best_angle:6.1f} | "
             f"v:{v:.2f} | "
             f"w:{w:.2f} | "
             f"front:{front_min:.2f}"
