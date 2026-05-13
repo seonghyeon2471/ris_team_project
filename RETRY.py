@@ -37,11 +37,11 @@ lidar_ser.write(bytes([0xA5, 0x20]))
 print("LIDAR START")
 
 # =========================================
-# ROBOT SIZE
+# ROBOT
 # =========================================
 
-ROBOT_LENGTH = 0.20
 ROBOT_WIDTH = 0.15
+ROBOT_LENGTH = 0.20
 
 LIDAR_OFFSET = 0.015
 
@@ -49,21 +49,19 @@ LIDAR_OFFSET = 0.015
 # PARAMETERS
 # =========================================
 
-SAFE_RADIUS = 0.05
+BASE_SPEED = 0.17
 
-BASE_SPEED = 0.18
+MIN_SPEED = 0.05
 
-MAX_W = 1.8
+MAX_W = 1.6
 
-TURN_GAIN = 2.0
+TURN_GAIN = 1.9
 
-SEARCH_MIN = -85
-SEARCH_MAX = 85
+FRONT_DANGER = 0.28
 
-SMOOTHING = 0.65
+FRONT_CRITICAL = 0.16
 
-# 최소 통과 공간
-GAP_THRESHOLD = 0.11
+SMOOTHING = 0.7
 
 # =========================================
 # MAP
@@ -71,7 +69,7 @@ GAP_THRESHOLD = 0.11
 
 scan_data = [3.0] * 360
 
-prev_angle = 0
+prev_w = 0.0
 
 # =========================================
 # FUNCTIONS
@@ -79,24 +77,18 @@ prev_angle = 0
 
 def normalize_angle(angle):
 
-    while angle < 0:
-        angle += 360
-
-    while angle >= 360:
-        angle -= 360
-
-    return int(angle)
+    return int(angle % 360)
 
 # =========================================
 
-def is_front_angle(angle):
+def is_front(angle):
 
     angle = normalize_angle(angle)
 
     return (
-        0 <= angle <= 90
+        angle <= 90
         or
-        270 <= angle <= 359
+        angle >= 270
     )
 
 # =========================================
@@ -109,99 +101,131 @@ def get_distance(angle):
 
 # =========================================
 
-def find_best_direction():
+def average_distance(start, end):
 
-    global prev_angle
+    values = []
 
-    best_angle = 0
+    for a in range(start, end + 1):
 
-    best_score = -999999
+        d = get_distance(a)
 
-    # 전방 탐색
-    for angle in range(
-        SEARCH_MIN,
-        SEARCH_MAX + 1
-    ):
+        if 0.03 < d < 3.0:
+            values.append(d)
 
-        dist = get_distance(angle)
+    if len(values) == 0:
+        return 0.03
 
-        # 라이다 위치 보정
-        dist -= LIDAR_OFFSET
-
-        if dist < GAP_THRESHOLD:
-            continue
-
-        # 직진 선호
-        straight_weight = (
-            1.0 -
-            abs(angle) / 100.0
-        )
-
-        # 거리 기반 점수
-        score = (
-            dist * 5.0
-            +
-            straight_weight * 1.5
-        )
-
-        # 가장 좋은 방향 선택
-        if score > best_score:
-
-            best_score = score
-
-            best_angle = angle
-
-    # 방향 smoothing
-    best_angle = (
-        prev_angle * SMOOTHING
-        +
-        best_angle * (1.0 - SMOOTHING)
-    )
-
-    prev_angle = best_angle
-
-    return best_angle
+    return sum(values) / len(values)
 
 # =========================================
 
-def compute_cmd(angle):
+def compute_control():
 
-    # 회전 계산
-    w = math.radians(angle) * TURN_GAIN
+    global prev_w
+
+    # =====================================
+    # 영역별 거리 계산
+    # =====================================
+
+    front = average_distance(-15, 15)
+
+    left = average_distance(35, 90)
+
+    right = average_distance(-90, -35)
+
+    left_front = average_distance(10, 40)
+
+    right_front = average_distance(-40, -10)
+
+    # =====================================
+    # 중앙 유지 steering
+    # =====================================
+
+    error = left - right
+
+    w = error * TURN_GAIN
+
+    # =====================================
+    # 전방 장애물 회피 강화
+    # =====================================
+
+    if front < FRONT_DANGER:
+
+        avoid = (
+            left_front
+            -
+            right_front
+        )
+
+        w += avoid * 3.2
+
+    # =====================================
+    # 매우 가까우면 강회전
+    # =====================================
+
+    if front < FRONT_CRITICAL:
+
+        if left > right:
+
+            w += 1.2
+
+        else:
+
+            w -= 1.2
+
+    # =====================================
+    # smoothing
+    # =====================================
+
+    w = (
+        prev_w * SMOOTHING
+        +
+        w * (1.0 - SMOOTHING)
+    )
+
+    prev_w = w
+
+    # =====================================
+    # 회전 제한
+    # =====================================
 
     w = max(
         min(w, MAX_W),
         -MAX_W
     )
 
-    # 회전 많을수록 감속
+    # =====================================
+    # 속도 계산
+    # =====================================
+
     turn_scale = (
         1.0 -
-        min(abs(angle) / 90.0, 0.65)
+        min(abs(w) / MAX_W, 0.75)
     )
 
-    # 전방 거리 기반 감속
-    front_dist = get_distance(0)
-
-    obstacle_scale = min(
-        front_dist / 0.7,
+    front_scale = min(
+        front / 0.8,
         1.0
     )
 
     speed_scale = (
         turn_scale *
-        obstacle_scale
+        front_scale
     )
 
-    # 절대 멈추지 않게 최소 속도 유지
     speed_scale = max(
         speed_scale,
-        0.45
+        0.35
     )
 
     v = BASE_SPEED * speed_scale
 
-    return v, w
+    # 매우 가까우면 저속 회전
+    if front < FRONT_CRITICAL:
+
+        v = MIN_SPEED
+
+    return v, w, front
 
 # =========================================
 
@@ -209,9 +233,7 @@ def send_cmd(v, w):
 
     msg = f"{v:.3f},{w:.3f}\n"
 
-    motor_ser.write(
-        msg.encode()
-    )
+    motor_ser.write(msg.encode())
 
 # =========================================
 
@@ -224,7 +246,7 @@ def stop_robot():
 # =========================================
 
 print("================================")
-print(" FTG START ")
+print(" SMOOTH NAVIGATION START ")
 print("================================")
 
 try:
@@ -263,7 +285,8 @@ try:
 
         angle = int(angle_q6 / 64.0)
 
-        if not is_front_angle(angle):
+        # 전방 180도만 사용
+        if not is_front(angle):
             continue
 
         distance_q2 = (
@@ -282,23 +305,18 @@ try:
         if dist > 3.0:
             continue
 
-        # 라이다 저장
         scan_data[angle] = dist
 
-        # 방향 탐색
-        best_angle = find_best_direction()
+        # 제어 계산
+        v, w, front = compute_control()
 
-        # 속도 계산
-        v, w = compute_cmd(best_angle)
-
-        # 전송
+        # 모터 전송
         send_cmd(v, w)
 
         print(
-            f"DIR:{best_angle:6.1f} | "
             f"v:{v:.2f} | "
             f"w:{w:.2f} | "
-            f"front:{scan_data[0]:.2f}"
+            f"front:{front:.2f}"
         )
 
 except KeyboardInterrupt:
