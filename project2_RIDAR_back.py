@@ -44,21 +44,33 @@ lidar_ser.read(7)
 print("LIDAR START")
 
 # =========================================
+# ROBOT PARAMETER
+# =========================================
+
+# 로봇 크기
+# 앞뒤 20cm
+# 좌우 16cm
+# LiDAR는 앞에서 2.5cm 뒤
+
+FRONT_OFFSET = 0.025
+SIDE_HALF = 0.08
+
+# =========================================
 # PARAMETERS
 # =========================================
 
-SAFE_RADIUS = 0.10      # 장애물 주변 여유거리
-EMERGENCY_DIST = 0.7     # 충돌 직전 거리
-DEAD_END_DIST = 0.15      # 전방/좌/우 모두 이 거리 이하면 막다른 길
+EMERGENCY_DIST = 0.08
+DEAD_END_DIST = 0.18
 
 BASE_SPEED = 0.18
-MAX_W = 1.3
-TURN_GAIN = 1.5
+
+MAX_W = 1.2
+TURN_GAIN = 1.4
 
 SEARCH_MIN = -85
 SEARCH_MAX = 85
 
-SMOOTHING = 0.75
+SMOOTHING = 0.72
 
 # =========================================
 # MEMORY
@@ -91,6 +103,8 @@ def normalize_angle(angle):
 
     return int(angle)
 
+# =========================================
+
 def is_front_angle(angle):
 
     angle = normalize_angle(angle)
@@ -100,6 +114,35 @@ def is_front_angle(angle):
         or
         (270 <= angle <= 359)
     )
+
+# =========================================
+
+def get_robot_radius(angle):
+
+    angle = normalize_angle(angle)
+
+    if angle > 180:
+        angle -= 360
+
+    a = abs(angle)
+
+    # =========================
+    # FRONT
+    # =========================
+    if a <= 20:
+        return 0.03
+
+    # =========================
+    # FRONT DIAGONAL
+    # =========================
+    elif a <= 55:
+        return 0.06
+
+    # =========================
+    # SIDE
+    # =========================
+    else:
+        return 0.08
 
 # =========================================
 
@@ -116,17 +159,21 @@ def inflate_obstacle(angle, dist):
 
     global cost_map
 
-    if dist < 0.05:
+    robot_radius = get_robot_radius(angle)
+
+    # 매우 가까우면 전방 전체 위험 처리
+    if dist < robot_radius:
 
         for a in range(-90, 91):
 
             idx = normalize_angle(a)
+
             cost_map[idx] += 999
 
         return
 
     spread = math.degrees(
-        math.atan(SAFE_RADIUS / dist)
+        math.atan(robot_radius / dist)
     )
 
     spread = int(spread)
@@ -144,7 +191,7 @@ def inflate_obstacle(angle, dist):
         cost = (
             1.0 /
             max(dist, 0.05)
-        ) * 8.0
+        ) * 10.0
 
         center_weight = (
             1.0 -
@@ -191,7 +238,7 @@ def find_best_direction():
         SEARCH_MAX + 1
     ):
 
-        # 뒤쪽 방향 금지
+        # 뒤쪽 금지
         if abs(angle) > 80:
             continue
 
@@ -205,12 +252,12 @@ def find_best_direction():
         front_dist = scan_data[idx]
 
         straight_penalty = (
-            abs(angle) * 0.05
+            abs(angle) * 0.06
         )
 
         score = (
             front_dist * 5.0
-            - cost * 2.5
+            - cost * 2.8
             - straight_penalty
         )
 
@@ -222,6 +269,7 @@ def find_best_direction():
     if best_angle is None:
         return None
 
+    # steering smoothing
     best_angle = (
         prev_angle * SMOOTHING
         +
@@ -243,14 +291,16 @@ def compute_cmd(angle):
         -MAX_W
     )
 
+    # 회전 클수록 감속
     speed_scale = (
         1.0 -
-        min(abs(angle) / 90.0, 0.7)
+        min(abs(angle) / 90.0, 0.75)
     )
 
+    # 정면 최소 거리
     front_dist = min(
         scan_data[normalize_angle(a)]
-        for a in range(-5, 6)
+        for a in range(-8, 9)
     )
 
     obstacle_scale = min(
@@ -262,7 +312,7 @@ def compute_cmd(angle):
 
     speed_scale = max(
         speed_scale,
-        0.35
+        0.30
     )
 
     v = BASE_SPEED * speed_scale
@@ -301,11 +351,11 @@ def emergency_escape():
 
     print("EMERGENCY")
 
-    send_cmd(-0.05, 0.0)
+    send_cmd(-0.06, 0.0)
 
-    time.sleep(0.18)
+    time.sleep(0.25)
 
-    send_cmd(0.02, 1.2)
+    send_cmd(0.02, 1.1)
 
     time.sleep(0.45)
 
@@ -315,7 +365,7 @@ def is_dead_end():
 
     front = min(
         scan_data[normalize_angle(a)]
-        for a in range(-15, 16)
+        for a in range(-18, 19)
     )
 
     left = min(
@@ -381,14 +431,14 @@ def backtrack():
 
     time.sleep(0.3)
 
-    # 다른 방향 탐색용 회전
+    # 새 방향 탐색
     send_cmd(
         0.0,
         1.0,
         record=False
     )
 
-    time.sleep(0.8)
+    time.sleep(0.7)
 
     stop_robot()
 
@@ -442,7 +492,7 @@ try:
 
         angle = angle_q6 / 64.0
         angle = int(angle)
-        
+
         if angle < 0 or angle >= 360:
             continue
 
@@ -466,8 +516,8 @@ try:
 
         scan_data[angle] = dist
 
-        # 한 바퀴 완료 시에만 계산
-        if s_flag == 1 and angle < 5:
+        # 한 바퀴 완료 시 계산
+        if s_flag == 1:
 
             build_costmap()
 
@@ -475,21 +525,14 @@ try:
             # FRONT CHECK
             # =========================
 
-            front_min = 10.0
+            front_min = min(
+                scan_data[normalize_angle(a)]
+                for a in range(-10, 11)
+            )
 
-            for a in range(-10, 11):
-
-                idx = normalize_angle(a)
-
-                d = scan_data[idx]
-
-                if d < front_min:
-                    front_min = d
-
-
-            # =================================
+            # =========================
             # EMERGENCY
-            # =================================
+            # =========================
 
             if front_min < EMERGENCY_DIST:
 
@@ -497,9 +540,9 @@ try:
 
                 continue
 
-            # =================================
+            # =========================
             # DEAD END
-            # =================================
+            # =========================
 
             if is_dead_end():
 
@@ -509,9 +552,9 @@ try:
 
                 continue
 
-            # =================================
+            # =========================
             # NAVIGATION
-            # =================================
+            # =========================
 
             best_angle = find_best_direction()
 
@@ -519,7 +562,7 @@ try:
 
                 send_cmd(0.0, 1.0)
 
-                time.sleep(0.25)
+                time.sleep(0.2)
 
                 continue
 
