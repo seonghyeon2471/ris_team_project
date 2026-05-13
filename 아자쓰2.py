@@ -270,9 +270,9 @@ def compute_cmd(target_angle):
     steering_ratio = min(abs(target_angle) / 90.0, 1.0)
     speed          = MAX_SPEED * (1.0 - steering_ratio * 0.75)
 
-    # 전방 장애물 기반 추가 감속 (기준: 90cm)
+    # 전방 장애물 기반 추가 감속 (기준: 40cm)
     front_min      = float(np.min(scan_data[np.arange(-10, 11) % 360]))
-    obstacle_scale = min(front_min / 90.0, 1.0)
+    obstacle_scale = min(front_min / 40.0, 1.0)
     speed         *= obstacle_scale
     speed          = max(speed, MIN_SPEED)
 
