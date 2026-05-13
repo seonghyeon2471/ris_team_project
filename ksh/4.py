@@ -155,19 +155,19 @@ def compute_grp(scan):
 
     v = speed_control(scan)
 
-    # =========================
-    # CASE 1: gap 있음
-    # =========================
     if gaps:
 
         gap_angle = select_gap(gaps)
-        ref_angle = 0.0
 
-        theta = ALPHA * ref_angle + (1 - ALPHA) * gap_angle
+        theta = ALPHA * 0 + (1 - ALPHA) * gap_angle
 
-        w = np.radians(theta * TURN_GAIN)
+        # 🔥 핵심 수정
+        w = np.clip(theta * 0.03, -1.2, 1.2)
 
         return v, w
+
+    # fallback
+    return 0.03, 0.8
 
     # =========================
     # CASE 2: gap 없음 (fallback)
