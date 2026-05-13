@@ -33,8 +33,13 @@ lidar_ser = serial.Serial(
 lidar_ser.write(bytes([0xA5, 0x40]))
 time.sleep(2)
 
+lidar_ser.reset_input_buffer()
+
 # SCAN START
 lidar_ser.write(bytes([0xA5, 0x20]))
+
+# descriptor 제거
+lidar_ser.read(7)
 
 print("LIDAR START")
 
@@ -243,7 +248,10 @@ def compute_cmd(angle):
         min(abs(angle) / 90.0, 0.7)
     )
 
-    front_dist = scan_data[0]
+    front_dist = min(
+        scan_data[normalize_angle(a)]
+        for a in range(-5, 6)
+    )
 
     obstacle_scale = min(
         front_dist / 0.8,
@@ -423,7 +431,7 @@ try:
 
         quality = data[0] >> 2
 
-        if quality < 10:
+        if quality < 3:
             continue
 
         angle_q6 = (
@@ -434,8 +442,8 @@ try:
 
         angle = angle_q6 / 64.0
         angle = int(angle)
-
-        if not is_front_angle(angle):
+        
+        if angle < 0 or angle >= 360:
             continue
 
         distance_q2 = (
@@ -458,69 +466,73 @@ try:
 
         scan_data[angle] = dist
 
-        build_costmap()
+        # 한 바퀴 완료 시에만 계산
+        if s_flag == 1 and angle < 5:
 
-        # =================================
-        # FRONT CHECK
-        # =================================
+            build_costmap()
 
-        front_min = 10.0
+            # =========================
+            # FRONT CHECK
+            # =========================
 
-        for a in range(-10, 11):
+            front_min = 10.0
 
-            idx = normalize_angle(a)
+            for a in range(-10, 11):
 
-            d = scan_data[idx]
+                idx = normalize_angle(a)
 
-            if d < front_min:
-                front_min = d
+                d = scan_data[idx]
 
-        # =================================
-        # EMERGENCY
-        # =================================
+                if d < front_min:
+                    front_min = d
 
-        if front_min < EMERGENCY_DIST:
 
-            emergency_escape()
+            # =================================
+            # EMERGENCY
+            # =================================
 
-            continue
+            if front_min < EMERGENCY_DIST:
 
-        # =================================
-        # DEAD END
-        # =================================
+                emergency_escape()
 
-        if is_dead_end():
+                continue
 
-            print("DEAD END")
+            # =================================
+            # DEAD END
+            # =================================
 
-            backtrack()
+            if is_dead_end():
 
-            continue
+                print("DEAD END")
 
-        # =================================
-        # NAVIGATION
-        # =================================
+                backtrack()
 
-        best_angle = find_best_direction()
+                continue
 
-        if best_angle is None:
+            # =================================
+            # NAVIGATION
+            # =================================
 
-            send_cmd(0.0, 1.0)
+            best_angle = find_best_direction()
 
-            time.sleep(0.25)
+            if best_angle is None:
 
-            continue
+                send_cmd(0.0, 1.0)
 
-        v, w = compute_cmd(best_angle)
+                time.sleep(0.25)
 
-        send_cmd(v, w)
+                continue
 
-        print(
-            f"DIR:{best_angle:6.1f} | "
-            f"v:{v:.2f} | "
-            f"w:{w:.2f} | "
-            f"front:{front_min:.2f}"
-        )
+            v, w = compute_cmd(best_angle)
+
+            send_cmd(v, w)
+
+            print(
+                f"DIR:{best_angle:6.1f} | "
+                f"v:{v:.2f} | "
+                f"w:{w:.2f} | "
+                f"front:{front_min:.2f}"
+            )
 
 # =========================================
 
