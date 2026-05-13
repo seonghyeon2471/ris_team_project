@@ -1,106 +1,143 @@
 import serial
-import time
 import math
-from rplidar import RPLidar
+import time
+from collections import deque
 
 # =========================
-# PORT
+# SERIAL SETUP
 # =========================
-LIDAR_PORT = "/dev/ttyUSB0"
 MOTOR_PORT = "/dev/serial0"
-BAUD = 115200
+MOTOR_BAUD = 115200
 
-lidar = RPLidar(LIDAR_PORT)
-motor_ser = serial.Serial(MOTOR_PORT, BAUD, timeout=1)
+LIDAR_PORT = "/dev/ttyUSB0"
+LIDAR_BAUD = 460800
+
+motor_ser = serial.Serial(MOTOR_PORT, MOTOR_BAUD, timeout=1)
+lidar_ser = serial.Serial(LIDAR_PORT, LIDAR_BAUD, timeout=1)
 
 # =========================
-# BASE SPEED
+# ROBOT PARAMETER
 # =========================
 BASE_RPM = 80
+MAX_BOOST = 60
 
-# steering sensitivity
-K = 0.8
-
-# obstacle influence range
-MAX_DIST = 2000  # mm
-MIN_DIST = 150    # 너무 가까우면 강하게 반응
+ANGLE_FRONT = 30  # 앞쪽 기준 ±30도만 사용
 
 # =========================
-def weight(dist):
-    """가까울수록 영향 크게"""
-    if dist < 1:
-        return 0
-    if dist > MAX_DIST:
-        return 0
-    return (MAX_DIST - dist) / MAX_DIST
-
+# UTIL
 # =========================
-def compute_steering(scan):
+def send_motor(left_rpm, right_rpm):
     """
-    좌/우 장애물 비대 차이 계산
+    아두이노로 UART 전송 (예: L100R120)
     """
+    cmd = f"L{int(left_rpm)}R{int(right_rpm)}\n"
+    motor_ser.write(cmd.encode())
 
+
+def parse_lidar_frame(frame):
+    """
+    ⚠️ RP LiDAR raw frame parser (간단 버전 placeholder)
+    실제 과제 코드에 맞게 SDK 쓰는 경우 이 부분만 교체하면 됨
+    """
+    # 여기서는 가정: (angle, distance)
+    # 실제 구현에서는 rplidar SDK or packet parsing 필요
+    return []
+
+
+def get_obstacle_segments(points, threshold=800):
+    """
+    장애물 구간 추출:
+    - distance < threshold 인 구간을 angle segment로 묶음
+    """
+    segments = []
+
+    start = None
+
+    for angle, dist in points:
+        if dist < threshold:
+            if start is None:
+                start = angle
+        else:
+            if start is not None:
+                segments.append((start, angle))
+                start = None
+
+    if start is not None:
+        segments.append((start, 360))
+
+    return segments
+
+
+def compute_weight(segments):
+    """
+    좌/우 영향도 계산
+    """
     left = 0
     right = 0
 
-    for angle, dist in scan:
-        if dist == 0:
-            continue
+    for s, e in segments:
+        width = abs(e - s)
 
-        w = weight(dist)
+        mid = (s + e) / 2
 
-        # 오른쪽 (0~180)
-        if 0 <= angle < 180:
-            right += w
+        # normalize angle
+        if 0 <= mid <= 180:
+            right += width
         else:
-            left += w
+            left += width
 
     return left, right
 
-# =========================
-def safe_mode(left, right):
-    """
-    너무 가까우면 급회전 강화
-    """
-    return (right - left)
+
+def clamp(x, min_v, max_v):
+    return max(min_v, min(max_v, x))
+
 
 # =========================
-def send_rpm(left_rpm, right_rpm):
-    cmd = f"{int(left_rpm)},{int(right_rpm)}\n"
-    motor_ser.write(cmd.encode())
-
+# CONTROL LOOP
 # =========================
-try:
-    print("LiDAR steering started")
+print("start control...")
 
-    for scan in lidar.iter_scans():
+while True:
 
-        data = [(angle, dist) for _, angle, dist in scan]
+    # 1. LiDAR read (placeholder)
+    raw_points = parse_lidar_frame(lidar_ser.read(1024))
 
-        left_score, right_score = compute_steering(data)
+    # 없으면 직진
+    if len(raw_points) == 0:
+        send_motor(BASE_RPM, BASE_RPM)
+        continue
 
-        # =========================
-        # steering logic
-        # =========================
-        turn = safe_mode(left_score, right_score)
+    # 2. 장애물 구간 추출
+    segments = get_obstacle_segments(raw_points)
 
-        left_rpm = BASE_RPM - K * turn
-        right_rpm = BASE_RPM + K * turn
+    # 3. 좌/우 영향도
+    left_w, right_w = compute_weight(segments)
 
-        # =========================
-        # clamp
-        # =========================
-        left_rpm = max(0, min(150, left_rpm))
-        right_rpm = max(0, min(150, right_rpm))
+    # 4. 방향 결정 (핵심)
+    diff = right_w - left_w
 
-        send_rpm(left_rpm, right_rpm)
+    # scaling
+    boost = clamp(abs(diff) * 0.5, 0, MAX_BOOST)
 
-        print(f"L:{left_rpm:.1f} R:{right_rpm:.1f} | L:{left_score:.2f} R:{right_score:.2f}")
+    left_rpm = BASE_RPM
+    right_rpm = BASE_RPM
 
-except KeyboardInterrupt:
-    print("Stopping")
+    # 오른쪽 장애물이 많다 → 왼쪽으로 회전 (right speed 증가)
+    if diff > 0:
+        right_rpm += boost
+        left_rpm -= boost * 0.3
 
-finally:
-    lidar.stop()
-    lidar.disconnect()
-    motor_ser.close()
+    # 왼쪽 장애물이 많다 → 오른쪽 회전
+    elif diff < 0:
+        left_rpm += boost
+        right_rpm -= boost * 0.3
+
+    # clamp
+    left_rpm = clamp(left_rpm, 0, 200)
+    right_rpm = clamp(right_rpm, 0, 200)
+
+    # 5. motor send
+    send_motor(left_rpm, right_rpm)
+
+    time.sleep(0.03)
