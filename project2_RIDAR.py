@@ -244,7 +244,7 @@ try:
             continue
 
         distance_q2 = data[3] | (data[4] << 8)
-        dist = (distance_q2 / 4.0) / 1000.0
+        dist = ((distance_q2 / 4.0) / 1000.0)*0.2
 
         if dist < 0.03 or dist > 6.0:
             continue
