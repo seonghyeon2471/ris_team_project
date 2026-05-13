@@ -47,9 +47,9 @@ print("LIDAR START")
 # PARAMETERS
 # =========================================
 
-SAFE_RADIUS = 0.05      # 장애물 주변 여유거리
-EMERGENCY_DIST = 0.03     # 충돌 직전 거리
-DEAD_END_DIST = 0.10      # 전방/좌/우 모두 이 거리 이하면 막다른 길
+SAFE_RADIUS = 0.010      # 장애물 주변 여유거리
+EMERGENCY_DIST = 0.7     # 충돌 직전 거리
+DEAD_END_DIST = 0.15      # 전방/좌/우 모두 이 거리 이하면 막다른 길
 
 BASE_SPEED = 0.18
 MAX_W = 1.3
