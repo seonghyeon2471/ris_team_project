@@ -28,39 +28,49 @@ lidar_ser = serial.Serial(
 # LIDAR START
 # =========================================
 
+# 라이다 리셋
 lidar_ser.write(bytes([0xA5, 0x40]))
 
 time.sleep(2)
 
+# 스캔 시작
 lidar_ser.write(bytes([0xA5, 0x20]))
 
 print("LIDAR START")
 
 # =========================================
-# ROBOT
+# ROBOT INFO
 # =========================================
 
 ROBOT_WIDTH = 0.15
 ROBOT_LENGTH = 0.20
 
+# 라이다가 전면보다 1.5cm 뒤
 LIDAR_OFFSET = 0.015
 
 # =========================================
 # PARAMETERS
 # =========================================
 
+# 기본 속도
 BASE_SPEED = 0.17
 
+# 최소 속도
 MIN_SPEED = 0.05
 
+# 최대 회전 속도
 MAX_W = 1.6
 
+# 회전 gain
 TURN_GAIN = 1.9
 
+# 정면 위험 거리
 FRONT_DANGER = 0.28
 
+# 매우 가까운 거리
 FRONT_CRITICAL = 0.16
 
+# steering smoothing
 SMOOTHING = 0.7
 
 # =========================================
@@ -77,7 +87,9 @@ prev_w = 0.0
 
 def normalize_angle(angle):
 
-    return int(angle % 360)
+    angle = int(angle)
+
+    return angle % 360
 
 # =========================================
 
@@ -107,7 +119,9 @@ def average_distance(start, end):
 
     for a in range(start, end + 1):
 
-        d = get_distance(a)
+        idx = normalize_angle(a)
+
+        d = scan_data[idx]
 
         if 0.03 < d < 3.0:
             values.append(d)
@@ -124,21 +138,21 @@ def compute_control():
     global prev_w
 
     # =====================================
-    # 영역별 거리 계산
+    # 거리 계산
     # =====================================
 
-    front = average_distance(-15, 15)
+    front = average_distance(-20, 20)
 
-    left = average_distance(35, 90)
+    left = average_distance(30, 90)
 
-    right = average_distance(-90, -35)
+    right = average_distance(-90, -30)
 
     left_front = average_distance(10, 40)
 
     right_front = average_distance(-40, -10)
 
     # =====================================
-    # 중앙 유지 steering
+    # 좌우 균형 기반 steering
     # =====================================
 
     error = left - right
@@ -146,7 +160,7 @@ def compute_control():
     w = error * TURN_GAIN
 
     # =====================================
-    # 전방 장애물 회피 강화
+    # 정면 장애물 회피
     # =====================================
 
     if front < FRONT_DANGER:
@@ -157,10 +171,10 @@ def compute_control():
             right_front
         )
 
-        w += avoid * 3.2
+        w += avoid * 3.0
 
     # =====================================
-    # 매우 가까우면 강회전
+    # 매우 가까우면 강제 회전
     # =====================================
 
     if front < FRONT_CRITICAL:
@@ -213,6 +227,7 @@ def compute_control():
         front_scale
     )
 
+    # 최소 속도 유지
     speed_scale = max(
         speed_scale,
         0.35
@@ -220,7 +235,7 @@ def compute_control():
 
     v = BASE_SPEED * speed_scale
 
-    # 매우 가까우면 저속 회전
+    # 매우 가까우면 거의 제자리 회전
     if front < FRONT_CRITICAL:
 
         v = MIN_SPEED
@@ -233,7 +248,9 @@ def send_cmd(v, w):
 
     msg = f"{v:.3f},{w:.3f}\n"
 
-    motor_ser.write(msg.encode())
+    motor_ser.write(
+        msg.encode()
+    )
 
 # =========================================
 
@@ -253,11 +270,13 @@ try:
 
     while True:
 
+        # 라이다 데이터 읽기
         data = lidar_ser.read(5)
 
         if len(data) != 5:
             continue
 
+        # 데이터 검증
         s_flag = data[0] & 0x01
 
         s_inv_flag = (
@@ -277,18 +296,22 @@ try:
         if quality < 10:
             continue
 
+        # 각도 계산
         angle_q6 = (
             (data[1] >> 1)
             |
             (data[2] << 7)
         )
 
-        angle = int(angle_q6 / 64.0)
+        angle = normalize_angle(
+            angle_q6 / 64.0
+        )
 
         # 전방 180도만 사용
         if not is_front(angle):
             continue
 
+        # 거리 계산
         distance_q2 = (
             data[3]
             |
@@ -299,12 +322,20 @@ try:
 
         dist = distance / 1000.0
 
+        # 노이즈 제거
         if dist < 0.03:
             continue
 
         if dist > 3.0:
             continue
 
+        # 라이다 offset 보정
+        dist -= LIDAR_OFFSET
+
+        if dist < 0.03:
+            continue
+
+        # 데이터 저장
         scan_data[angle] = dist
 
         # 제어 계산
@@ -327,6 +358,7 @@ finally:
 
     stop_robot()
 
+    # 라이다 종료
     lidar_ser.write(
         bytes([0xA5, 0x25])
     )
