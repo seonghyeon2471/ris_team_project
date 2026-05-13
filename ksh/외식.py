@@ -1,252 +1,198 @@
 #!/usr/bin/env python3
-"""
-Stable RP LiDAR Obstacle Avoidance (FIXED VERSION)
-"""
+import os, termios, struct, math, time
 
-import time
-import math
-import serial
-import numpy as np
-from rplidar import RPLidar
+# ── 포트 ──────────────────────────────────────
+LIDAR_PORT   = '/dev/ttyUSB0'
+ARDUINO_PORT = '/dev/ttyUSB1'   # GPIO UART면 /dev/ttyAMA0
 
-# ─────────────────────────────
-# PORT (⚠️ 중요 수정)
-# ─────────────────────────────
-LIDAR_PORT   = "/dev/ttyUSB0"
-ARDUINO_PORT = "/dev/ttyACM0"   # 🔥 반드시 분리 (중요)
-ARDUINO_BAUD = 115200
-
-# ─────────────────────────────
-# ROBOT
-# ─────────────────────────────
+# ── 로봇 치수 (m) ─────────────────────────────
 ROBOT_WIDTH  = 0.16
-ROBOT_LENGTH = 0.20
+LIDAR_OFFSET = 0.075            # 라이다 ~ 로봇 중심
+MIN_GAP      = ROBOT_WIDTH + 0.10
 
-LIDAR_OFFSET = 0.075
-MIN_GAP_WIDTH = ROBOT_WIDTH + 0.10
+# ── 임계값 (m) ────────────────────────────────
+OBS_THRESH   = 0.55
+STOP_DIST    = 0.22
 
-# ─────────────────────────────
-# THRESHOLD
-# ─────────────────────────────
-OBSTACLE_THRESHOLD  = 0.55
-EMERGENCY_STOP_DIST = 0.22
-
-SCAN_HALF_ANGLE = 90
-FRONT_ANGLE = 20
-
-MAX_V = 0.18
-MAX_W = 1.4
-KP_W  = 1.2
+# ── 속도 ──────────────────────────────────────
+MAX_V  = 0.18
+MAX_W  = 1.4
+KP_W   = 1.3
+ANGLE_OFFSET = 0                # 라이다 마운팅 오프셋(도)
 
 
-# ─────────────────────────────
-# UTIL
-# ─────────────────────────────
-def norm_angle(a):
-    a = a % 360
-    if a > 180:
-        a -= 360
-    return a
+def uart_open(port, baud=termios.B115200):
+    fd = os.open(port, os.O_RDWR | os.O_NOCTTY)
+    a = termios.tcgetattr(fd)
+    a[0] = a[1] = a[3] = 0
+    a[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+    a[4] = a[5] = baud
+    a[6][termios.VMIN] = 0
+    a[6][termios.VTIME] = 1
+    termios.tcsetattr(fd, termios.TCSANOW, a)
+    termios.tcflush(fd, termios.TCIOFLUSH)
+    return fd
+
+def uart_read(fd, n):
+    try:    return os.read(fd, n)
+    except: return b''
+
+def uart_write(fd, data):
+    os.write(fd, data)
 
 
-def parse_scan(scan, max_dist=6.0):
+def lidar_reset(fd):
+    uart_write(fd, bytes([0xA5, 0x40]))
+    time.sleep(2.0)
+    termios.tcflush(fd, termios.TCIFLUSH)
 
-    data = {}
+def lidar_start(fd):
+    termios.tcflush(fd, termios.TCIFLUSH)
+    uart_write(fd, bytes([0xA5, 0x20]))
+    buf, t = b'', time.time() + 2.0
+    while len(buf) < 7 and time.time() < t:
+        buf += uart_read(fd, 7 - len(buf))
 
-    if len(scan) < 15:   # 🔥 stronger filter
-        return data
+def lidar_stop(fd):
+    uart_write(fd, bytes([0xA5, 0x25]))
+    time.sleep(0.1)
+    termios.tcflush(fd, termios.TCIFLUSH)
 
-    for _, angle, dist in scan:
+def collect_scan(fd, min_pts=180, timeout=4.0):
+    data, buf, first = {}, bytearray(), True
+    t = time.time() + timeout
 
-        if dist == 0:
-            continue
+    while time.time() < t:
+        chunk = uart_read(fd, 64)
+        if chunk:
+            buf.extend(chunk)
 
-        d = dist / 1000.0
-        if d > max_dist:
-            continue
+        while len(buf) >= 5:
+            b = buf[:5]
+            if (b[0] & 1) == ((b[0] >> 1) & 1):
+                del buf[0]; continue
 
-        a = norm_angle(angle)
-        a = round(a, 1)
+            quality  = b[0] >> 2
+            angle    = ((b[1] >> 1) | (b[2] << 7)) / 64.0
+            dist_m   = (b[3] | (b[4] << 8)) / 4000.0
+            new_scan = bool(b[0] & 1)
+            del buf[:5]
 
-        if a not in data or d < data[a]:
-            data[a] = d
+            if new_scan:
+                if not first and len(data) >= min_pts:
+                    return data
+                first = False
+                data = {}
+
+            if quality == 0 or dist_m == 0 or dist_m > 6.0:
+                continue
+
+            a = (angle + ANGLE_OFFSET) % 360
+            if a > 180: a -= 360
+            k = round(a, 1)
+            if k not in data or dist_m < data[k]:
+                data[k] = dist_m
 
     return data
 
 
-def front_min(scan):
-    vals = [d for a, d in scan.items() if abs(a) <= FRONT_ANGLE]
-    return min(vals) if vals else float("inf")
-
-
-# ─────────────────────────────
-# GAP DETECTION (FIXED)
-# ─────────────────────────────
 def find_gaps(scan):
-
-    angles = sorted([a for a in scan if -SCAN_HALF_ANGLE <= a <= SCAN_HALF_ANGLE])
+    angles = sorted(a for a in scan if -90 <= a <= 90)
     if not angles:
         return []
 
-    free = {a: scan[a] > (OBSTACLE_THRESHOLD + LIDAR_OFFSET) for a in angles}
-
-    gaps = []
-    cur_a, cur_d = [], []
-    in_gap = False
+    gaps, in_gap, ga, gd = [], False, [], []
 
     def flush():
-        if len(cur_a) < 4:
-            return
-
-        span = abs(cur_a[-1] - cur_a[0])
-        avg_d = np.mean(cur_d)
-
-        width = 2 * avg_d * math.sin(math.radians(span / 2))
-
-        if width >= MIN_GAP_WIDTH:
-            gaps.append({
-                "center": np.mean(cur_a),
-                "width": width,
-                "dist": avg_d
-            })
+        if len(ga) < 2: return
+        span  = abs(ga[-1] - ga[0])
+        avg_d = sum(gd) / len(gd)
+        w = 2.0 * avg_d * math.sin(math.radians(span / 2.0))
+        if w >= MIN_GAP:
+            gaps.append({'ca': (ga[0]+ga[-1])/2.0, 'w': w})
 
     for a in angles:
-
-        if free[a]:
-            if not in_gap:
-                in_gap = True
-                cur_a, cur_d = [a], [scan[a]]
-            else:
-                cur_a.append(a)
-                cur_d.append(scan[a])
-
+        free = (scan[a] - LIDAR_OFFSET) > OBS_THRESH
+        if free:
+            if not in_gap: in_gap, ga, gd = True, [a], [scan[a]]
+            else:          ga.append(a); gd.append(scan[a])
         else:
-            if in_gap:
-                flush()
-                in_gap = False
-
-    if in_gap:
-        flush()
-
+            if in_gap: flush(); in_gap, ga, gd = False, [], []
+    if in_gap: flush()
     return gaps
 
+def best_gap(gaps):
+    if not gaps: return None
+    return min(gaps, key=lambda g: abs(g['ca']) - g['w'] * 8.0)
 
-# ─────────────────────────────
-# GAP SELECTION (FIXED)
-# ─────────────────────────────
-def select_gap(gaps):
+def compute(gap, min_lidar):
+    ar = math.radians(gap['ca'])
+    dr = max(0.0, min(1.0,
+        (min_lidar - LIDAR_OFFSET - STOP_DIST) / (OBS_THRESH - STOP_DIST)))
+    v = MAX_V * dr * (1.0 - 0.5 * min(abs(ar)/(math.pi/2), 1.0))
+    w = max(-MAX_W, min(MAX_W, KP_W * ar))
+    return round(v,4), round(w,4)
 
-    if not gaps:
-        return None
+def send(fd, v, w):
+    uart_write(fd, f"{v:.3f},{w:.3f}\n".encode())
 
-    # 🔥 안정 scoring (음수 제거)
-    def score(g):
-        return (g["width"] * 2.0) - abs(g["center"]) * 0.8 + g["dist"] * 0.5
-
-    return max(gaps, key=score)
-
-
-# ─────────────────────────────
-# CONTROL
-# ─────────────────────────────
-def compute_cmd(gap, front_dist):
-
-    ang = math.radians(gap["center"])
-
-    safe_ratio = np.clip(
-        (front_dist - EMERGENCY_STOP_DIST) /
-        (OBSTACLE_THRESHOLD - EMERGENCY_STOP_DIST),
-        0.0, 1.0
-    )
-
-    v = MAX_V * safe_ratio * (1.0 - min(abs(ang) / 1.5, 0.7))
-    w = KP_W * ang
-
-    w = np.clip(w, -MAX_W, MAX_W)
-
-    return v, w
+def front_min(scan):
+    d = [v for a,v in scan.items() if abs(a) <= 20]
+    return min(d) if d else float('inf')
 
 
-def send(ser, v, w):
-    if ser is None:
-        return
-    try:
-        ser.write(f"{v:.3f},{w:.3f}\n".encode())
-    except:
-        pass
-
-
-# ─────────────────────────────
-# MAIN
-# ─────────────────────────────
 def main():
+    print("라이다 장애물 회피 시작")
 
-    print("STABLE NAV FIXED START")
+    ard = uart_open(ARDUINO_PORT)
+    time.sleep(2.0)
+    print(f"아두이노 OK: {ARDUINO_PORT}")
 
-    # Arduino
-    try:
-        arduino = serial.Serial(ARDUINO_PORT, ARDUINO_BAUD, timeout=1)
-        time.sleep(2)
-        print("Arduino OK")
-    except:
-        arduino = None
-        print("Arduino FAIL")
+    lid = uart_open(LIDAR_PORT)
+    lidar_reset(lid)
+    lidar_start(lid)
+    print(f"라이다 OK: {LIDAR_PORT}\n")
 
-    # LiDAR
-    lidar = RPLidar(LIDAR_PORT, baudrate=115200, timeout=3)
-    lidar.start_motor()
-    time.sleep(2)
-
-    print("LiDAR OK")
+    pv, pw, err = 0.0, 0.0, 0
 
     try:
-        for scan in lidar.iter_scans(min_len=5):
+        while True:
+            scan = collect_scan(lid)
 
-            scan = parse_scan(scan)
-            if not scan:
+            if len(scan) < 50:
+                err += 1
+                print(f"[경고] 포인트 부족({len(scan)}) {err}/3")
+                if err >= 3:
+                    lidar_stop(lid); lidar_reset(lid); lidar_start(lid); err = 0
+                continue
+            err = 0
+
+            mfl = front_min(scan)
+            mfr = mfl - LIDAR_OFFSET
+
+            if mfr < STOP_DIST:
+                if pv or pw: send(ard, 0.0, 0.0); pv = pw = 0.0
+                print(f"[긴급정지] {mfr*100:.1f}cm")
                 continue
 
-            front = front_min(scan)
-            robot_front = front - LIDAR_OFFSET
-
-            # EMERGENCY
-            if robot_front < EMERGENCY_STOP_DIST:
-                send(arduino, 0, 0)
-                print("[STOP]", robot_front)
-                continue
-
-            gaps = find_gaps(scan)
-            best = select_gap(gaps)
-
-            if best is None:
-                v, w = 0.0, 0.6
+            g = best_gap(find_gaps(scan))
+            if g is None:
+                v, w = 0.0, MAX_W * 0.55
+                print(f"[탐색회전] 갭없음")
             else:
-                v, w = compute_cmd(best, front)
+                v, w = compute(g, mfl)
+                print(f"전방:{mfr*100:5.1f}cm 갭:{g['ca']:+.1f}° 폭:{g['w']*100:.0f}cm v={v:+.3f} w={w:+.4f}")
 
-            send(arduino, v, w)
+            send(ard, v, w)
+            pv, pw = v, w
 
-            print(f"F:{robot_front*100:5.1f}cm | "
-                  f"G:{best['center'] if best else None} | "
-                  f"v:{v:.2f} w:{w:.2f}")
-
-    except Exception as e:
-        print("ERROR:", e)
-
+    except KeyboardInterrupt:
+        print("\n종료")
     finally:
-        send(arduino, 0, 0)
+        send(ard, 0.0, 0.0)
+        lidar_stop(lid)
+        os.close(lid)
+        os.close(ard)
 
-        try:
-            lidar.stop()
-            lidar.stop_motor()
-            lidar.disconnect()
-        except:
-            pass
-
-        if arduino:
-            arduino.close()
-
-        print("STOPPED")
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
