@@ -1,0 +1,67 @@
+import serial
+import time
+
+# =========================
+# UART (Arduino)
+# =========================
+ARDUINO_PORT = "/dev/serial0"
+ARDUINO_BAUD = 115200
+
+arduino = serial.Serial(
+    ARDUINO_PORT,
+    ARDUINO_BAUD,
+    timeout=1
+)
+
+# =========================
+# LiDAR
+# =========================
+LIDAR_PORT = "/dev/ttyUSB0"
+LIDAR_BAUD = 460800
+
+lidar = serial.Serial(
+    LIDAR_PORT,
+    LIDAR_BAUD,
+    timeout=1
+)
+
+# =========================
+# CONTROL PARAMETER
+# =========================
+v = 0.20   # m/s (직진 속도)
+w = 0.0    # rad/s (회전 없음)
+
+def send_velocity(v, w):
+    msg = f"{v},{w}\n"
+    arduino.write(msg.encode())
+
+print("System Start")
+
+try:
+    while True:
+
+        # =========================
+        # 1. LiDAR 읽기 (확인용)
+        # =========================
+        if lidar.in_waiting > 0:
+            data = lidar.read(lidar.in_waiting)
+            # 아직 파싱 안하고 상태만 유지
+            # print(data)
+
+        # =========================
+        # 2. 직진 명령 계속 전송
+        # =========================
+        send_velocity(v, w)
+
+        print(f"Sending -> v:{v}, w:{w}")
+
+        time.sleep(0.1)
+
+except KeyboardInterrupt:
+    print("STOP")
+
+    # 정지 명령
+    send_velocity(0, 0)
+
+    arduino.close()
+    lidar.close()
