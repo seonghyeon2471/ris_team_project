@@ -1,7 +1,3 @@
-# =========================================
-# 필요한 라이브러리
-# =========================================
-
 import serial
 import math
 import time
@@ -41,37 +37,39 @@ lidar_ser.write(bytes([0xA5, 0x20]))
 print("LIDAR START")
 
 # =========================================
+# ROBOT SIZE
+# =========================================
+
+ROBOT_LENGTH = 0.20
+ROBOT_WIDTH = 0.15
+
+LIDAR_OFFSET = 0.015
+
+# =========================================
 # PARAMETERS
 # =========================================
 
-# 장애물 안전 반경
-SAFE_RADIUS = 0.035
+SAFE_RADIUS = 0.05
 
-# 기본 전진 속도
-BASE_SPEED = 0.15
+BASE_SPEED = 0.18
 
-# 최대 회전 속도
-MAX_W = 1.5
+MAX_W = 1.8
 
-# 회전 민감도
-TURN_GAIN = 1.8
+TURN_GAIN = 2.0
 
-# 탐색 범위
 SEARCH_MIN = -85
 SEARCH_MAX = 85
 
-# 조향 부드럽게
-SMOOTHING = 0.75
+SMOOTHING = 0.65
 
-# 통과 가능 거리
-GAP_THRESHOLD = 0.14
+# 최소 통과 공간
+GAP_THRESHOLD = 0.11
 
 # =========================================
 # MAP
 # =========================================
 
-scan_data = [10.0] * 360
-cost_map = [0.0] * 360
+scan_data = [3.0] * 360
 
 prev_angle = 0
 
@@ -96,77 +94,18 @@ def is_front_angle(angle):
     angle = normalize_angle(angle)
 
     return (
-        (0 <= angle <= 90)
+        0 <= angle <= 90
         or
-        (270 <= angle <= 359)
+        270 <= angle <= 359
     )
 
 # =========================================
 
-def clear_costmap():
+def get_distance(angle):
 
-    global cost_map
+    idx = normalize_angle(angle)
 
-    for i in range(360):
-        cost_map[i] = 0.0
-
-# =========================================
-
-def inflate_obstacle(angle, dist):
-
-    global cost_map
-
-    spread = math.degrees(
-        math.atan(SAFE_RADIUS / dist)
-    )
-
-    spread = int(spread)
-
-    for a in range(
-        angle - spread,
-        angle + spread + 1
-    ):
-
-        idx = normalize_angle(a)
-
-        if not is_front_angle(idx):
-            continue
-
-        cost = (
-            1.0 /
-            max(dist, 0.05)
-        ) * 8.0
-
-        center_weight = (
-            1.0 -
-            abs(a - angle)
-            / max(spread, 1)
-        )
-
-        cost *= (1.0 + center_weight)
-
-        cost_map[idx] += cost
-
-# =========================================
-
-def build_costmap():
-
-    clear_costmap()
-
-    for angle in range(360):
-
-        if not is_front_angle(angle):
-            continue
-
-        dist = scan_data[angle]
-
-        if dist < 0.03:
-            continue
-
-        if dist > 4.0:
-            continue
-
-        inflate_obstacle(angle, dist)
+    return scan_data[idx]
 
 # =========================================
 
@@ -174,42 +113,45 @@ def find_best_direction():
 
     global prev_angle
 
-    best_angle = None
+    best_angle = 0
+
     best_score = -999999
 
+    # 전방 탐색
     for angle in range(
         SEARCH_MIN,
         SEARCH_MAX + 1
     ):
 
-        idx = normalize_angle(angle)
+        dist = get_distance(angle)
 
-        if not is_front_angle(idx):
+        # 라이다 위치 보정
+        dist -= LIDAR_OFFSET
+
+        if dist < GAP_THRESHOLD:
             continue
 
-        cost = cost_map[idx]
-
-        front_dist = scan_data[idx]
-
-        straight_penalty = (
-            abs(angle) * 0.05
+        # 직진 선호
+        straight_weight = (
+            1.0 -
+            abs(angle) / 100.0
         )
 
+        # 거리 기반 점수
         score = (
-            front_dist * 5.0
-            - cost * 2.5
-            - straight_penalty
+            dist * 5.0
+            +
+            straight_weight * 1.5
         )
 
+        # 가장 좋은 방향 선택
         if score > best_score:
 
             best_score = score
+
             best_angle = angle
 
-    if best_angle is None:
-        return None
-
-    # 조향 부드럽게
+    # 방향 smoothing
     best_angle = (
         prev_angle * SMOOTHING
         +
@@ -232,26 +174,29 @@ def compute_cmd(angle):
         -MAX_W
     )
 
-    # 회전 많으면 감속
-    speed_scale = (
+    # 회전 많을수록 감속
+    turn_scale = (
         1.0 -
-        min(abs(angle) / 90.0, 0.7)
+        min(abs(angle) / 90.0, 0.65)
     )
 
     # 전방 거리 기반 감속
-    front_dist = scan_data[0]
+    front_dist = get_distance(0)
 
     obstacle_scale = min(
-        front_dist / 0.8,
+        front_dist / 0.7,
         1.0
     )
 
-    speed_scale *= obstacle_scale
+    speed_scale = (
+        turn_scale *
+        obstacle_scale
+    )
 
-    # 최소 속도 보장
+    # 절대 멈추지 않게 최소 속도 유지
     speed_scale = max(
         speed_scale,
-        0.25
+        0.45
     )
 
     v = BASE_SPEED * speed_scale
@@ -264,7 +209,9 @@ def send_cmd(v, w):
 
     msg = f"{v:.3f},{w:.3f}\n"
 
-    motor_ser.write(msg.encode())
+    motor_ser.write(
+        msg.encode()
+    )
 
 # =========================================
 
@@ -276,9 +223,9 @@ def stop_robot():
 # MAIN
 # =========================================
 
-print("====================================")
-print(" FTG NAVIGATION START ")
-print("====================================")
+print("================================")
+print(" FTG START ")
+print("================================")
 
 try:
 
@@ -314,8 +261,7 @@ try:
             (data[2] << 7)
         )
 
-        angle = angle_q6 / 64.0
-        angle = int(angle)
+        angle = int(angle_q6 / 64.0)
 
         if not is_front_angle(angle):
             continue
@@ -333,46 +279,31 @@ try:
         if dist < 0.03:
             continue
 
-        if dist > 6.0:
+        if dist > 3.0:
             continue
 
-        # 라이다 데이터 저장
+        # 라이다 저장
         scan_data[angle] = dist
 
-        # 장애물 맵 생성
-        build_costmap()
-
-        # 최적 방향 탐색
+        # 방향 탐색
         best_angle = find_best_direction()
-
-        # 방향 못찾으면 회전
-        if best_angle is None:
-
-            send_cmd(0.0, 1.0)
-
-            time.sleep(0.03)
-
-            continue
 
         # 속도 계산
         v, w = compute_cmd(best_angle)
 
-        # 모터 전송
+        # 전송
         send_cmd(v, w)
 
         print(
             f"DIR:{best_angle:6.1f} | "
             f"v:{v:.2f} | "
-            f"w:{w:.2f}"
+            f"w:{w:.2f} | "
+            f"front:{scan_data[0]:.2f}"
         )
-
-# =========================================
-# 종료
-# =========================================
 
 except KeyboardInterrupt:
 
-    print("\nSTOP")
+    print("STOP")
 
 finally:
 
