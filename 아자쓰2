@@ -41,7 +41,7 @@ MAX_W        = 1.5      # 최대 각속도 (rad/s)
 TURN_GAIN    = 1.8      # 조향 게인
 
 SCAN_LIMIT   = 1.5      # 유효 인식 거리 (m) — 소형 맵 최적화
-FRONT_RANGE  = 90       # 전방 탐색 반경 (±90°)
+FRONT_RANGE  = 60       # 전방 탐색 반경 (±60°) — 측면 벽 간섭 방지
 
 # =========================================
 # FILTER PARAMETER             [Doc 4]
@@ -79,7 +79,7 @@ rotate_dir        = 1        # +1: 좌회전, -1: 우회전 (교번)
 
 EMERGENCY_DIST   = 0.10     # 긴급회피 진입 거리 (m) — 너무 이른 후진 방지
 REVERSE_DURATION = 0.35     # 후진 지속 시간 (초) — 반대 벽 충돌 방지
-ROTATE_DURATION  = 0.60     # 회전 지속 시간 (초)
+ROTATE_DURATION  = 1.00     # 회전 지속 시간 (초) — ≈69° 회전으로 벽 이탈 보장
 REVERSE_SPEED    = -0.10    # 후진 선속도 (m/s)
 ROTATE_W         = 1.2      # 회전 각속도 (rad/s)
 
@@ -372,7 +372,12 @@ try:
                 rotate_dir *= -1       # 교번: 다음 회피는 반대 방향
                 state = STATE_NORMAL
                 prev_angle = 0.0       # 스무딩 초기화
-                print("  [NORMAL] maneuver done")
+
+                # 전방 ±45° 잔존 데이터 리셋 — 회전 후 벽 데이터 제거
+                for a in range(-45, 46):
+                    scan_data[a % 360] = SCAN_LIMIT
+
+                print("  [NORMAL] maneuver done / scan reset ±45°")
             continue
 
         # ── STATE_NORMAL : 일반 주행 ──
