@@ -35,12 +35,12 @@ WHEEL_BASE   = 0.17     # 아두이노 차동구동과 일치 (m)
 # DRIVE PARAMETER
 # =========================================
 
-MAX_SPEED    = 0.22     # 최대 선속도 (m/s)
-MIN_SPEED    = 0.06     # 최소 선속도 (m/s)
+MAX_SPEED    = 0.14     # 최대 선속도 (m/s) — 소형 맵 안전 속도
+MIN_SPEED    = 0.05     # 최소 선속도 (m/s)
 MAX_W        = 1.5      # 최대 각속도 (rad/s)
 TURN_GAIN    = 1.8      # 조향 게인
 
-SCAN_LIMIT   = 3.5      # 유효 인식 거리 (m)
+SCAN_LIMIT   = 1.5      # 유효 인식 거리 (m) — 소형 맵 최적화
 FRONT_RANGE  = 90       # 전방 탐색 반경 (±90°)
 
 # =========================================
@@ -54,16 +54,16 @@ MEDIAN_K     = 2        # 중앙값 필터 이웃 범위 (±k)
 # SMOOTHING PARAMETER          [Doc 3]
 # =========================================
 
-SMOOTHING_NORMAL = 0.75   # 일반 주행
+SMOOTHING_NORMAL = 0.55   # 일반 주행 — 소형 맵은 빠른 방향 전환 필요
 SMOOTHING_DANGER = 0.20   # 위험 근접 시 반응성 강화
-DANGER_DIST      = 0.35   # 스무딩 전환 임계 거리 (m)
+DANGER_DIST      = 0.30   # 스무딩 전환 임계 거리 (m)
 
 # =========================================
 # GAP PARAMETER                [Doc 4]
 # =========================================
 
-SAFE_DIST    = 0.25     # Gap 유효 최소 거리 (m)
-INFLATION_MAX_DIST = 0.8  # 팽창 적용 최대 거리 (m)
+SAFE_DIST          = 0.12   # Gap 유효 최소 거리 (m) — 좁은 공간 대응
+INFLATION_MAX_DIST = 0.50   # 팽창 적용 최대 거리 (m) — 과팽창 방지
 
 # =========================================
 # STATE MACHINE                [Doc 3]
@@ -77,9 +77,9 @@ state             = STATE_NORMAL
 maneuver_end_time = 0.0
 rotate_dir        = 1        # +1: 좌회전, -1: 우회전 (교번)
 
-EMERGENCY_DIST   = 0.13     # 긴급회피 진입 거리 (m)
-REVERSE_DURATION = 0.5      # 후진 지속 시간 (초)
-ROTATE_DURATION  = 0.8      # 회전 지속 시간 (초)
+EMERGENCY_DIST   = 0.10     # 긴급회피 진입 거리 (m) — 너무 이른 후진 방지
+REVERSE_DURATION = 0.35     # 후진 지속 시간 (초) — 반대 벽 충돌 방지
+ROTATE_DURATION  = 0.60     # 회전 지속 시간 (초)
 REVERSE_SPEED    = -0.10    # 후진 선속도 (m/s)
 ROTATE_W         = 1.2      # 회전 각속도 (rad/s)
 
@@ -87,7 +87,7 @@ ROTATE_W         = 1.2      # 회전 각속도 (rad/s)
 # STATE
 # =========================================
 
-scan_data  = np.full(360, SCAN_LIMIT, dtype=np.float32)
+scan_data  = np.full(360, SCAN_LIMIT, dtype=np.float32)   # 초기값 = SCAN_LIMIT (1.5m)
 prev_angle = 0.0
 
 # =========================================
