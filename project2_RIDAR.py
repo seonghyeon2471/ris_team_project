@@ -39,14 +39,10 @@ lidar_ser.read(7)
 print("LIDAR START")
 
 # =========================================
-# ROBOT PARAMETER
+# PARAMETER
 # =========================================
 
-EMERGENCY_DIST = 0.10
-DEAD_END_DIST = 0.18
-
 BASE_SPEED = 0.18
-
 MAX_W = 1.2
 TURN_GAIN = 1.5
 
@@ -55,19 +51,15 @@ SEARCH_MAX = 85
 
 SMOOTHING = 0.75
 
+EMERGENCY_DIST = 0.13   # 🔥 완화된 값 (급정지 대신 강회피)
+
 # =========================================
 # STATE
 # =========================================
 
-emergency_cooldown = 0
-prev_angle = 0
-
-# =========================================
-# MAP
-# =========================================
-
 scan_data = [10.0] * 360
 cost_map = [0.0] * 360
+prev_angle = 0
 
 # =========================================
 # UTIL
@@ -145,7 +137,7 @@ def build_costmap():
 
 
 # =========================================
-# PATH PLANNING
+# PLANNING
 # =========================================
 
 def find_best_direction():
@@ -177,7 +169,7 @@ def find_best_direction():
             best_angle = angle
 
     if best_angle is None:
-        return None
+        return 0
 
     best_angle = prev_angle * SMOOTHING + best_angle * (1 - SMOOTHING)
     prev_angle = best_angle
@@ -196,12 +188,12 @@ def compute_cmd(angle):
 
     speed_scale = 1.0 - min(abs(angle) / 90.0, 0.8)
 
-    front_dist = min(
+    front_min = min(
         scan_data[normalize_angle(a)]
-        for a in range(-8, 9)
+        for a in range(-10, 11)
     )
 
-    obstacle_scale = min(front_dist / 0.8, 1.0)
+    obstacle_scale = min(front_min / 0.8, 1.0)
 
     speed_scale *= obstacle_scale
     speed_scale = max(speed_scale, 0.25)
@@ -220,51 +212,13 @@ def stop_robot():
 
 
 # =========================================
-# EMERGENCY
-# =========================================
-
-def emergency_escape():
-    global emergency_cooldown
-
-    print("EMERGENCY")
-
-    send_cmd(-0.08, 0.0)
-    time.sleep(0.4)
-
-    send_cmd(0.0, 0.0)
-    time.sleep(0.1)
-
-    send_cmd(0.0, 1.2)
-    time.sleep(0.5)
-
-    emergency_cooldown = 20
-
-
-# =========================================
-# DEAD END
-# =========================================
-
-def is_dead_end():
-
-    front = min(scan_data[normalize_angle(a)] for a in range(-18, 19))
-    left = min(scan_data[normalize_angle(a)] for a in range(55, 86))
-    right = min(scan_data[normalize_angle(a)] for a in range(-85, -54))
-
-    return front < DEAD_END_DIST and left < DEAD_END_DIST and right < DEAD_END_DIST
-
-
-# =========================================
 # MAIN LOOP
 # =========================================
 
-print("FOOTPRINT NAVIGATION START")
+print("NAVIGATION START (NO EMERGENCY)")
 
 try:
     while True:
-
-        if emergency_cooldown > 0:
-            emergency_cooldown -= 1
-            continue
 
         data = lidar_ser.read(5)
         if len(data) != 5:
@@ -306,26 +260,24 @@ try:
                 for a in range(-10, 11)
             )
 
+            # =========================================
+            # 🔥 EMERGENCY 대신 강회피
+            # =========================================
             if front_min < EMERGENCY_DIST:
-                emergency_escape()
-                continue
-
-            if is_dead_end():
-                print("DEAD END → EMERGENCY ESCAPE")
-                emergency_escape()
-                continue
-
-            best_angle = find_best_direction()
-
-            if best_angle is None:
+                print("STRONG AVOID")
                 send_cmd(0.0, 1.0)
                 time.sleep(0.2)
                 continue
 
+            best_angle = find_best_direction()
+
             v, w = compute_cmd(best_angle)
+
             send_cmd(v, w)
 
-            print(f"DIR:{best_angle:6.1f} | v:{v:.2f} | w:{w:.2f} | front:{front_min:.2f}")
+            print(
+                f"DIR:{best_angle:6.1f} | v:{v:.2f} | w:{w:.2f} | front:{front_min:.2f}"
+            )
 
 except KeyboardInterrupt:
     print("STOP")
