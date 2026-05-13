@@ -16,7 +16,7 @@ WHEEL_BASE = 0.17     # 아두이노 코드와 일치
 # 주행 및 히스테리시스 파라미터
 MAX_SPEED = 0.20      
 MAX_W = 1.2           
-SCAN_LIMIT = 3.5      
+SCAN_LIMIT = 0.3     
 FRONT_RANGE = 90      
 
 # 히스테리시스 관련
