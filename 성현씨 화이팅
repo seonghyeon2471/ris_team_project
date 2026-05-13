@@ -1,0 +1,498 @@
+import serial
+import math
+import time
+
+# =========================================
+# SERIAL
+# =========================================
+
+MOTOR_PORT = "/dev/serial0"
+MOTOR_BAUD = 115200
+
+motor_ser = serial.Serial(
+    MOTOR_PORT,
+    MOTOR_BAUD,
+    timeout=1
+)
+
+LIDAR_PORT = "/dev/ttyUSB0"
+LIDAR_BAUD = 460800
+
+lidar_ser = serial.Serial(
+    LIDAR_PORT,
+    LIDAR_BAUD,
+    timeout=1
+)
+
+# =========================================
+# LIDAR START
+# =========================================
+
+lidar_ser.write(bytes([0xA5, 0x40]))
+time.sleep(2)
+
+lidar_ser.reset_input_buffer()
+
+lidar_ser.write(bytes([0xA5, 0x20]))
+lidar_ser.read(7)
+
+print("LIDAR START")
+
+# =========================================
+# PARAMETER
+# =========================================
+
+MAX_LIDAR_DIST = 4.0
+
+# SPEED
+BASE_SPEED = 0.18
+MIN_SPEED = 0.08
+
+# STEERING
+TURN_GAIN = 1.45
+MAX_W = 1.4
+
+# GAP
+SAFE_DIST = 0.25
+
+# FILTER
+SMOOTHING = 0.88
+
+# SEARCH
+SEARCH_MIN = -90
+SEARCH_MAX = 90
+
+# RECOVERY
+EMERGENCY_DIST = 0.12
+
+# =========================================
+# STATE
+# =========================================
+
+scan_data = [MAX_LIDAR_DIST] * 360
+
+prev_angle = 0
+
+# =========================================
+# UTIL
+# =========================================
+
+def normalize_angle(angle):
+    return angle % 360
+
+
+def get_range(angle):
+    return scan_data[normalize_angle(angle)]
+
+
+# =========================================
+# FILTER
+# =========================================
+
+def smooth_scan():
+
+    global scan_data
+
+    filtered = scan_data[:]
+
+    for i in range(360):
+
+        values = []
+
+        for k in range(-2, 3):
+
+            idx = normalize_angle(i + k)
+
+            values.append(scan_data[idx])
+
+        values.sort()
+
+        filtered[i] = values[len(values)//2]
+
+    scan_data = filtered
+
+
+# =========================================
+# FTG
+# =========================================
+
+def find_closest_obstacle():
+
+    min_dist = 999
+    min_angle = 0
+
+    for angle in range(SEARCH_MIN, SEARCH_MAX + 1):
+
+        d = get_range(angle)
+
+        if d < 0.03:
+            continue
+
+        if d < min_dist:
+            min_dist = d
+            min_angle = angle
+
+    return min_angle, min_dist
+
+
+# =========================================
+# DYNAMIC BUBBLE
+# =========================================
+
+def create_bubble(masked_scan, obstacle_angle, obstacle_dist):
+
+    bubble_radius = int(18 / max(obstacle_dist, 0.05))
+
+    bubble_radius = max(8, min(bubble_radius, 28))
+
+    for a in range(
+        obstacle_angle - bubble_radius,
+        obstacle_angle + bubble_radius + 1
+    ):
+
+        idx = normalize_angle(a)
+
+        masked_scan[idx] = 0.0
+
+
+# =========================================
+# GAP SEARCH
+# =========================================
+
+def find_gaps(masked_scan):
+
+    gaps = []
+
+    gap_start = None
+
+    for angle in range(SEARCH_MIN, SEARCH_MAX + 1):
+
+        d = masked_scan[normalize_angle(angle)]
+
+        if d > SAFE_DIST:
+
+            if gap_start is None:
+                gap_start = angle
+
+        else:
+
+            if gap_start is not None:
+
+                gap_end = angle - 1
+
+                gaps.append((gap_start, gap_end))
+
+                gap_start = None
+
+    if gap_start is not None:
+        gaps.append((gap_start, SEARCH_MAX))
+
+    return gaps
+
+
+# =========================================
+# GAP SCORING
+# =========================================
+
+def score_gap(gap):
+
+    start, end = gap
+
+    width = end - start
+
+    center = (start + end) / 2.0
+
+    avg_dist = 0.0
+    count = 0
+
+    for a in range(start, end + 1):
+
+        avg_dist += get_range(a)
+        count += 1
+
+    avg_dist /= max(count, 1)
+
+    score = (
+        width * 0.5
+        + avg_dist * 1.2
+        - abs(center) * 0.4
+    )
+
+    return score
+
+
+def select_best_gap(gaps):
+
+    best_gap = None
+    best_score = -1e9
+
+    for gap in gaps:
+
+        score = score_gap(gap)
+
+        if score > best_score:
+
+            best_score = score
+            best_gap = gap
+
+    return best_gap
+
+
+# =========================================
+# TARGET ANGLE
+# =========================================
+
+def select_target_angle(gap):
+
+    global prev_angle
+
+    start, end = gap
+
+    gap_center = (start + end) / 2.0
+
+    # CENTER BIAS
+    target = (
+        gap_center * 0.7
+        + 0.0 * 0.3
+    )
+
+    # SMOOTHING
+    target = (
+        prev_angle * SMOOTHING
+        + target * (1.0 - SMOOTHING)
+    )
+
+    prev_angle = target
+
+    return target
+
+
+# =========================================
+# CONTROL
+# =========================================
+
+def compute_cmd(target_angle):
+
+    steering = (
+        math.radians(target_angle)
+        * TURN_GAIN
+    )
+
+    steering = max(
+        min(steering, MAX_W),
+        -MAX_W
+    )
+
+    # steering-based speed reduction
+    steering_ratio = min(
+        abs(target_angle) / 90.0,
+        1.0
+    )
+
+    speed = (
+        BASE_SPEED
+        * (1.0 - steering_ratio * 0.75)
+    )
+
+    # front obstacle slow-down
+    front_dist = min(
+        get_range(a)
+        for a in range(-10, 11)
+    )
+
+    obstacle_scale = min(front_dist / 0.9, 1.0)
+
+    speed *= obstacle_scale
+
+    speed = max(speed, MIN_SPEED)
+
+    return speed, steering
+
+
+# =========================================
+# MOTOR
+# =========================================
+
+def send_cmd(v, w):
+
+    motor_ser.write(
+        f"{v:.3f},{w:.3f}\n".encode()
+    )
+
+
+def stop_robot():
+
+    send_cmd(0.0, 0.0)
+
+
+# =========================================
+# RECOVERY
+# =========================================
+
+def recovery_behavior():
+
+    print("RECOVERY")
+
+    # BACK
+    send_cmd(-0.08, 0.0)
+    time.sleep(0.45)
+
+    # TURN
+    send_cmd(0.0, 1.2)
+    time.sleep(0.55)
+
+
+# =========================================
+# MAIN LOOP
+# =========================================
+
+print("FTG START")
+
+try:
+
+    while True:
+
+        data = lidar_ser.read(5)
+
+        if len(data) != 5:
+            continue
+
+        s_flag = data[0] & 0x01
+        s_inv_flag = (data[0] & 0x02) >> 1
+
+        if s_inv_flag != (1 - s_flag):
+            continue
+
+        if (data[1] & 0x01) != 1:
+            continue
+
+        quality = data[0] >> 2
+
+        if quality < 3:
+            continue
+
+        angle_q6 = (
+            (data[1] >> 1)
+            | (data[2] << 7)
+        )
+
+        angle = int(angle_q6 / 64.0)
+
+        if angle < 0 or angle >= 360:
+            continue
+
+        distance_q2 = (
+            data[3]
+            | (data[4] << 8)
+        )
+
+        dist = (
+            (distance_q2 / 4.0)
+            / 1000.0
+        )
+
+        if dist < 0.03 or dist > MAX_LIDAR_DIST:
+            continue
+
+        # =====================================
+        # EMA FILTER
+        # =====================================
+
+        scan_data[angle] = (
+            0.7 * scan_data[angle]
+            + 0.3 * dist
+        )
+
+        # =====================================
+        # NEW SCAN
+        # =====================================
+
+        if s_flag == 1:
+
+            smooth_scan()
+
+            # =================================
+            # CLOSEST OBSTACLE
+            # =================================
+
+            obstacle_angle, obstacle_dist = \
+                find_closest_obstacle()
+
+            # =================================
+            # EMERGENCY
+            # =================================
+
+            if obstacle_dist < EMERGENCY_DIST:
+
+                recovery_behavior()
+
+                continue
+
+            # =================================
+            # MASKED SCAN
+            # =================================
+
+            masked_scan = scan_data[:]
+
+            create_bubble(
+                masked_scan,
+                obstacle_angle,
+                obstacle_dist
+            )
+
+            # =================================
+            # GAP SEARCH
+            # =================================
+
+            gaps = find_gaps(masked_scan)
+
+            if len(gaps) == 0:
+
+                recovery_behavior()
+
+                continue
+
+            # =================================
+            # BEST GAP
+            # =================================
+
+            best_gap = select_best_gap(gaps)
+
+            # =================================
+            # TARGET
+            # =================================
+
+            target_angle = \
+                select_target_angle(best_gap)
+
+            # =================================
+            # CONTROL
+            # =================================
+
+            v, w = compute_cmd(target_angle)
+
+            send_cmd(v, w)
+
+            print(
+                f"OBS:{obstacle_angle:4d} "
+                f"D:{obstacle_dist:.2f} "
+                f"GAP:{best_gap} "
+                f"TARGET:{target_angle:6.1f} "
+                f"V:{v:.2f} "
+                f"W:{w:.2f}"
+            )
+
+except KeyboardInterrupt:
+
+    print("STOP")
+
+finally:
+
+    stop_robot()
+
+    lidar_ser.write(bytes([0xA5, 0x25]))
+
+    lidar_ser.close()
+    motor_ser.close()
+
+    print("END")
