@@ -1,7 +1,6 @@
 import serial
 import time
 import math
-from rplidar import RPLidar
 
 # =========================
 # PORT
@@ -10,7 +9,7 @@ LIDAR_PORT = "/dev/ttyUSB0"
 MOTOR_PORT = "/dev/serial0"
 BAUD = 115200
 
-lidar = RPLidar(LIDAR_PORT)
+lidar = serial.Serial(LIDAR_PORT, 115200, timeout=1)
 motor = serial.Serial(MOTOR_PORT, BAUD, timeout=1)
 
 # =========================
@@ -18,122 +17,180 @@ motor = serial.Serial(MOTOR_PORT, BAUD, timeout=1)
 # =========================
 BASE_RPM = 80
 
-K_STEER = 0.9          # steering gain
-K_FRONT = 1.5          # front avoidance gain
+K_STEER = 1.0
+SMOOTH = 0.6
 
-MAX_DIST = 2000        # mm
-MIN_SAFE = 250         # mm (정면 안전거리)
+MAX_DIST = 2000  # mm
+MIN_FRONT = 250  # mm
 
-SMOOTH_ALPHA = 0.6     # smoothing
-
-prev_left = BASE_RPM
-prev_right = BASE_RPM
+prev_l = BASE_RPM
+prev_r = BASE_RPM
 
 
 # =========================
-def weight(dist):
+# LIDAR START
+# =========================
+def start_lidar():
+    lidar.write(b'\xA5\x60')  # start scan
+    time.sleep(1)
+
+
+# =========================
+# PARSE 5-BYTE PACKET
+# =========================
+def read_measurement():
+    b = lidar.read(5)
+    if len(b) != 5:
+        return None
+
+    if (b[0] & 0x01) != 1:
+        return None
+
+    quality = b[0] >> 2
+    if quality < 10:
+        return None
+
+    angle_q6 = ((b[1] >> 1) | (b[2] << 7))
+    angle = angle_q6 / 64.0
+
+    dist = (b[3] | (b[4] << 8)) / 4.0  # mm
+
     if dist <= 0 or dist > MAX_DIST:
-        return 0
-    return (MAX_DIST - dist) / MAX_DIST
+        return None
+
+    angle = (angle + 180) % 360 - 180
+
+    return angle, dist
 
 
 # =========================
-def split_scan(scan):
+# BUILD SCAN FRAME
+# =========================
+def get_scan():
+    scan = []
+
+    start_time = time.time()
+
+    while time.time() - start_time < 0.05:  # 20Hz frame
+        m = read_measurement()
+        if m:
+            scan.append(m)
+
+    return scan
+
+
+# =========================
+# SPLIT
+# =========================
+def split(scan):
     left, right, front = [], [], []
 
-    for angle, dist in scan:
-        if dist == 0:
-            continue
-
-        if -30 <= angle <= 30:
-            front.append(dist)
-        elif 0 < angle < 180:
-            right.append(dist)
+    for a, d in scan:
+        if -30 <= a <= 30:
+            front.append(d)
+        elif 0 < a < 180:
+            right.append(d)
         else:
-            left.append(dist)
+            left.append(d)
 
     return left, right, front
 
 
 # =========================
-def score(side):
-    if len(side) == 0:
+# SCORE
+# =========================
+def score(group):
+    if not group:
         return 0
-    return sum(weight(d) for d in side) / len(side)
+    return sum((MAX_DIST - d) / MAX_DIST for d in group) / len(group)
 
 
+# =========================
+# FRONT RISK
 # =========================
 def front_risk(front):
-    if len(front) == 0:
+    if not front:
         return 0
 
-    min_d = min(front)
-    if min_d > MIN_DIST:
+    m = min(front)
+    if m > MIN_FRONT:
         return 0
 
-    return (MIN_DIST - min_d) / MIN_DIST
+    return (MIN_FRONT - m) / MIN_FRONT
 
 
 # =========================
-def compute_control(scan):
-    left_s, right_s, front_s = split_scan(scan)
+# CONTROL
+# =========================
+def compute(scan):
 
-    L = score(left_s)
-    R = score(right_s)
+    L, R, F = split(scan)
 
-    turn = (R - L)
+    left_s = score(L)
+    right_s = score(R)
 
-    # front emergency bias
-    f_risk = front_risk(front_s)
-    turn += f_risk
+    turn = (right_s - left_s)
 
-    left_rpm = BASE_RPM - K_STEER * turn * 50
-    right_rpm = BASE_RPM + K_STEER * turn * 50
+    turn += front_risk(F)
 
-    # clamp
+    left_rpm = BASE_RPM - K_STEER * turn * 60
+    right_rpm = BASE_RPM + K_STEER * turn * 60
+
     left_rpm = max(0, min(150, left_rpm))
     right_rpm = max(0, min(150, right_rpm))
 
-    return left_rpm, right_rpm, L, R, f_risk
+    return left_rpm, right_rpm
 
 
 # =========================
+# SMOOTH
+# =========================
 def smooth(prev, new):
-    return SMOOTH_ALPHA * prev + (1 - SMOOTH_ALPHA) * new
+    return SMOOTH * prev + (1 - SMOOTH) * new
 
 
+# =========================
+# SEND
 # =========================
 def send(l, r):
     motor.write(f"{int(l)},{int(r)}\n".encode())
 
 
 # =========================
-try:
-    print("Stable steering start")
+# MAIN
+# =========================
+print("RAW LIDAR DRIVE START")
 
-    for scan in lidar.iter_scans():
+start_lidar()
 
-        data = [(a, d) for _, a, d in scan]
+while True:
+    try:
+        scan = get_scan()
 
-        left, right, L, R, f = compute_control(data)
+        if len(scan) < 5:
+            send(0, 0)
+            continue
 
-        # smoothing
-        left = smooth(prev_left, left)
-        right = smooth(prev_right, right)
+        l, r = compute(scan)
 
-        send(left, right)
+        l = smooth(prev_l, l)
+        r = smooth(prev_r, r)
 
-        prev_left, prev_right = left, right
+        send(l, r)
 
-        print(f"L:{left:.1f} R:{right:.1f} | Ls:{L:.2f} Rs:{R:.2f} | front:{f:.2f}")
+        prev_l, prev_r = l, r
+
+        print(f"L:{l:.1f} R:{r:.1f} pts:{len(scan)}")
 
         time.sleep(0.03)
 
-except KeyboardInterrupt:
-    print("STOP")
+    except KeyboardInterrupt:
+        break
 
-finally:
-    send(0, 0)
-    lidar.stop()
-    lidar.disconnect()
-    motor.close()
+    except Exception as e:
+        print("ERROR:", e)
+
+send(0, 0)
+lidar.close()
+motor.close()
+print("STOP")
