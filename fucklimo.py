@@ -68,8 +68,8 @@ HYSTERESIS_THRESHOLD = 12.0
 SMOOTHING            = 0.35
 
 # 전방 긴급 정지 기준
-EMERGENCY_DIST  = 0.10   # 10cm 이내 장애물 → 긴급 처리
-EMERGENCY_ANGLE = 40     # [수정] ±40° (기존 ±20° → 양옆 20° 추가)
+EMERGENCY_DIST  = 0.05   # 10cm 이내 장애물 → 긴급 처리
+EMERGENCY_ANGLE = 20    # [수정] ±40° (기존 ±20° → 양옆 20° 추가)
 
 # 모터드라이버 배선 반전 여부
 # 오른쪽 장애물인데 오른쪽으로 돌면 True
@@ -298,6 +298,7 @@ def get_gap_navigation(scan_data_local: list, prev_angle: float):
     w = float(np.clip(w, -MAX_W, MAX_W))
 
     return v, w, final_angle
+
 
 
 # =====================================================================
