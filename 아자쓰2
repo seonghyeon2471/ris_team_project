@@ -63,7 +63,10 @@ DANGER_DIST      = 0.30   # 스무딩 전환 임계 거리 (m)
 # =========================================
 
 SAFE_DIST          = 0.12   # Gap 유효 최소 거리 (m) — 좁은 공간 대응
-INFLATION_MAX_DIST = 0.50   # 팽창 적용 최대 거리 (m) — 과팽창 방지
+INFLATION_MAX_DIST = 1.00   # 팽창 적용 최대 거리 (m) — 수집 범위 내 전체 커버
+
+FRONT_CLEAR_DIST   = 0.50   # 전방 열림 판단 거리 (m)
+FRONT_CLEAR_RANGE  = 15     # 전방 열림 판단 범위 (±°)
 
 # =========================================
 # STATE MACHINE                [Doc 3]
@@ -228,7 +231,7 @@ def find_best_direction(smoothing):
     gaps = find_gaps(proc_dists, angles)
 
     if not gaps:
-        # Gap 없으면 현재 방향 유지 (State Machine이 회피 담당)
+        # Gap 없으면 State Machine이 회피 담당
         return None
 
     best_gap = select_best_gap(gaps, proc_dists, angles)
@@ -237,14 +240,25 @@ def find_best_direction(smoothing):
     center_i     = (start + end) / 2.0
     gap_angle    = float(angles[int(center_i)])
 
-    # Gap 중심 70% + 직진 30% 편향   [Doc 4]
-    target = gap_angle * 0.7 + 0.0 * 0.3
+    # 전방 열림 여부 확인
+    front_clear = float(np.min(
+        scan_data[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]
+    ))
+
+    if front_clear > FRONT_CLEAR_DIST:
+        # 전방이 열려있음 → 직진 편향 강하게 (측면 벽 간섭 무시)
+        target = gap_angle * 0.3 + 0.0 * 0.7
+        bias_label = "STRAIGHT"
+    else:
+        # 전방이 막혀있음 → Gap 중심으로 조향
+        target = gap_angle * 0.7 + 0.0 * 0.3
+        bias_label = "GAP"
 
     # 스무딩   [Doc 3]
     target     = prev_angle * smoothing + target * (1.0 - smoothing)
     prev_angle = target
 
-    return target
+    return target, bias_label, front_clear
 
 
 # =========================================
@@ -396,16 +410,18 @@ try:
         # 위험 거리 기반 스무딩 전환   [Doc 3]
         smoothing = SMOOTHING_DANGER if front_min < DANGER_DIST else SMOOTHING_NORMAL
 
-        target_angle = find_best_direction(smoothing)
+        result = find_best_direction(smoothing)
 
         # Gap을 찾지 못한 경우 긴급 전환
-        if target_angle is None:
+        if result is None:
             rotate_dir = choose_avoid_direction()
             state = STATE_REVERSE
             maneuver_end_time = now + REVERSE_DURATION
             print(f"NO GAP! → REVERSE")
             send_cmd(REVERSE_SPEED, 0.0)
             continue
+
+        target_angle, bias_label, front_clear = result
 
         v, w = compute_cmd(target_angle)
         send_cmd(v, w)
@@ -414,6 +430,8 @@ try:
             f"TARGET:{target_angle:6.1f}° | "
             f"v:{v:.2f} | w:{w:.2f} | "
             f"front:{front_min:.2f}m | "
+            f"clear:{front_clear:.2f}m | "
+            f"bias:{bias_label} | "
             f"smooth:{smoothing:.2f}"
         )
 
