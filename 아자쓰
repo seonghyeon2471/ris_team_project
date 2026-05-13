@@ -1,0 +1,383 @@
+import serial
+import math
+import time
+
+# =========================================
+# SERIAL
+# =========================================
+
+MOTOR_PORT = "/dev/serial0"
+MOTOR_BAUD = 115200
+
+motor_ser = serial.Serial(
+    MOTOR_PORT,
+    MOTOR_BAUD,
+    timeout=1
+)
+
+LIDAR_PORT = "/dev/ttyUSB0"
+LIDAR_BAUD = 460800
+
+lidar_ser = serial.Serial(
+    LIDAR_PORT,
+    LIDAR_BAUD,
+    timeout=1
+)
+
+# =========================================
+# LIDAR START
+# =========================================
+
+lidar_ser.write(bytes([0xA5, 0x40]))
+time.sleep(2)
+
+lidar_ser.reset_input_buffer()
+
+lidar_ser.write(bytes([0xA5, 0x20]))
+lidar_ser.read(7)
+
+print("LIDAR START")
+
+# =========================================
+# PARAMETER
+# =========================================
+
+BASE_SPEED    = 0.18
+MAX_W         = 1.2
+TURN_GAIN     = 1.5
+
+SEARCH_MIN    = -85
+SEARCH_MAX    = 85
+
+SMOOTHING_NORMAL    = 0.75   # 일반 주행 스무딩
+SMOOTHING_DANGER    = 0.20   # 위험 근접 시 스무딩 완화
+
+EMERGENCY_DIST      = 0.13   # 긴급회피 진입 거리
+DANGER_DIST         = 0.30   # 스무딩 완화 진입 거리
+
+# =========================================
+# STATE MACHINE
+# =========================================
+
+STATE_NORMAL  = 0
+STATE_REVERSE = 1
+STATE_ROTATE  = 2
+
+state             = STATE_NORMAL
+maneuver_end_time = 0.0
+rotate_dir        = 1            # +1: 좌회전, -1: 우회전 (교번)
+
+REVERSE_DURATION  = 0.5         # 후진 지속 시간 (초)
+ROTATE_DURATION   = 0.8         # 회전 지속 시간 (초)
+REVERSE_SPEED     = -0.10       # 후진 속도 (m/s)
+ROTATE_W          = 1.2         # 회전 각속도 (rad/s)
+
+# =========================================
+# STATE
+# =========================================
+
+scan_data  = [10.0] * 360
+cost_map   = [0.0]  * 360
+prev_angle = 0
+
+# =========================================
+# UTIL
+# =========================================
+
+def normalize_angle(angle):
+    return angle % 360
+
+
+def is_front_angle(angle):
+    angle = normalize_angle(angle)
+    return angle <= 90 or angle >= 270
+
+
+def get_robot_radius(angle):
+    angle = normalize_angle(angle)
+    if angle > 180:
+        angle -= 360
+
+    a = abs(angle)
+
+    if a <= 20:
+        return 0.03
+    elif a <= 55:
+        return 0.06
+    else:
+        return 0.08
+
+
+# =========================================
+# COSTMAP
+# =========================================
+
+def clear_costmap():
+    for i in range(360):
+        cost_map[i] = 0.0
+
+
+def inflate_obstacle(angle, dist):
+    robot_radius = get_robot_radius(angle)
+
+    if dist < robot_radius:
+        for a in range(-90, 91):
+            cost_map[normalize_angle(a)] += 999
+        return
+
+    spread = int(math.degrees(math.atan(robot_radius / max(dist, 0.01))))
+
+    for a in range(angle - spread, angle + spread + 1):
+        idx = normalize_angle(a)
+
+        if not is_front_angle(idx):
+            continue
+
+        cost = max(0.0, (1.2 - dist)) * 5.0
+        center_weight = 1.0 - abs(a - angle) / max(spread, 1)
+        cost *= (1.0 + center_weight)
+
+        cost_map[idx] += cost
+
+
+def build_costmap():
+    clear_costmap()
+
+    for angle in range(360):
+        if not is_front_angle(angle):
+            continue
+
+        dist = scan_data[angle]
+
+        if dist < 0.03 or dist > 4.0:
+            continue
+
+        inflate_obstacle(angle, dist)
+
+
+# =========================================
+# 회피 방향 결정 (좌우 여유 공간 비교)
+# =========================================
+
+def choose_avoid_direction():
+    """
+    좌측(1~89°) vs 우측(271~359°) 평균 거리를 비교해
+    더 여유 있는 방향으로 회전 방향 결정.
+    반환값: +1 (좌회전), -1 (우회전)
+    """
+    left_dists  = [scan_data[a] for a in range(1,  90)]
+    right_dists = [scan_data[a] for a in range(271, 360)]
+
+    left_avg  = sum(left_dists)  / len(left_dists)
+    right_avg = sum(right_dists) / len(right_dists)
+
+    if left_avg >= right_avg:
+        direction = 1    # 좌회전
+        label = "LEFT"
+    else:
+        direction = -1   # 우회전
+        label = "RIGHT"
+
+    print(f"  [AVOID DIR] left_avg:{left_avg:.2f} right_avg:{right_avg:.2f} → {label}")
+    return direction
+
+
+# =========================================
+# PLANNING
+# =========================================
+
+def find_best_direction(smoothing):
+    global prev_angle
+
+    best_angle = None
+    best_score = -1e9
+
+    for angle in range(SEARCH_MIN, SEARCH_MAX + 1):
+
+        idx = normalize_angle(angle)
+
+        if not is_front_angle(idx):
+            continue
+
+        front_dist = scan_data[idx]
+        cost = cost_map[idx]
+
+        straight_penalty = abs(angle) * 0.18
+
+        score = (
+            front_dist * 6.0
+            - cost * 3.0
+            - straight_penalty
+        )
+
+        if score > best_score:
+            best_score = score
+            best_angle = angle
+
+    if best_angle is None:
+        return 0
+
+    best_angle = prev_angle * smoothing + best_angle * (1 - smoothing)
+    prev_angle = best_angle
+
+    return best_angle
+
+
+# =========================================
+# CONTROL
+# =========================================
+
+def compute_cmd(angle):
+
+    w = math.radians(angle) * TURN_GAIN
+    w = max(min(w, MAX_W), -MAX_W)
+
+    speed_scale = 1.0 - min(abs(angle) / 90.0, 0.8)
+
+    front_min = min(
+        scan_data[normalize_angle(a)]
+        for a in range(-10, 11)
+    )
+
+    obstacle_scale = min(front_min / 0.8, 1.0)
+
+    speed_scale *= obstacle_scale
+    speed_scale = max(speed_scale, 0.25)
+
+    v = BASE_SPEED * speed_scale
+
+    return v, w
+
+
+def send_cmd(v, w):
+    motor_ser.write(f"{v:.3f},{w:.3f}\n".encode())
+
+
+def stop_robot():
+    send_cmd(0.0, 0.0)
+
+
+# =========================================
+# MAIN LOOP
+# =========================================
+
+print("NAVIGATION START")
+
+try:
+    while True:
+
+        # ---------------------------------
+        # LiDAR 패킷 수신
+        # ---------------------------------
+        data = lidar_ser.read(5)
+        if len(data) != 5:
+            continue
+
+        s_flag     = data[0] & 0x01
+        s_inv_flag = (data[0] & 0x02) >> 1
+
+        if s_inv_flag != (1 - s_flag):
+            continue
+
+        if (data[1] & 0x01) != 1:
+            continue
+
+        quality = data[0] >> 2
+        if quality < 3:
+            continue
+
+        angle_q6 = (data[1] >> 1) | (data[2] << 7)
+        angle    = int(angle_q6 / 64.0)
+
+        if angle < 0 or angle >= 360:
+            continue
+
+        distance_q2 = data[3] | (data[4] << 8)
+        dist = (distance_q2 / 4.0) / 1000.0
+
+        if dist < 0.03 or dist > 6.0:
+            continue
+
+        scan_data[angle] = dist
+
+        # ---------------------------------
+        # 1회전 완료 시점에 판단
+        # ---------------------------------
+        if s_flag != 1:
+            continue
+
+        now = time.time()
+
+        # =================================
+        # STATE MACHINE
+        # =================================
+
+        # ── STATE_REVERSE : 맹목 후진 ──
+        if state == STATE_REVERSE:
+            if now < maneuver_end_time:
+                send_cmd(REVERSE_SPEED, 0.0)
+                print(f"  [REVERSE] remaining:{maneuver_end_time - now:.2f}s")
+            else:
+                # 후진 완료 → 회전 시작
+                # 방향은 진입 시점에 결정된 rotate_dir 사용
+                state = STATE_ROTATE
+                maneuver_end_time = now + ROTATE_DURATION
+                print(f"  [ROTATE START] dir:{'+' if rotate_dir > 0 else '-'}")
+            continue
+
+        # ── STATE_ROTATE : 맹목 회전 ──
+        if state == STATE_ROTATE:
+            if now < maneuver_end_time:
+                send_cmd(0.0, ROTATE_W * rotate_dir)
+                print(f"  [ROTATE] remaining:{maneuver_end_time - now:.2f}s")
+            else:
+                # 회전 완료 → 정상 주행 복귀
+                rotate_dir *= -1   # 다음 회피 시 반대 방향
+                state = STATE_NORMAL
+                prev_angle = 0     # 스무딩 초기화
+                print("  [NORMAL] maneuver done, resume navigation")
+            continue
+
+        # ── STATE_NORMAL : 일반 주행 ──
+        build_costmap()
+
+        front_min = min(
+            scan_data[normalize_angle(a)]
+            for a in range(-10, 11)
+        )
+
+        # 긴급회피 진입
+        if front_min < EMERGENCY_DIST:
+            avoid_dir = choose_avoid_direction()
+            rotate_dir = avoid_dir          # 공간이 넓은 방향으로 설정
+
+            state = STATE_REVERSE
+            maneuver_end_time = now + REVERSE_DURATION
+            print(f"EMERGENCY! front:{front_min:.2f}m → REVERSE start")
+            send_cmd(REVERSE_SPEED, 0.0)
+            continue
+
+        # 위험 근접 시 스무딩 완화 (반응성 향상)
+        if front_min < DANGER_DIST:
+            smoothing = SMOOTHING_DANGER
+        else:
+            smoothing = SMOOTHING_NORMAL
+
+        best_angle = find_best_direction(smoothing)
+        v, w = compute_cmd(best_angle)
+        send_cmd(v, w)
+
+        print(
+            f"DIR:{best_angle:6.1f} | v:{v:.2f} | w:{w:.2f} | "
+            f"front:{front_min:.2f} | smooth:{smoothing}"
+        )
+
+except KeyboardInterrupt:
+    print("STOP")
+
+finally:
+    stop_robot()
+    lidar_ser.write(bytes([0xA5, 0x25]))
+    lidar_ser.close()
+    motor_ser.close()
+    print("END")
