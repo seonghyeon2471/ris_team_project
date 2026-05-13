@@ -55,8 +55,8 @@ PACKET_LEN    = 5
 # FTG 주행 파라미터
 # =====================================================================
 MAX_SPEED     = 0.20    # 최대 전진 속도 [m/s]
-MIN_SPEED     = 0.05    # 최소 전진 속도 [m/s] (급선회 시)
-MAX_W         = 1.2     # 최대 각속도 [rad/s]
+MIN_SPEED     = 0.08   # 최소 전진 속도 [m/s] (급선회 시)
+MAX_W         = 1.0     # 최대 각속도 [rad/s]
 
 SCAN_LIMIT    = 3.5     # 라이다 유효 거리 [m]
 FRONT_RANGE   = 110     # 전방 탐색 범위 ±110°
@@ -64,8 +64,8 @@ FRONT_RANGE   = 110     # 전방 탐색 범위 ±110°
 FRONT_OFFSET  = 0       # [°] 라이다 장착 방향 보정
 
 # 히스테리시스
-HYSTERESIS_THRESHOLD = 12.0
-SMOOTHING            = 0.35
+HYSTERESIS_THRESHOLD = 5.0
+SMOOTHING            = 0.5
 
 # 전방 긴급 정지 기준
 EMERGENCY_DIST  = 0.05   # 10cm 이내 장애물 → 긴급 처리
@@ -272,16 +272,21 @@ def get_gap_navigation(scan_data_local: list, prev_angle: float):
     proc_dists = dists.copy()
     for i in range(len(dists)):
         d = dists[i]
-        if 0 < d < 1.5:
-            ratio = ROBOT_RADIUS / max(d, 0.05)
-            alpha = min(math.degrees(math.asin(min(ratio, 1.0))), 35.0)
+        if 0 < d < 0.8: 
+            # [수정] 비스듬한 면을 탈 때는 팽창 반경을 물리적 크기에 더 밀착시킴
+            ratio = (ROBOT_RADIUS * 0.8) / max(d, 0.05) 
+            alpha = min(math.degrees(math.asin(min(ratio, 1.0))), 25.0) # 최대 팽창각 제한
             s_idx = max(0, int(i - alpha))
             e_idx = min(len(dists) - 1, int(i + alpha))
             proc_dists[s_idx:e_idx + 1] = 0.0
         
     # ── 4. 최적 갭 중심 탐색 ────────────────────────────
-    best_idx = get_best_gap_center(proc_dists, angles)
+   best_idx = get_best_gap_center(proc_dists, angles)
     new_angle = float(angles[best_idx])
+    
+    # [추가] '면'을 따라가기 위해 현재 각도와 너무 동떨어진 갭은 지양
+    target_diff = new_angle - prev_angle
+    new_angle = prev_angle + (target_diff * 0.4) # 급격한 꺾임 방지
 
     # ── 5. 히스테리시스 + 스무딩 ────────────────────────
     if abs(new_angle - prev_angle) < HYSTERESIS_THRESHOLD:
