@@ -2,6 +2,10 @@ import serial
 import math
 import time
 
+# =========================================
+# SERIAL
+# =========================================
+
 MOTOR_PORT = "/dev/serial0"
 MOTOR_BAUD = 115200
 
@@ -20,83 +24,110 @@ lidar_ser = serial.Serial(
     timeout=1
 )
 
-# RESET
+# =========================================
+# LIDAR START
+# =========================================
+
 lidar_ser.write(bytes([0xA5, 0x40]))
 time.sleep(2)
 
-# SCAN START
+lidar_ser.reset_input_buffer()
+
 lidar_ser.write(bytes([0xA5, 0x20]))
+lidar_ser.read(7)
+
 print("LIDAR START")
 
-SAFE_RADIUS = 0.23
-EMERGENCY_DIST = 0.14
+# =========================================
+# ROBOT PARAMETER
+# =========================================
+
+EMERGENCY_DIST = 0.10
+DEAD_END_DIST = 0.18
+
 BASE_SPEED = 0.18
-MAX_W = 1.3
+
+MAX_W = 1.2
 TURN_GAIN = 1.5
+
 SEARCH_MIN = -85
 SEARCH_MAX = 85
+
 SMOOTHING = 0.75
+
+# =========================================
+# STATE
+# =========================================
+
+emergency_cooldown = 0
+prev_angle = 0
+
+# =========================================
+# MAP
+# =========================================
 
 scan_data = [10.0] * 360
 cost_map = [0.0] * 360
-prev_angle = 0
+
+# =========================================
+# UTIL
+# =========================================
 
 def normalize_angle(angle):
+    return angle % 360
 
-    while angle < 0:
-        angle += 360
-    while angle >= 360:
-        angle -= 360
-    return int(angle)
 
 def is_front_angle(angle):
     angle = normalize_angle(angle)
+    return angle <= 90 or angle >= 270
 
-    return (
-        (0 <= angle <= 90)
-        or
-        (270 <= angle <= 359)
-    )
+
+def get_robot_radius(angle):
+    angle = normalize_angle(angle)
+    if angle > 180:
+        angle -= 360
+
+    a = abs(angle)
+
+    if a <= 20:
+        return 0.03
+    elif a <= 55:
+        return 0.06
+    else:
+        return 0.08
+
+
+# =========================================
+# COSTMAP
+# =========================================
 
 def clear_costmap():
-    global cost_map
-
     for i in range(360):
         cost_map[i] = 0.0
 
-def inflate_obstacle(angle, dist):
-    global cost_map
 
-    if dist < 0.05:
+def inflate_obstacle(angle, dist):
+    robot_radius = get_robot_radius(angle)
+
+    if dist < robot_radius:
         for a in range(-90, 91):
-            idx = normalize_angle(a)
-            cost_map[idx] += 999
+            cost_map[normalize_angle(a)] += 999
         return
 
-    spread = math.degrees(
-        math.atan(SAFE_RADIUS / dist)
-    )
-    spread = int(spread)
+    spread = int(math.degrees(math.atan(robot_radius / max(dist, 0.01))))
 
-    for a in range(angle - spread,
-                   angle + spread + 1):
+    for a in range(angle - spread, angle + spread + 1):
         idx = normalize_angle(a)
+
         if not is_front_angle(idx):
             continue
 
-        cost = (
-            1.0 /
-            max(dist, 0.05)
-        ) * 8.0
-
-        center_weight = (
-            1.0 -
-            abs(a - angle)
-            / max(spread, 1)
-        )
-
+        cost = max(0.0, (1.2 - dist)) * 5.0
+        center_weight = 1.0 - abs(a - angle) / max(spread, 1)
         cost *= (1.0 + center_weight)
+
         cost_map[idx] += cost
+
 
 def build_costmap():
     clear_costmap()
@@ -104,31 +135,43 @@ def build_costmap():
     for angle in range(360):
         if not is_front_angle(angle):
             continue
+
         dist = scan_data[angle]
-        if dist < 0.03:
+
+        if dist < 0.03 or dist > 4.0:
             continue
-        if dist > 4.0:
-            continue
+
         inflate_obstacle(angle, dist)
+
+
+# =========================================
+# PATH PLANNING
+# =========================================
 
 def find_best_direction():
     global prev_angle
-    best_angle = None
-    best_score = -999999
 
-    for angle in range(SEARCH_MIN,
-                       SEARCH_MAX + 1):
+    best_angle = None
+    best_score = -1e9
+
+    for angle in range(SEARCH_MIN, SEARCH_MAX + 1):
+
         idx = normalize_angle(angle)
+
         if not is_front_angle(idx):
             continue
-        cost = cost_map[idx]
+
         front_dist = scan_data[idx]
-        straight_penalty = abs(angle) * 0.05
+        cost = cost_map[idx]
+
+        straight_penalty = abs(angle) * 0.18
+
         score = (
-            front_dist * 5.0
-            - cost * 2.5
+            front_dist * 6.0
+            - cost * 3.0
             - straight_penalty
         )
+
         if score > best_score:
             best_score = score
             best_angle = angle
@@ -136,138 +179,156 @@ def find_best_direction():
     if best_angle is None:
         return None
 
-    best_angle = (
-        prev_angle * SMOOTHING
-        +
-        best_angle * (1.0 - SMOOTHING)
-    )
+    best_angle = prev_angle * SMOOTHING + best_angle * (1 - SMOOTHING)
     prev_angle = best_angle
+
     return best_angle
 
+
+# =========================================
+# CONTROL
+# =========================================
+
 def compute_cmd(angle):
+
     w = math.radians(angle) * TURN_GAIN
     w = max(min(w, MAX_W), -MAX_W)
 
-    speed_scale = (
-        1.0 -
-        min(abs(angle) / 90.0, 0.7)
+    speed_scale = 1.0 - min(abs(angle) / 90.0, 0.8)
+
+    front_dist = min(
+        scan_data[normalize_angle(a)]
+        for a in range(-8, 9)
     )
 
-    front_dist = scan_data[0]
     obstacle_scale = min(front_dist / 0.8, 1.0)
+
     speed_scale *= obstacle_scale
-    speed_scale = max(speed_scale, 0.35)
+    speed_scale = max(speed_scale, 0.25)
+
     v = BASE_SPEED * speed_scale
+
     return v, w
 
+
 def send_cmd(v, w):
-    msg = f"{v:.3f},{w:.3f}\n"
-    motor_ser.write(msg.encode())
+    motor_ser.write(f"{v:.3f},{w:.3f}\n".encode())
+
 
 def stop_robot():
     send_cmd(0.0, 0.0)
 
+
+# =========================================
+# EMERGENCY
+# =========================================
+
 def emergency_escape():
+    global emergency_cooldown
+
     print("EMERGENCY")
 
-    send_cmd(-0.05, 0.0)
-    time.sleep(0.18)
+    send_cmd(-0.08, 0.0)
+    time.sleep(0.4)
 
-    send_cmd(0.02, 1.2)
-    time.sleep(0.45)
+    send_cmd(0.0, 0.0)
+    time.sleep(0.1)
+
+    send_cmd(0.0, 1.2)
+    time.sleep(0.5)
+
+    emergency_cooldown = 20
 
 
-print("====================================")
-print(" FOOTPRINT NAVIGATION START ")
-print("====================================")
+# =========================================
+# DEAD END
+# =========================================
+
+def is_dead_end():
+
+    front = min(scan_data[normalize_angle(a)] for a in range(-18, 19))
+    left = min(scan_data[normalize_angle(a)] for a in range(55, 86))
+    right = min(scan_data[normalize_angle(a)] for a in range(-85, -54))
+
+    return front < DEAD_END_DIST and left < DEAD_END_DIST and right < DEAD_END_DIST
+
+
+# =========================================
+# MAIN LOOP
+# =========================================
+
+print("FOOTPRINT NAVIGATION START")
 
 try:
     while True:
-        data = lidar_ser.read(5)
 
+        if emergency_cooldown > 0:
+            emergency_cooldown -= 1
+            continue
+
+        data = lidar_ser.read(5)
         if len(data) != 5:
             continue
-        s_flag = data[0] & 0x01
 
-        s_inv_flag = (
-            (data[0] & 0x02) >> 1
-        )
+        s_flag = data[0] & 0x01
+        s_inv_flag = (data[0] & 0x02) >> 1
 
         if s_inv_flag != (1 - s_flag):
             continue
-        check_bit = data[1] & 0x01
 
-        if check_bit != 1:
+        if (data[1] & 0x01) != 1:
             continue
+
         quality = data[0] >> 2
-
-        if quality < 10:
-            continue
-        angle_q6 = (
-            (data[1] >> 1)
-            |
-            (data[2] << 7)
-        )
-
-        angle = angle_q6 / 64.0
-        angle = int(angle)
-
-        if not is_front_angle(angle):
+        if quality < 3:
             continue
 
-        distance_q2 = (
-            data[3]
-            |
-            (data[4] << 8)
-        )
+        angle_q6 = (data[1] >> 1) | (data[2] << 7)
+        angle = int(angle_q6 / 64.0)
 
-        distance = distance_q2 / 4.0
-
-        # mm -> m
-        dist = distance / 1000.0
-
-        # filtering
-        if dist < 0.03:
+        if angle < 0 or angle >= 360:
             continue
 
-        if dist > 6.0:
+        distance_q2 = data[3] | (data[4] << 8)
+        dist = (distance_q2 / 4.0) / 1000.0
+
+        if dist < 0.03 or dist > 6.0:
             continue
 
         scan_data[angle] = dist
 
-        build_costmap()
+        if s_flag == 1:
 
-        front_min = 10.0
+            build_costmap()
 
-        for a in range(-10, 11):
-            idx = normalize_angle(a)
-            d = scan_data[idx]
-            if d < front_min:
-                front_min = d
+            front_min = min(
+                scan_data[normalize_angle(a)]
+                for a in range(-10, 11)
+            )
 
-        if front_min < EMERGENCY_DIST:
-            emergency_escape()
-            continue
+            if front_min < EMERGENCY_DIST:
+                emergency_escape()
+                continue
 
-        best_angle = find_best_direction()
+            if is_dead_end():
+                print("DEAD END → EMERGENCY ESCAPE")
+                emergency_escape()
+                continue
 
-        if best_angle is None:
-            send_cmd(0.0, 1.0)
-            time.sleep(0.25)
-            continue
+            best_angle = find_best_direction()
 
-        v, w = compute_cmd(best_angle)
-        send_cmd(v, w)
+            if best_angle is None:
+                send_cmd(0.0, 1.0)
+                time.sleep(0.2)
+                continue
 
-        print(
-            f"DIR:{best_angle:6.1f} | "
-            f"v:{v:.2f} | "
-            f"w:{w:.2f} | "
-            f"front:{front_min:.2f}"
-        )
+            v, w = compute_cmd(best_angle)
+            send_cmd(v, w)
+
+            print(f"DIR:{best_angle:6.1f} | v:{v:.2f} | w:{w:.2f} | front:{front_min:.2f}")
 
 except KeyboardInterrupt:
-    print("\nSTOP")
+    print("STOP")
 
 finally:
     stop_robot()
