@@ -1,7 +1,10 @@
+# =========================================
+# 필요한 라이브러리
+# =========================================
+
 import serial
 import math
 import time
-from collections import deque
 
 # =========================================
 # SERIAL
@@ -29,11 +32,10 @@ lidar_ser = serial.Serial(
 # LIDAR START
 # =========================================
 
-# RESET
 lidar_ser.write(bytes([0xA5, 0x40]))
+
 time.sleep(2)
 
-# SCAN START
 lidar_ser.write(bytes([0xA5, 0x20]))
 
 print("LIDAR START")
@@ -42,42 +44,27 @@ print("LIDAR START")
 # PARAMETERS
 # =========================================
 
-SAFE_RADIUS = 0.05
+# 장애물 안전 반경
+SAFE_RADIUS = 0.035
 
-EMERGENCY_DIST = 0.03
-DEAD_END_DIST = 0.10
+# 기본 전진 속도
+BASE_SPEED = 0.15
 
-BASE_SPEED = 0.18
+# 최대 회전 속도
+MAX_W = 1.5
 
-MAX_W = 1.3
-TURN_GAIN = 1.5
+# 회전 민감도
+TURN_GAIN = 1.8
 
+# 탐색 범위
 SEARCH_MIN = -85
 SEARCH_MAX = 85
 
+# 조향 부드럽게
 SMOOTHING = 0.75
 
-# =========================================
-# RECOVERY PARAMETERS
-# =========================================
-
-RECOVERY_BACK_TIME = 0.28
-RECOVERY_ROTATE_TIME = 0.55
-RECOVERY_FORWARD_TIME = 0.35
-
-RECOVERY_BACK_SPEED = -0.07
-RECOVERY_ROTATE_W = 1.2
-RECOVERY_FORWARD_SPEED = 0.08
-
-GAP_THRESHOLD = 0.22
-
-# =========================================
-# MEMORY
-# =========================================
-
-path_history = deque(maxlen=300)
-
-is_backtracking = False
+# 통과 가능 거리
+GAP_THRESHOLD = 0.14
 
 # =========================================
 # MAP
@@ -128,19 +115,6 @@ def clear_costmap():
 def inflate_obstacle(angle, dist):
 
     global cost_map
-
-    if dist < 0.05:
-
-        for a in range(
-            angle - 90,
-            angle + 91
-        ):
-
-            idx = normalize_angle(a)
-
-            cost_map[idx] += 999
-
-        return
 
     spread = math.degrees(
         math.atan(SAFE_RADIUS / dist)
@@ -235,6 +209,7 @@ def find_best_direction():
     if best_angle is None:
         return None
 
+    # 조향 부드럽게
     best_angle = (
         prev_angle * SMOOTHING
         +
@@ -249,6 +224,7 @@ def find_best_direction():
 
 def compute_cmd(angle):
 
+    # 회전 계산
     w = math.radians(angle) * TURN_GAIN
 
     w = max(
@@ -256,11 +232,13 @@ def compute_cmd(angle):
         -MAX_W
     )
 
+    # 회전 많으면 감속
     speed_scale = (
         1.0 -
         min(abs(angle) / 90.0, 0.7)
     )
 
+    # 전방 거리 기반 감속
     front_dist = scan_data[0]
 
     obstacle_scale = min(
@@ -270,9 +248,10 @@ def compute_cmd(angle):
 
     speed_scale *= obstacle_scale
 
+    # 최소 속도 보장
     speed_scale = max(
         speed_scale,
-        0.35
+        0.25
     )
 
     v = BASE_SPEED * speed_scale
@@ -281,23 +260,11 @@ def compute_cmd(angle):
 
 # =========================================
 
-def send_cmd(v, w, record=True):
-
-    global is_backtracking
+def send_cmd(v, w):
 
     msg = f"{v:.3f},{w:.3f}\n"
 
     motor_ser.write(msg.encode())
-
-    if (
-        record
-        and
-        not is_backtracking
-    ):
-
-        path_history.append(
-            (v, w, time.time())
-        )
 
 # =========================================
 
@@ -306,141 +273,11 @@ def stop_robot():
     send_cmd(0.0, 0.0)
 
 # =========================================
-
-def compute_gap_score(start_angle, end_angle):
-
-    score = 0.0
-
-    continuous = 0
-    max_continuous = 0
-
-    for a in range(start_angle, end_angle + 1):
-
-        idx = normalize_angle(a)
-
-        d = scan_data[idx]
-
-        d = min(d, 2.0)
-
-        if d > GAP_THRESHOLD:
-
-            continuous += 1
-
-            score += d
-
-        else:
-
-            max_continuous = max(
-                max_continuous,
-                continuous
-            )
-
-            continuous = 0
-
-    max_continuous = max(
-        max_continuous,
-        continuous
-    )
-
-    score += max_continuous * 0.35
-
-    return score
-
-# =========================================
-
-def emergency_escape():
-
-    global is_backtracking
-
-    print("================================")
-    print(" SMART RECOVERY ")
-    print("================================")
-
-    is_backtracking = True
-
-    # BACKWARD
-
-    send_cmd(
-        RECOVERY_BACK_SPEED,
-        0.0,
-        record=False
-    )
-
-    time.sleep(RECOVERY_BACK_TIME)
-
-    stop_robot()
-
-    time.sleep(0.08)
-
-    # SPACE ANALYSIS
-
-    left_score = compute_gap_score(
-        25,
-        90
-    )
-
-    right_score = compute_gap_score(
-        -90,
-        -25
-    )
-
-    print(
-        f"LEFT:{left_score:.2f} | "
-        f"RIGHT:{right_score:.2f}"
-    )
-
-    # SELECT DIRECTION
-
-    if left_score > right_score:
-
-        rotate_w = RECOVERY_ROTATE_W
-
-        print("ESCAPE LEFT")
-
-    else:
-
-        rotate_w = -RECOVERY_ROTATE_W
-
-        print("ESCAPE RIGHT")
-
-    # ROTATE
-
-    send_cmd(
-        0.02,
-        rotate_w,
-        record=False
-    )
-
-    time.sleep(RECOVERY_ROTATE_TIME)
-
-    stop_robot()
-
-    time.sleep(0.05)
-
-    # FORWARD ESCAPE
-
-    send_cmd(
-        RECOVERY_FORWARD_SPEED,
-        0.0,
-        record=False
-    )
-
-    time.sleep(RECOVERY_FORWARD_TIME)
-
-    stop_robot()
-
-    time.sleep(0.15)
-
-    is_backtracking = False
-
-    print("RECOVERY END")
-
-# =========================================
 # MAIN
 # =========================================
 
 print("====================================")
-print(" FOOTPRINT NAVIGATION START ")
+print(" FTG NAVIGATION START ")
 print("====================================")
 
 try:
@@ -499,53 +336,39 @@ try:
         if dist > 6.0:
             continue
 
+        # 라이다 데이터 저장
         scan_data[angle] = dist
 
+        # 장애물 맵 생성
         build_costmap()
 
-        # FRONT CHECK
-
-        front_min = 10.0
-
-        for a in range(-10, 11):
-
-            idx = normalize_angle(a)
-
-            d = scan_data[idx]
-
-            if d < front_min:
-                front_min = d
-
-        # EMERGENCY
-
-        if front_min < EMERGENCY_DIST:
-
-            emergency_escape()
-
-            continue
-
-        # NORMAL NAVIGATION
-
+        # 최적 방향 탐색
         best_angle = find_best_direction()
 
+        # 방향 못찾으면 회전
         if best_angle is None:
 
             send_cmd(0.0, 1.0)
 
-            time.sleep(0.25)
+            time.sleep(0.03)
 
             continue
 
+        # 속도 계산
         v, w = compute_cmd(best_angle)
 
+        # 모터 전송
         send_cmd(v, w)
 
         print(
             f"DIR:{best_angle:6.1f} | "
             f"v:{v:.2f} | "
-            f"w:{w:.2f} | "
-            f"front:{front_min:.2f}"
+            f"w:{w:.2f}"
         )
+
+# =========================================
+# 종료
+# =========================================
 
 except KeyboardInterrupt:
 
