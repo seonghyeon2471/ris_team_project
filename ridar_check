@@ -1,0 +1,63 @@
+import serial
+import math
+
+# =========================
+# LiDAR SERIAL 설정
+# =========================
+LIDAR_PORT = "/dev/ttyUSB0"
+LIDAR_BAUD = 460800
+
+ser = serial.Serial(
+    port=LIDAR_PORT,
+    baudrate=LIDAR_BAUD,
+    timeout=1
+)
+
+print("LiDAR 측정 시작")
+
+while True:
+
+    # 패킷 헤더 찾기
+    if ser.read() == b'\x54':
+
+        # 두 번째 헤더 확인
+        if ser.read() == b'\x2C':
+
+            data = ser.read(45)
+
+            if len(data) != 45:
+                continue
+
+            # 시작 각도
+            start_angle = (data[1] << 8 | data[0]) / 100.0
+
+            # 끝 각도
+            end_angle = (data[43] << 8 | data[42]) / 100.0
+
+            # 각도 보정
+            if end_angle < start_angle:
+                end_angle += 360
+
+            angle_step = (end_angle - start_angle) / 11.0
+
+            # 거리 데이터 출력
+            for i in range(12):
+
+                idx = 2 + i * 3
+
+                distance = data[idx] | (data[idx + 1] << 8)
+                intensity = data[idx + 2]
+
+                angle = start_angle + angle_step * i
+
+                if angle >= 360:
+                    angle -= 360
+
+                # mm → cm 변환
+                distance_cm = distance / 10.0
+
+                print(
+                    f"Angle: {angle:6.2f} deg | "
+                    f"Distance: {distance_cm:6.1f} cm | "
+                    f"Intensity: {intensity}"
+                )
