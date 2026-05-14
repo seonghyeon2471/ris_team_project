@@ -6,4 +6,10 @@ while True:
 
     scan = lidar.read_scan()
 
-    print(scan[:5], "count =", len(scan))
+    if len(scan) > 0:
+
+        print(
+            scan[:5],
+            "count =",
+            len(scan)
+        )
