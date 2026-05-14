@@ -52,7 +52,7 @@ MAX_W     = 1.5
 TURN_GAIN = 1.8
 
 SCAN_LIMIT   = 150
-FRONT_RANGE  = 60
+FRONT_RANGE  = 70
 
 # =========================================
 # FILTER PARAMETER
