@@ -58,16 +58,16 @@ FRONT_RANGE  = 60
 # FILTER PARAMETER
 # =========================================
 
-EMA_ALPHA = 0.3
+EMA_ALPHA = 0.5   # ★ 0.3 → 0.5 (장애물 빠른 반영)
 MEDIAN_K  = 2
 
 # =========================================
 # SMOOTHING PARAMETER
 # =========================================
 
-SMOOTHING_NORMAL = 0.70   # ★ 0.80 → 0.70 (꺾임 후 복귀 빠르게)
+SMOOTHING_NORMAL = 0.70
 SMOOTHING_DANGER = 0.25
-DANGER_DIST      = 18
+DANGER_DIST      = 28   # ★ 18 → 28cm (위험 스무딩 더 일찍 전환)
 
 # =========================================
 # GAP PARAMETER  (단위: cm)
@@ -76,7 +76,7 @@ DANGER_DIST      = 18
 SAFE_DIST          = 17
 INFLATION_MAX_DIST = 25
 
-FRONT_CLEAR_DIST  = 23
+FRONT_CLEAR_DIST  = 35   # ★ 23 → 35cm (전방 열림 판단 거리 확대 → 회피 더 일찍 시작)
 FRONT_CLEAR_RANGE = 15
 
 # =========================================
@@ -379,7 +379,7 @@ def compute_cmd(target_angle, on_ramp=False):
     if on_ramp:
         return RAMP_SPEED, w
 
-    obstacle_scale = min(front_min / 40.0, 1.0)
+    obstacle_scale = min(front_min / 60.0, 1.0)   # ★ 40 → 60cm (더 일찍 감속 시작)
     speed          = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
 
     return speed, w
