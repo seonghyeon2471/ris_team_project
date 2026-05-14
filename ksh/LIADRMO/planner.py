@@ -81,7 +81,7 @@ class GapPlanner:
             return 0.0, 1.5
 
         # steering
-        w = -math.radians(target) * 1.6
+        w = -math.radians(target) * 1.2
 
         # dead-end escape boost
         if abs(target) < 10:
