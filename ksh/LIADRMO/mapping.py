@@ -12,23 +12,23 @@ class LocalMapper:
         self.robot_x = MAP_SIZE // 2
         self.robot_y = MAP_SIZE - 50
 
+    # 🔥 출발 뒤쪽 + 하단 완전 금지
     def add_virtual_wall(self):
 
-        # 뒤쪽 완전 금지 (부채꼴)
-        for y in range(self.robot_y, MAP_SIZE):
-            for x in range(MAP_SIZE):
-                self.grid[y, x] = 1.0
+        self.grid[self.robot_y:, :] = 1.0
 
     def update(self, scan):
 
+        # decay
         self.visit *= VISIT_DECAY
+
+        # robot footprint
+        self.visit[self.robot_y-2:self.robot_y+2,
+                   self.robot_x-2:self.robot_x+2] += 1.0
 
         self.add_virtual_wall()
 
-        # 로봇 위치 cost 감소
-        self.visit[self.robot_y-2:self.robot_y+2,
-                   self.robot_x-2:self.robot_x+2] += 1
-
+        # lidar projection
         for angle, dist in scan:
 
             rad = math.radians(angle)
