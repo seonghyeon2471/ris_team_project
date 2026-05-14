@@ -59,13 +59,13 @@ MEDIAN_K  = 2
 SMOOTHING_NORMAL = 0.72
 SMOOTHING_DANGER = 0.45
 
-DANGER_DIST = 18
+DANGER_DIST = 16
 
 # =========================================
 # GAP PARAMETER
 # =========================================
 
-SAFE_DIST          = 18
+SAFE_DIST          = 16
 INFLATION_MAX_DIST = 20
 
 FRONT_CLEAR_DIST  = 24
