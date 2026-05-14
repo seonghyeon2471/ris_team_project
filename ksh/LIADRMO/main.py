@@ -3,7 +3,6 @@ import time
 from lidar import SimpleLidar
 from motor import MotorController
 from planner import GapPlanner
-from mapping import SimpleMapper
 
 print("SYSTEM START")
 
@@ -16,8 +15,6 @@ lidar = SimpleLidar()
 motor = MotorController()
 
 planner = GapPlanner()
-
-mapper = SimpleMapper()
 
 # =========================
 # LOOP
@@ -33,8 +30,6 @@ try:
 
         if len(scan) == 0:
             continue
-
-        # mapper.update(scan)
 
         v, w = planner.compute_control(scan)
 
