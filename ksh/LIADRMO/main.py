@@ -37,8 +37,6 @@ try:
 
         counter += 1
 
-        if counter % 5 == 0:
-
         time.sleep(0.02)
 
 except KeyboardInterrupt:
