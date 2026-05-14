@@ -1,85 +1,83 @@
 import serial
-import math
-import time
 import numpy as np
-from rplidar import RPLidar
+import time
+import math
 
 # =========================================
-# SERIAL (Arduino)
+# SERIAL
 # =========================================
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
+lidar_ser = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.01)
 
 # =========================================
-# LIDAR (RPLIDAR SDK 방식)
+# MAP
 # =========================================
-lidar = RPLidar('/dev/ttyUSB0', baudrate=460800)
+scan = np.full(360, 100.0)
+
+MAX_DIST = 150.0
 
 # =========================================
-# ROBOT PARAMETER
-# =========================================
-SCAN_SIZE = 360
-scan_data = np.full(SCAN_SIZE, 100.0)
-
-# 거리 제한
-MAX_DIST = 150
-
-# control parameter
-BASE_V = 0.12
-KP_W = 1.2
-STOP_DIST = 5.0   # cm
-
-# =========================================
-# SEND MOTOR
+# MOTOR
 # =========================================
 def send_cmd(v, w):
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
 # =========================================
-# BUILD MAP FROM LIDAR
+# LIDAR RESET + START
 # =========================================
-def update_scan():
-    global scan_data
+def start_lidar():
+    lidar_ser.write(bytes([0xA5, 0x40]))  # reset
+    time.sleep(2)
+    lidar_ser.reset_input_buffer()
 
-    scan_data[:] = MAX_DIST
-
-    # 하나의 full scan 받기
-    for scan in lidar.iter_scans():
-        for (_, angle, dist) in scan:
-
-            if dist < 3 or dist > MAX_DIST:
-                continue
-
-            idx = int(angle) % 360
-            scan_data[idx] = min(scan_data[idx], dist)
-
-        break   # 한 프레임만 사용 (중요: 실시간 안정성)
+    lidar_ser.write(bytes([0xA5, 0x20]))  # scan start
+    time.sleep(0.5)
 
 # =========================================
-# CONTROL LOGIC
+# PARSE RAW PACKET (5 bytes)
 # =========================================
+def read_lidar():
+    raw = lidar_ser.read(5)
+    if len(raw) != 5:
+        return None
+
+    try:
+        # sync check
+        if (raw[0] & 0x01) != 1:
+            return None
+
+        if (raw[1] & 0x01) != 1:
+            return None
+
+        angle = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0) % 360
+        dist = (raw[3] | (raw[4] << 8)) / 40.0
+
+        if 3 < dist < MAX_DIST:
+            return angle, dist
+
+    except:
+        return None
+
+    return None
+
+# =========================================
+# CONTROL
+# =========================================
+BASE_V = 0.12
+KP_W = 0.02
+
 def control():
+    front = min(np.r_[scan[350:360], scan[0:10]])
+    left = np.mean(scan[80:100])
+    right = np.mean(scan[260:280])
 
-    # front (±10도)
-    front = np.min(scan_data[350:360].tolist() + scan_data[0:10].tolist())
+    # front obstacle
+    if front < 5:
+        return 0.0, 1.2
 
-    # left / right
-    left = np.mean(scan_data[80:100])
-    right = np.mean(scan_data[260:280])
+    # wall follow
+    if left < 30 or right < 30:
 
-    # =====================================
-    # 1. FRONT OBSTACLE → TURN
-    # =====================================
-    if front < STOP_DIST:
-        v = 0.0
-        w = 1.2   # 제자리 회전
-        return v, w
-
-    # =====================================
-    # 2. WALL FOLLOW (5cm 유지)
-    # =====================================
-    if min(left, right) < 30:
-
-        # 더 가까운 벽 따라가기
         if left < right:
             error = 5.0 - left
             w = -KP_W * error
@@ -87,47 +85,38 @@ def control():
             error = right - 5.0
             w = KP_W * error
 
-        v = BASE_V
-        return v, w
+        return BASE_V, w
 
-    # =====================================
-    # 3. NO WALL → GO STRAIGHT
-    # =====================================
-    v = BASE_V
-    w = 0.0
-    return v, w
+    return BASE_V, 0.0
 
 # =========================================
-# MAIN LOOP
+# MAIN
 # =========================================
-print("ROBOT START")
+print("START")
+
+start_lidar()
+
+last_time = time.time()
 
 try:
-    # LiDAR start
-    lidar.start_motor()
-    time.sleep(1)
+    while True:
 
-    for scan in lidar.iter_scans():
+        # -------- LIDAR UPDATE --------
+        data = read_lidar()
+        if data is not None:
+            angle, dist = data
+            scan[angle] = dist
 
-        # scan update
-        scan_data[:] = MAX_DIST
+        # slow down update
+        if time.time() - last_time > 0.05:
 
-        for (_, angle, dist) in scan:
+            v, w = control()
+            send_cmd(v, w)
 
-            if 3 < dist < MAX_DIST:
-                idx = int(angle) % 360
-                scan_data[idx] = min(scan_data[idx], dist)
+            print(f"front:{np.min(np.r_[scan[350:360], scan[0:10]]):.1f} v:{v:.2f} w:{w:.2f}")
 
-        # control
-        v, w = control()
-        send_cmd(v, w)
-
-        print(f"v:{v:.2f} w:{w:.2f} front:{np.min(scan_data[350:360].tolist()+scan_data[0:10].tolist()):.1f}")
+            last_time = time.time()
 
 except KeyboardInterrupt:
-    print("STOP")
-
-finally:
     send_cmd(0, 0)
-    lidar.stop()
-    lidar.disconnect()
+    print("STOP")
