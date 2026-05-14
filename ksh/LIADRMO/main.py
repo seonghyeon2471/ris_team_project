@@ -60,6 +60,7 @@ while True:
     # -----------------------------------------
     n = len(scan)
     front = scan[:15] + scan[-15:]
+    front_dists = [x[0] for x in front]
 
     if min(front) < SAFE_DIST:
         # 무조건 회피 (후진 + 회전)
