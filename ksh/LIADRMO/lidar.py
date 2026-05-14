@@ -27,7 +27,7 @@ class SimpleLidar:
         time.sleep(2)
 
         self.iterator = self.lidar.iter_scans(
-            max_buf_meas=3000
+            max_buf_meas=12000
         )
 
     def read_scan(self):
