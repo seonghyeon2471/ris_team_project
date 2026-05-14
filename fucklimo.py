@@ -1,235 +1,211 @@
-import numpy as np
+import serial
 import math
+import time
 
-# =====================================================
-# PARAMETERS
-# =====================================================
-MAX_SPEED = 0.22
-MAX_W = 1.2
+# =========================================
+# 1. SERIAL CONFIGURATION
+# =========================================
+MOTOR_PORT = "/dev/serial0"
+MOTOR_BAUD = 115200
+LIDAR_PORT = "/dev/ttyUSB0"
+LIDAR_BAUD = 460800
 
-FRONT_RANGE = 75
-DT = 0.05
+try:
+    motor_ser = serial.Serial(MOTOR_PORT, MOTOR_BAUD, timeout=0.1)
+    lidar_ser = serial.Serial(LIDAR_PORT, LIDAR_BAUD, timeout=0.1)
+except Exception as e:
+    print(f"Serial Connection Error: {e}")
+    exit()
 
-ROBOT_RADIUS = 0.10
-SAFE_MARGIN = 0.05
+# =========================================
+# 2. PARAMETERS (3cm 마진 & 직진성 강화)
+# =========================================
+# 차량 물리 크기
+CAR_WIDTH = 0.20
+SAFETY_RADIUS = 0.13   # 차량 반폭(10cm) + 여유(3cm)
 
-EMERGENCY_DIST = 0.12
+# 주행 성능
+BASE_SPEED = 0.25      # 직선 주행 속도 (상향)
+MIN_SPEED = 0.08
+MAX_W = 1.2            # 최대 회전 속도
 
-# rollout
-ROLLOUT_TIME = 0.9
-ROLLOUT_STEPS = int(ROLLOUT_TIME / DT)
+# 시간 제어 (상태 유지 시간)
+DRIVE_DURATION = 0.7   # 한 번 방향 잡고 직진할 시간 (초)
+TURN_DURATION = 0.25   # 회전 보정 시간 (초)
 
-# steering samples
-STEER_CANDIDATES = np.linspace(-1.0, 1.0, 21)
+# 거리 임계값
+SAFE_DIST = 0.18       # 좁은 통로 인식을 위해 하향
+EMERGENCY_DIST = 0.12  # 충돌 방지 최소 거리
+MAX_LIDAR_DIST = 4.0
 
-# costs
-GOAL_GAIN = 2.2
-CLEAR_GAIN = 1.6
-CENTER_GAIN = 0.8
-EDGE_PENALTY = 2.0
-TURN_PENALTY = 0.5
+# =========================================
+# 3. STATE & UTIL
+# =========================================
+STATE_SCAN = 0
+STATE_TURN = 1
+STATE_DRIVE = 2
 
-# speed
-MIN_SPEED = 0.06
+current_state = STATE_SCAN
+state_start_time = 0
+target_v, target_w = 0, 0
 
+scan_data = [MAX_LIDAR_DIST] * 360
 
-# =====================================================
-# STATE
-# =====================================================
-class FTGState:
+def normalize_angle(angle):
+    return int(angle % 360)
 
-    def __init__(self):
+def get_range(angle):
+    return scan_data[normalize_angle(angle)]
 
-        self.prev_w = 0.0
-        self.stuck_count = 0
-        self.prev_goal_dist = 999.0
+def send_cmd(v, w):
+    motor_ser.write(f"{v:.3f},{w:.3f}\n".encode())
 
+# =========================================
+# 4. 핵심 로직 함수
+# =========================================
 
-# =====================================================
-# SAFE DISTANCE
-# =====================================================
-def safe_distance(scan, angle_deg):
+def smooth_scan():
+    global scan_data
+    filtered = scan_data[:]
+    for i in range(360):
+        # Median Filter (노이즈 제거)
+        values = [scan_data[normalize_angle(i + k)] for k in range(-2, 3)]
+        values.sort()
+        filtered[i] = values[2]
+    scan_data = filtered
 
-    idx = int(angle_deg) % 360
+def find_closest_obstacle():
+    min_dist = 999
+    min_angle = 0
+    # 탐색 범위를 정면 위주(-80~80)로 제한하여 무한회전 방지
+    for angle in range(-80, 81):
+        d = get_range(angle)
+        if 0.05 < d < min_dist:
+            min_dist = d
+            min_angle = angle
+    return min_angle, min_dist
 
-    return float(scan[idx])
+def create_bubble(masked_scan, obs_angle, obs_dist):
+    # 3cm 마진을 포함한 동적 버블 계산
+    dist = max(obs_dist, SAFETY_RADIUS + 0.01)
+    try:
+        # asin(0.13 / 거리)로 필요한 각도 산출
+        bubble_radius_deg = math.degrees(math.asin(SAFETY_RADIUS / dist))
+    except:
+        bubble_radius_deg = 40
+    
+    bubble_radius_deg = min(bubble_radius_deg, 45) # 너무 커서 길을 막지 않게 제한
 
+    for a in range(int(obs_angle - bubble_radius_deg), int(obs_angle + bubble_radius_deg + 1)):
+        masked_scan[normalize_angle(a)] = 0.0
 
-# =====================================================
-# COLLISION CHECK
-# =====================================================
-def collision(scan, rel_angle, dist):
+def find_gaps(masked_scan):
+    gaps = []
+    gap_start = None
+    for angle in range(-80, 81):
+        if masked_scan[normalize_angle(angle)] > SAFE_DIST:
+            if gap_start is None: gap_start = angle
+        else:
+            if gap_start is not None:
+                gaps.append((gap_start, angle - 1))
+                gap_start = None
+    if gap_start is not None: gaps.append((gap_start, 80))
+    return gaps
 
-    d = safe_distance(scan, rel_angle)
-
-    return d < dist
-
-
-# =====================================================
-# GAP WIDTH ESTIMATE
-# =====================================================
-def gap_width(scan, angle_deg):
-
-    width = 0
-
-    for a in range(angle_deg - 12, angle_deg + 13):
-
-        if safe_distance(scan, a) > 0.40:
-            width += 1
-
-    return width
-
-
-# =====================================================
-# TRAJECTORY SCORE
-# =====================================================
-def evaluate_trajectory(
-        scan,
-        goal_angle,
-        w_cmd):
-
-    x = 0.0
-    y = 0.0
-    th = 0.0
-
-    min_clearance = 999.0
-
-    for _ in range(ROLLOUT_STEPS):
-
-        v = MAX_SPEED
-
-        th += w_cmd * DT
-
-        x += v * math.cos(th) * DT
-        y += v * math.sin(th) * DT
-
-        rel_deg = int(math.degrees(th))
-
-        clearance = safe_distance(scan, rel_deg)
-
-        min_clearance = min(min_clearance, clearance)
-
-        # collision predict
-        if clearance < ROBOT_RADIUS + SAFE_MARGIN:
-            return -9999
-
-    final_angle = math.degrees(th)
-
-    # goal alignment
-    goal_score = math.exp(
-        -0.04 * abs(goal_angle - final_angle)
-    )
-
-    # center preference
-    center_score = math.exp(
-        -0.015 * abs(final_angle)
-    )
-
-    # corridor width
-    width = gap_width(scan, int(final_angle))
-
-    width_score = width / 25.0
-
-    # edge penalty
-    edge_cost = 0.0
-
-    if min_clearance < 0.25:
-        edge_cost = EDGE_PENALTY * (0.25 - min_clearance)
-
-    score = (
-        GOAL_GAIN * goal_score +
-        CLEAR_GAIN * width_score +
-        CENTER_GAIN * center_score -
-        edge_cost -
-        TURN_PENALTY * abs(w_cmd)
-    )
-
+def score_gap_linear(gap):
+    start, end = gap
+    center = (start + end) / 2.0
+    avg_dist = sum(scan_data[normalize_angle(a)] for a in range(start, end + 1)) / (end - start + 1)
+    
+    # 직진성 강조: 정면(0도)에서 멀어질수록 감점 대폭 강화
+    score = (avg_dist * 2.0) - (abs(center) * 2.5)
     return score
 
+def recovery_behavior():
+    print("!!! EMERGENCY !!!")
+    send_cmd(-0.12, 0.0) # 후진
+    time.sleep(0.5)
+    send_cmd(0.0, 1.0)   # 탈출 회전
+    time.sleep(0.4)
 
-# =====================================================
-# MAIN PLANNER
-# =====================================================
-def get_gap_navigation_v11(
-        scan_robot,
-        goal_angle,
-        goal_distance,
-        state):
+# =========================================
+# 5. MAIN LOOP
+# =========================================
+lidar_ser.write(bytes([0xA5, 0x40])) # 모터 시작
+time.sleep(1)
+lidar_ser.write(bytes([0xA5, 0x20])) # 스캔 시작
+lidar_ser.read(7)
 
-    # =================================================
-    # emergency brake
-    # =================================================
-    front = []
+print("RACE START - LINEAR MODE")
 
-    for a in range(-15, 16):
-        front.append(safe_distance(scan_robot, a))
+try:
+    while True:
+        # --- LIDAR DATA READING ---
+        raw = lidar_ser.read(5)
+        if len(raw) < 5: continue
+        
+        s_flag = raw[0] & 0x01
+        angle = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0)
+        dist = ((raw[3] | (raw[4] << 8)) / 4.0) / 1000.0
 
-    if np.min(front) < EMERGENCY_DIST:
+        if 0 <= angle < 360 and 0.02 < dist < MAX_LIDAR_DIST:
+            scan_data[angle] = (0.5 * scan_data[angle]) + (0.5 * dist)
 
-        return 0.0, 0.0, {
-            "mode": "EMERGENCY"
-        }
+        # --- STATE MACHINE ---
+        now = time.time()
 
-    # =================================================
-    # progress detector
-    # =================================================
-    progress = state.prev_goal_dist - goal_distance
+        if s_flag == 1: # 한 바퀴 스캔 완료 시점
+            smooth_scan()
+            obs_angle, obs_dist = find_closest_obstacle()
 
-    if progress < 0.01:
-        state.stuck_count += 1
-    else:
-        state.stuck_count = 0
+            # 긴급 상황은 상태와 관계없이 체크
+            if obs_dist < EMERGENCY_DIST:
+                recovery_behavior()
+                current_state = STATE_SCAN
+                continue
 
-    state.prev_goal_dist = goal_distance
+            if current_state == STATE_SCAN:
+                masked_scan = scan_data[:]
+                create_bubble(masked_scan, obs_angle, obs_dist)
+                gaps = find_gaps(masked_scan)
 
-    # =================================================
-    # deadlock recovery
-    # =================================================
-    if state.stuck_count > 25:
+                if gaps:
+                    best_gap = max(gaps, key=score_gap_linear)
+                    target_angle = (best_gap[0] + best_gap[1]) / 2.0
+                    
+                    # 조향 및 속도 설정
+                    target_w = math.radians(target_angle) * 1.3
+                    target_w = max(min(target_w, MAX_W), -MAX_W)
+                    target_v = BASE_SPEED * 0.8 # 회전 시 살짝 감속
+                    
+                    current_state = STATE_TURN
+                    state_start_time = now
+                    print(f"SCAN: Path Found at {target_angle:.1f} deg. Turning...")
+                else:
+                    recovery_behavior()
 
-        state.stuck_count = 0
+        # 회전 상태 제어
+        if current_state == STATE_TURN:
+            send_cmd(target_v, target_w)
+            if now - state_start_time > TURN_DURATION:
+                current_state = STATE_DRIVE
+                state_start_time = now
+                print("TURN: Done. Full Speed Ahead!")
 
-        return 0.0, 0.9, {
-            "mode": "RECOVERY"
-        }
+        # 직진 상태 제어
+        elif current_state == STATE_DRIVE:
+            send_cmd(BASE_SPEED, 0.0) # 직진 시 조향 0으로 고정 (직진성 극대화)
+            
+            # 주행 중 정면 장애물 상시 감시
+            front_dist = min(get_range(a) for a in range(-15, 16))
+            if front_dist < SAFE_DIST or (now - state_start_time > DRIVE_DURATION):
+                current_state = STATE_SCAN
+                print("DRIVE: Re-scanning for next path.")
 
-    # =================================================
-    # steering rollout search
-    # =================================================
-    best_score = -999999
-    best_w = 0.0
-
-    for w in STEER_CANDIDATES:
-
-        score = evaluate_trajectory(
-            scan_robot,
-            goal_angle,
-            w
-        )
-
-        if score > best_score:
-
-            best_score = score
-            best_w = w
-
-    # =================================================
-    # adaptive speed
-    # =================================================
-    v = MAX_SPEED * (1.0 - abs(best_w) / MAX_W * 0.5)
-
-    v = float(np.clip(v, MIN_SPEED, MAX_SPEED))
-
-    # =================================================
-    # steering smoothing
-    # =================================================
-    w = (
-        0.65 * state.prev_w +
-        0.35 * best_w
-    )
-
-    state.prev_w = w
-
-    return v, w, {
-        "mode": "ROLLOUT",
-        "score": round(best_score, 2)
-    }
+except KeyboardInterrupt:
+    print("STOP")
+finally:
+    send_cmd(0, 0)
+    lidar_ser.write(bytes([0xA5, 0x25]))
+    lidar_ser.close()
+    motor_ser.close()
