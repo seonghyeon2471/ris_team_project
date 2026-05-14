@@ -58,17 +58,17 @@ MEDIAN_K     = 2      # 중앙값 필터 이웃 범위 (±k)
 
 SMOOTHING_NORMAL = 0.55   # 일반 주행
 SMOOTHING_DANGER = 0.20   # 위험 근접 시 반응성 강화
-DANGER_DIST      = 18     # 스무딩 전환 임계 거리 (cm)
+DANGER_DIST      = 15     # 스무딩 전환 임계 거리 (cm) — 한계값
 
 # =========================================
 # GAP PARAMETER                [Doc 4]
 # 단위: cm
 # =========================================
 
-SAFE_DIST          = 17   # Gap 유효 최소 거리 (cm)
-INFLATION_MAX_DIST = 25   # 팽창 적용 최대 거리 (cm)
+SAFE_DIST          = 15   # Gap 유효 최소 거리 (cm) — 한계값
+INFLATION_MAX_DIST = 20   # 팽창 적용 최대 거리 (cm) — 한계값
 
-FRONT_CLEAR_DIST   = 23   # 전방 열림 판단 거리 (cm)
+FRONT_CLEAR_DIST   = 20   # 전방 열림 판단 거리 (cm) — 한계값
 FRONT_CLEAR_RANGE  = 15   # 전방 열림 판단 범위 (±°)
 
 # =========================================
@@ -83,7 +83,7 @@ state             = STATE_NORMAL
 maneuver_end_time = 0.0
 rotate_dir        = 1      # +1: 좌회전, -1: 우회전 (교번)
 
-EMERGENCY_DIST   =  6     # 긴급회피 진입 거리 (cm)
+EMERGENCY_DIST   =  5     # 긴급회피 진입 거리 (cm) — 한계값
 REVERSE_DURATION = 0.35   # 후진 지속 시간 (초)
 ROTATE_DURATION  = 1.00   # 회전 지속 시간 (초) — ≈69° 회전
 REVERSE_SPEED    = -0.10  # 후진 선속도 (m/s)
