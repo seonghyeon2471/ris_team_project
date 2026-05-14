@@ -9,10 +9,10 @@ from motor import MotorController
 # INIT
 # =========================
 
-lidar  = SimpleLidar()
-mapper = LocalMapper()
+lidar   = SimpleLidar()
+mapper  = LocalMapper()
 planner = LocalPathPlanner()
-motor  = MotorController()
+motor   = MotorController()
 
 print("SYSTEM START")
 
@@ -26,7 +26,8 @@ try:
 
         scan = lidar.read_scan()
 
-        if len(scan) == 0:
+        # 스캔 포인트가 너무 적으면 신뢰도 낮으므로 스킵
+        if len(scan) < 20:
             continue
 
         # 1) 맵 업데이트 (inflated costmap 포함)
@@ -46,7 +47,8 @@ try:
             f"PATH:{len(path)} WP:{wp_idx}"
         )
 
-        time.sleep(0.03)
+        # 0.03 → 0.05: 라이다 데이터 생성 속도에 맞춰 루프 속도 낮춤
+        time.sleep(0.05)
 
 except KeyboardInterrupt:
 
