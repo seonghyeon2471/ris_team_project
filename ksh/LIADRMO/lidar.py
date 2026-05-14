@@ -8,67 +8,47 @@ class SimpleLidar:
 
         self.lidar = RPLidar(LIDAR_PORT, baudrate=LIDAR_BAUD, timeout=3)
 
-        # 🔥 완전 안정화 시퀀스
-        self.lidar.stop_motor()
+        self.lidar.stop()
         time.sleep(1)
 
-        self.lidar.disconnect()
-        time.sleep(1)
-
-        # 재연결 (중요)
-        self.lidar = RPLidar(LIDAR_PORT, baudrate=LIDAR_BAUD, timeout=3)
-
+        self.lidar.reset()
         time.sleep(2)
+
         self.lidar.start_motor()
         time.sleep(2)
 
-    # =========================
-    # SAFE SCAN (핵심)
-    # =========================
+        self.iterator = self.lidar.iter_scans(max_buf_meas=300)
+
     def read_scan(self):
 
-        try:
-            scan = self.lidar.iter_measures()
+        scan = None
 
-            points = []
+        # 최신 데이터 확보
+        for _ in range(2):
+            scan = next(self.iterator)
 
-            for _, angle, dist in scan:
-
-                if angle > 180:
-                    angle -= 360
-
-                if not (ANGLE_MIN <= angle <= ANGLE_MAX):
-                    continue
-
-                if not (MIN_LIDAR_DIST <= dist <= MAX_LIDAR_DIST):
-                    continue
-
-                points.append((angle, dist))
-
-                # 🔥 과부하 방지
-                if len(points) > 200:
-                    break
-
-            return points
-
-        except Exception as e:
-
-            print("LIDAR ERROR RESET:", e)
-
-            # 🔥 강제 복구
-            try:
-                self.lidar.stop()
-                self.lidar.stop_motor()
-                self.lidar.disconnect()
-            except:
-                pass
-
-            time.sleep(1)
-
-            # 재초기화
-            self.__init__()
-
+        if not scan:
             return []
+
+        points = []
+
+        for _, angle, dist in scan:
+
+            if angle > 180:
+                angle -= 360
+
+            if not (ANGLE_MIN <= angle <= ANGLE_MAX):
+                continue
+
+            if not (MIN_LIDAR_DIST <= dist <= MAX_LIDAR_DIST):
+                continue
+
+            points.append((angle, dist))
+
+            if len(points) > 200:
+                break
+
+        return points
 
     def stop(self):
         try:
