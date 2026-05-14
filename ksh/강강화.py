@@ -48,10 +48,10 @@ MEDIAN_K  = 2
 # =========================================
 # SAFETY PARAM
 # =========================================
-SAFE_DIST          = 20
-INFLATION_MAX_DIST = 30
-DANGER_DIST        = 18
-EMERGENCY_DIST     = 6
+SAFE_DIST          = 15
+INFLATION_MAX_DIST = 20
+DANGER_DIST        = 10
+EMERGENCY_DIST     = 7
 
 FRONT_CLEAR_DIST  = 23
 FRONT_CLEAR_RANGE = 15
