@@ -129,8 +129,11 @@ scan_data       = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
 prev_angle      = 0.0
 prev_front_avg  = float(SCAN_LIMIT)
 ramp_start_time = 0.0
-# [수정 1] global 선언 제거 → 모듈 수준 변수로 직접 관리
 ramp_mode       = RAMP_MODE_NORMAL
+
+# Emergency 회전 방향 우선순위:
+# 마지막으로 보낸 non-zero w의 반대 방향으로 회전
+last_nonzero_w  = 0.0   # send_cmd 호출 시 갱신
 
 # =========================================
 # UTIL
@@ -387,6 +390,9 @@ def compute_cmd(target_angle, on_ramp=False):
 
 
 def send_cmd(v, w):
+    global last_nonzero_w
+    if w != 0.0:
+        last_nonzero_w = w
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
 
@@ -399,14 +405,33 @@ def stop_robot():
 # =========================================
 
 def choose_avoid_direction():
+    """
+    회전 방향 결정 우선순위:
+    1순위 — 마지막 non-zero w의 반대 방향
+             (직전 주행 방향 기억 → 왔던 방향으로 돌아감)
+    2순위 — 좌우 스캔 평균 거리가 더 넓은 쪽
+             (last_nonzero_w == 0 이거나 양쪽 차이 없을 때 fallback)
+    """
     left_avg  = float(np.mean(scan_data[1:90]))
     right_avg = float(np.mean(scan_data[271:360]))
 
+    if last_nonzero_w != 0.0:
+        # w 양수 = 왼쪽 회전 중이었음 → 반대(오른쪽, -1)로
+        # w 음수 = 오른쪽 회전 중이었음 → 반대(왼쪽, +1)로
+        direction = -1 if last_nonzero_w > 0 else 1
+        label     = "LEFT" if direction > 0 else "RIGHT"
+        print(
+            f"  [AVOID DIR] {label} (last_w:{last_nonzero_w:+.2f} → 반대방향) "
+            f"L:{left_avg:.1f}cm R:{right_avg:.1f}cm"
+        )
+        return direction
+
+    # fallback: 공간이 넓은 쪽
     if left_avg >= right_avg:
-        print(f"  [AVOID DIR] LEFT  (L:{left_avg:.1f}cm R:{right_avg:.1f}cm)")
+        print(f"  [AVOID DIR] LEFT  (fallback L:{left_avg:.1f}cm R:{right_avg:.1f}cm)")
         return 1
     else:
-        print(f"  [AVOID DIR] RIGHT (L:{left_avg:.1f}cm R:{right_avg:.1f}cm)")
+        print(f"  [AVOID DIR] RIGHT (fallback L:{left_avg:.1f}cm R:{right_avg:.1f}cm)")
         return -1
 
 
@@ -415,9 +440,6 @@ def choose_avoid_direction():
 # =========================================
 
 print("NAVIGATION START")
-
-# [수정 1] 루프 밖에서 ramp_mode를 nonlocal 없이 쓰기 위해
-# 모듈 수준 변수를 직접 참조 (global 키워드는 함수 안에서만 필요)
 
 try:
     while True:
