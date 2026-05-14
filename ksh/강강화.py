@@ -46,24 +46,14 @@ INFLATION_MAX_DIST = 20
 DANGER_DIST        = 10
 EMERGENCY_DIST     = 7
 
-BACKUP_DIST        = 9
-BACKUP_SPEED       = -0.08
-BACKUP_TIME        = 0.15
-
-FRONT_CLEAR_DIST   = 23
-FRONT_CLEAR_RANGE  = 15
+FRONT_CLEAR_DIST  = 23
+FRONT_CLEAR_RANGE = 15
 
 # =========================================
-# STATE
+# FILTER
 # =========================================
-STATE_NORMAL  = 0
-STATE_BACKUP  = 1
-STATE_REVERSE = 2
-STATE_ROTATE  = 3
-
-state = STATE_NORMAL
-maneuver_end_time = 0
-rotate_dir = 1
+EMA_ALPHA = 0.3
+MEDIAN_K  = 2
 
 scan_data = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
 
@@ -72,24 +62,44 @@ v_cmd = 0.0
 w_cmd = 0.0
 
 # =========================================
-# FILTER
+# FILTERS
 # =========================================
-EMA_ALPHA = 0.3
-MEDIAN_K  = 2
-
 def apply_ema(angle, dist):
-    scan_data[angle] = (1-EMA_ALPHA)*scan_data[angle] + EMA_ALPHA*dist
+    scan_data[angle] = (1 - EMA_ALPHA) * scan_data[angle] + EMA_ALPHA * dist
+
 
 def apply_median():
     k = MEDIAN_K
     out = np.empty(360)
     for i in range(360):
-        idx = [(i+d)%360 for d in range(-k,k+1)]
+        idx = [(i + d) % 360 for d in range(-k, k + 1)]
         out[i] = np.median(scan_data[idx])
     scan_data[:] = out
 
+
 # =========================================
-# DYNAMIC INFLATION
+# DYNAMIC INFLATION (soft)
+# =========================================
+def inflate(dists, radius):
+    out = dists.copy()
+
+    for i, d in enumerate(dists):
+        if d < 5 or d > INFLATION_MAX_DIST:
+            continue
+
+        alpha = math.degrees(math.asin(min(radius / d, 1.0)))
+
+        s = max(0, int(i - alpha))
+        e = min(len(dists) - 1, int(i + alpha))
+
+        # 🔥 HARD 0 → SOFT MASK (핵심 개선)
+        out[s:e + 1] *= 0.25
+
+    return out
+
+
+# =========================================
+# DYNAMIC TURN MODEL
 # =========================================
 def get_turn_inflation_radius(v, w):
     if abs(w) < 0.05:
@@ -99,24 +109,9 @@ def get_turn_inflation_radius(v, w):
     rear_orbit = math.sqrt(R**2 + LIDAR_TO_REAR_AXLE**2)
     return ROBOT_RADIUS + (rear_orbit - R)
 
-def inflate(dists, radius):
-    out = dists.copy()
-
-    for i, d in enumerate(dists):
-        if d < 5 or d > INFLATION_MAX_DIST:
-            continue
-
-        alpha = math.degrees(math.asin(min(radius/d, 1.0)))
-
-        s = max(0, int(i - alpha))
-        e = min(len(dists)-1, int(i + alpha))
-
-        out[s:e+1] = 0
-
-    return out
 
 # =========================================
-# GAP
+# GAP DETECTION
 # =========================================
 def find_gaps(dists):
     gaps = []
@@ -128,28 +123,37 @@ def find_gaps(dists):
                 start = i
         else:
             if start is not None:
-                gaps.append((start, i-1))
+                gaps.append((start, i - 1))
                 start = None
 
     if start is not None:
-        gaps.append((start, len(dists)-1))
+        gaps.append((start, len(dists) - 1))
 
     return gaps
 
 
+# =========================================
+# BALANCED SCORING (핵심 수정)
+# =========================================
 def score_gap(gap, dists):
     s, e = gap
-    center = (s + e)//2
+    center = (s + e) // 2
+
+    mid = len(dists) // 2
+    left_mean  = np.mean(dists[:mid])
+    right_mean = np.mean(dists[mid:])
 
     return (
-        (e - s) * 1.5 +
-        np.mean(dists[s:e+1]) * 2.0 -
-        abs(center) * 0.2
+        (e - s) * 1.6 +
+        np.mean(dists[s:e + 1]) * 2.0 +
+        (left_mean - right_mean) * 0.6 -   # 🔥 좌/우 균형 핵심
+        center * 0.1                       # 🔥 방향 bias 완화
     )
 
 
 def best_gap(gaps, dists):
     return max(gaps, key=lambda g: score_gap(g, dists))
+
 
 # =========================================
 # PLANNING
@@ -157,30 +161,32 @@ def best_gap(gaps, dists):
 def find_best(v_prev, w_prev, smoothing=0.55):
     global prev_angle
 
-    angles = np.arange(-FRONT_RANGE, FRONT_RANGE+1)
-    dists  = np.array([scan_data[a % 360] for a in angles])
+    angles = np.arange(-FRONT_RANGE, FRONT_RANGE + 1)
+    dists = np.array([scan_data[a % 360] for a in angles])
 
     radius = get_turn_inflation_radius(v_prev, w_prev)
-    proc   = inflate(dists, radius)
+    proc = inflate(dists, radius)
 
     gaps = find_gaps(proc)
     if not gaps:
         return None
 
     s, e = best_gap(gaps, proc)
-    gap_angle = float(angles[(s+e)//2])
+    gap_angle = float(angles[(s + e) // 2])
 
-    front_min = np.min(scan_data[np.arange(-10,11)%360])
+    front_min = np.min(scan_data[np.arange(-10, 11) % 360])
 
+    # 🔥 안정 직진 bias
     if front_min > FRONT_CLEAR_DIST:
-        target = gap_angle * 0.3
+        target = gap_angle * 0.4
     else:
         target = gap_angle
 
-    target = prev_angle*smoothing + target*(1-smoothing)
+    target = prev_angle * smoothing + target * (1 - smoothing)
     prev_angle = target
 
     return target
+
 
 # =========================================
 # CONTROL
@@ -189,12 +195,12 @@ def compute(target_angle):
     w = math.radians(target_angle) * TURN_GAIN
     w = float(np.clip(w, -MAX_W, MAX_W))
 
-    front_min = np.min(scan_data[np.arange(-10,11)%360])
+    front_min = np.min(scan_data[np.arange(-10, 11) % 360])
 
     if abs(target_angle) > 10:
         v = 0.02 if front_min > 20 else 0.0
     else:
-        v = max(MIN_SPEED, min(MAX_SPEED, front_min/40))
+        v = max(MIN_SPEED, min(MAX_SPEED, front_min / 40))
 
     return v, w
 
@@ -202,10 +208,11 @@ def compute(target_angle):
 def send(v, w):
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
+
 # =========================================
 # MAIN LOOP
 # =========================================
-print("START")
+print("START (Balanced FGM)")
 
 try:
     while True:
@@ -216,8 +223,8 @@ try:
         if (raw[0] >> 2) < 3:
             continue
 
-        angle = int(((raw[1]>>1)|(raw[2]<<7))/64)%360
-        dist  = (raw[3]|(raw[4]<<8))/40.0
+        angle = int(((raw[1] >> 1) | (raw[2] << 7)) / 64) % 360
+        dist = (raw[3] | (raw[4] << 8)) / 40.0
 
         if 3 < dist < SCAN_LIMIT:
             apply_ema(angle, dist)
@@ -227,27 +234,9 @@ try:
 
         apply_median()
 
-        front_min = np.min(scan_data[np.arange(-10,11)%360])
+        front_min = np.min(scan_data[np.arange(-10, 11) % 360])
 
-        # =====================================
-        # BACKUP (벽 너무 가까움)
-        # =====================================
-        if state == STATE_BACKUP:
-            if time.time() < maneuver_end_time:
-                send(BACKUP_SPEED, 0)
-                continue
-            else:
-                state = STATE_NORMAL
-
-        if front_min < BACKUP_DIST:
-            state = STATE_BACKUP
-            maneuver_end_time = time.time() + BACKUP_TIME
-            send(BACKUP_SPEED, 0)
-            continue
-
-        # =====================================
-        # EMERGENCY
-        # =====================================
+        # emergency stop
         if front_min < EMERGENCY_DIST:
             send(-0.1, 0)
             continue
@@ -255,11 +244,10 @@ try:
         result = find_best(v_cmd, w_cmd)
 
         if result is None:
-            send(-0.1, rotate_dir * 0.9)
+            send(-0.1, 0.9)
             continue
 
         target_angle = result
-
         v_cmd, w_cmd = compute(target_angle)
         send(v_cmd, w_cmd)
 
