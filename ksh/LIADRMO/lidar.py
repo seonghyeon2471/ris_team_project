@@ -13,7 +13,7 @@ class SimpleLidar:
             timeout=3
         )
 
-        # 내부 상태 초기화
+        # 안정화
         self.lidar.stop()
 
         time.sleep(1)
@@ -22,7 +22,6 @@ class SimpleLidar:
 
         time.sleep(2)
 
-        # 모터 시작
         self.lidar.start_motor()
 
         time.sleep(2)
@@ -33,11 +32,11 @@ class SimpleLidar:
 
     def read_scan(self):
 
-        scan = next(self.iterator)
+        raw_scan = next(self.iterator)
 
         points = []
 
-        for (_, angle, distance) in scan:
+        for (_, angle, distance) in raw_scan:
 
             # 0~360 -> -180~180
             if angle > 180:
@@ -50,6 +49,7 @@ class SimpleLidar:
             if angle > ANGLE_MAX:
                 continue
 
+            # 거리 제한
             if distance < MIN_LIDAR_DIST:
                 continue
 
