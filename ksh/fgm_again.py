@@ -31,32 +31,21 @@ MIN_SPEED = 0.07
 MAX_W     = 1.5
 TURN_GAIN = 1.8
 
-FRONT_RANGE = 60
-
-# filter
 EMA_ALPHA = 0.3
 MEDIAN_K  = 2
 
-# obstacle
 SAFE_DIST = 17
 INFLATION_MAX_DIST = 25
 
-FRONT_CLEAR_DIST  = 23
-FRONT_CLEAR_RANGE = 15
-
-# emergency
-EMERGENCY_DIST = 10   # cm (7cm → 너무 타이트해서 보정)
+EMERGENCY_DIST = 10
 REVERSE_SPEED  = -0.10
 REVERSE_TIME   = 0.2
 ROTATE_TIME    = 1.0
 ROTATE_W       = 0.9
 
-# footprint
 ROBOT_HALF_WIDTH = 0.10
 SAFE_MARGIN = 0.05
-SAFE_WIDTH = ROBOT_HALF_WIDTH + SAFE_MARGIN
 
-# smoothing
 SMOOTHING = 0.55
 
 # =========================================
@@ -71,16 +60,15 @@ t_end = 0
 rotate_dir = 1
 
 scan_data = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
-prev_angle = 0.0
 
 # =========================================
-# UTIL
+# FRONT (0~60 + 300~360) ★ 핵심 수정
 # =========================================
-def normalize(a):
-    return int(a) % 360
+def get_front_idx():
+    return list(range(0, 61)) + list(range(300, 360))
 
 # =========================================
-# LIDAR PARSER (RAW FIXED)
+# LIDAR PARSER
 # =========================================
 def read_lidar_packet():
     raw = lidar_ser.read(5)
@@ -112,7 +100,7 @@ def read_lidar_packet():
     return angle, dist_cm, s_flag
 
 # =========================================
-# SCAN UPDATE (EMA)
+# UPDATE SCAN
 # =========================================
 def update_scan():
     pkt = read_lidar_packet()
@@ -129,7 +117,7 @@ def update_scan():
     return s_flag == 1
 
 # =========================================
-# FILTER
+# MEDIAN FILTER
 # =========================================
 def median_filter():
     k = MEDIAN_K
@@ -188,10 +176,9 @@ def find_gaps(dists):
 def score(gap, dists):
     s, e = gap
     w = e - s
-    center = (s + e) / 2
-    center_d = dists[int(center)]
     avg = np.mean(dists[s:e+1])
     mn  = np.min(dists[s:e+1])
+    center = (s + e) / 2
 
     return w*1.5 + avg*2.0 + mn - abs(center-180)*0.15
 
@@ -214,18 +201,16 @@ def select_gaps(gaps, dists):
 # CONTROL
 # =========================================
 def control(target):
-    global prev_angle
-
     w = math.radians(target) * TURN_GAIN
     w = np.clip(w, -MAX_W, MAX_W)
+
+    front_idx = get_front_idx()
+    front_min = np.min(scan_data[front_idx])
 
     if abs(target) > 15:
         return 0.0, w
 
-    front = np.min(scan_data[170:190])
-
-    v = MAX_SPEED if front > 40 else MIN_SPEED
-
+    v = MAX_SPEED if front_min > 40 else MIN_SPEED
     return v, w
 
 # =========================================
@@ -234,8 +219,12 @@ def control(target):
 def send(v, w):
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
+def stop_all():
+    send(0, 0)
+    lidar_ser.write(bytes([0xA5, 0x25]))
+
 # =========================================
-# ESCAPE DIR
+# ESCAPE
 # =========================================
 def escape():
     left = np.mean(scan_data[60:120])
@@ -243,73 +232,83 @@ def escape():
     return 1 if left > right else -1
 
 # =========================================
-# MAIN LOOP
+# MAIN LOOP (FIXED CTRL+C)
 # =========================================
-print("START")
+try:
 
-while True:
+    print("START")
 
-    ok = update_scan()
-    if not ok:
-        continue
+    while True:
 
-    median_filter()
+        ok = update_scan()
+        if not ok:
+            continue
 
-    front_min = np.min(scan_data[170:190])
+        median_filter()
 
-    now = time.time()
+        front_idx = get_front_idx()
+        front_min = np.min(scan_data[front_idx])
 
-    # =========================
-    # EMERGENCY
-    # =========================
-    if state == STATE_NORMAL and front_min < EMERGENCY_DIST:
+        now = time.time()
 
-        rotate_dir = escape()
-        state = STATE_REVERSE
-        t_end = now + REVERSE_TIME
+        # =========================
+        # EMERGENCY
+        # =========================
+        if state == STATE_NORMAL and front_min < EMERGENCY_DIST:
+            rotate_dir = escape()
+            state = STATE_REVERSE
+            t_end = now + REVERSE_TIME
 
-    # =========================
-    # REVERSE
-    # =========================
-    if state == STATE_REVERSE:
-        if now < t_end:
+        # =========================
+        # REVERSE
+        # =========================
+        if state == STATE_REVERSE:
+            if now < t_end:
+                send(REVERSE_SPEED, 0)
+                continue
+            else:
+                state = STATE_ROTATE
+                t_end = now + ROTATE_TIME
+                continue
+
+        # =========================
+        # ROTATE
+        # =========================
+        if state == STATE_ROTATE:
+            if now < t_end:
+                send(0, ROTATE_W * rotate_dir)
+                continue
+            else:
+                state = STATE_NORMAL
+                continue
+
+        # =========================
+        # NORMAL
+        # =========================
+        d = inflate(scan_data)
+        gaps = find_gaps(d)
+
+        if not gaps:
             send(REVERSE_SPEED, 0)
             continue
-        else:
-            state = STATE_ROTATE
-            t_end = now + ROTATE_TIME
-            continue
 
-    # =========================
-    # ROTATE
-    # =========================
-    if state == STATE_ROTATE:
-        if now < t_end:
-            send(0, ROTATE_W * rotate_dir)
-            continue
-        else:
-            state = STATE_NORMAL
-            continue
+        best = select_gaps(gaps, d)
+        s, e = best
 
-    # =========================
-    # NORMAL
-    # =========================
-    d = inflate(scan_data)
-    gaps = find_gaps(d)
+        target = (s + e) / 2
+        target = (target - 180) * SMOOTHING
 
-    if not gaps:
-        send(REVERSE_SPEED, 0)
-        continue
+        v, w = control(target)
 
-    best = select_gaps(gaps, d)
+        send(v, w)
 
-    s, e = best
-    target = (s + e) / 2
+        print("v:", v, "w:", w, "front:", front_min)
 
-    target = (target - 180) * SMOOTHING
+except KeyboardInterrupt:
+    print("\nSTOP (CTRL+C)")
 
-    v, w = control(target)
-
-    send(v, w)
-
-    print("v:", v, "w:", w, "front:", front_min)
+finally:
+    stop_all()
+    arduino_ser.close()
+    lidar_ser.close()
+    print("SAFE SHUTDOWN COMPLETE")
