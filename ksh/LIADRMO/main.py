@@ -39,7 +39,7 @@ def clip_speed(v, w):
 # =========================================
 while True:
 
-    scan = lidar.get_scan()
+    scan = lidar.read_scan()
 
     if scan is None or len(scan) == 0:
         continue
