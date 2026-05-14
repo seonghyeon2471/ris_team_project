@@ -185,9 +185,9 @@ class LocalPathPlanner:
     비상 상황은 GapPlanner가 오버라이드.
     """
 
-    LOOKAHEAD_M      = 0.60   # A* 목표까지 거리 (m)
+    LOOKAHEAD_M      = 0.50   # A* 목표까지 거리 (m) — 0.60 → 0.50 (맵 여유 확보)
     WP_ARRIVAL_M     = 0.12   # 웨이포인트 도착 판정 (m)
-    REPLAN_INTERVAL  = 8      # 몇 루프마다 재계획
+    REPLAN_INTERVAL  = 4      # 8 → 4: 초기 경로를 더 빠르게 잡음
 
     def __init__(self):
         self._gap = GapPlanner()
@@ -205,7 +205,8 @@ class LocalPathPlanner:
 
         best_score, best_cell = -999999, None
 
-        for angle_deg in range(-60, 61, 5):
+        # 각도 범위 -60~60 → -80~80 으로 확대 (좁은 공간에서 목표를 못 찾는 경우 방지)
+        for angle_deg in range(-80, 81, 5):
             rad = math.radians(angle_deg)
             cx = int(rx + lookahead_cells * math.sin(rad))
             cy = int(ry - lookahead_cells * math.cos(rad))
@@ -220,6 +221,28 @@ class LocalPathPlanner:
             score = fwd_score + visit_score + center_score
             if score > best_score:
                 best_score, best_cell = score, (cx, cy)
+
+        # lookahead 거리에서 못 찾으면 절반 거리로 재시도
+        if best_cell is None:
+            short_cells = max(1, lookahead_cells // 2)
+            for angle_deg in range(-80, 81, 5):
+                rad = math.radians(angle_deg)
+                cx = int(rx + short_cells * math.sin(rad))
+                cy = int(ry - short_cells * math.cos(rad))
+
+                if not mapper.is_free(cx, cy):
+                    continue
+
+                fwd_score    =  math.cos(rad) * GOAL_DIRECTION_WEIGHT
+                visit_score  = -mapper.visit[cy, cx] * VISIT_WEIGHT * 0.01
+                center_score = -abs(angle_deg) * 0.01 * CENTER_WEIGHT
+
+                score = fwd_score + visit_score + center_score
+                if score > best_score:
+                    best_score, best_cell = score, (cx, cy)
+
+        if best_cell is None:
+            print("[WARN] _make_goal: 자유 셀을 찾지 못했습니다. 맵이 전부 막혀 있을 수 있습니다.")
 
         return best_cell
 
@@ -239,6 +262,7 @@ class LocalPathPlanner:
         raw_path = astar(mapper.inflated, (rx, ry), goal)
 
         if not raw_path:
+            print(f"[WARN] A* 경로 없음: start=({rx},{ry}) goal={goal}")
             self._waypoints = []
             self._wp_idx = 0
             return
