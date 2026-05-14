@@ -4,12 +4,6 @@ from config import *
 
 class GapPlanner:
 
-    def __init__(self):
-        pass
-
-    # =========================
-    # GAP DETECTION
-    # =========================
     def find_gaps(self, scan):
 
         gaps = []
@@ -29,9 +23,6 @@ class GapPlanner:
 
         return gaps
 
-    # =========================
-    # GRP SCORING
-    # =========================
     def select_gap(self, gaps):
 
         if not gaps:
@@ -46,15 +37,9 @@ class GapPlanner:
             avg_dist = np.mean([d for _, d in gap])
 
             score = 0
-
-            # forward bias
-            score += math.cos(math.radians(center)) * GOAL_BIAS
-
-            # wide gap preference
+            score += math.cos(math.radians(center)) * 2.0
             score += avg_dist / 1000.0
-
-            # center stability
-            score -= abs(center) * 0.01 * CENTER_BIAS
+            score -= abs(center) * 0.01 * 0.8
 
             if score > best_score:
                 best_score = score
@@ -67,46 +52,60 @@ class GapPlanner:
     # =========================
     def compute_control(self, scan):
 
+        # =========================
+        # EMERGENCY
+        # =========================
         front = [d for a, d in scan if -15 <= a <= 15]
 
-        # emergency
         if front and min(front) < EMERGENCY_DISTANCE:
             return 0.0, 1.8
 
+        # =========================
+        # 🔥 NARROW PASSAGE MODE (30cm)
+        # =========================
+        left = [d for a, d in scan if -90 <= a < -10]
+        right = [d for a, d in scan if 10 < a <= 90]
+
+        if len(left) > 5 and len(right) > 5:
+
+            l = np.mean(left)
+            r = np.mean(right)
+
+            error = r - l
+
+            w = error * 0.003
+
+            # 직진 안정 보정
+            w += -math.radians(np.mean([a for a, _ in scan if -10 <= a <= 10])) * 0.5
+
+            speed = FORWARD_SPEED * 0.75
+
+            w = max(-1.5, min(1.5, w))
+
+            return speed, w
+
+        # =========================
+        # NORMAL GAP MODE
+        # =========================
         gaps = self.find_gaps(scan)
         target = self.select_gap(gaps)
 
         if target is None:
             return 0.0, 1.5
 
-        # =========================
-        # steering (base FGM/GRP)
-        # =========================
         w = -math.radians(target) * 1.2
 
-        # dead-end escape boost
         if abs(target) < 10:
             w += 0.5 if target > 0 else -0.5
 
-        # =========================
-        # 🔥 추가: 좌우 밸런스 보정 (30cm 통로 핵심)
-        # =========================
-        left = [d for a, d in scan if -90 <= a < 0]
-        right = [d for a, d in scan if 0 < a <= 90]
+        left_all = [d for a, d in scan if -90 <= a < 0]
+        right_all = [d for a, d in scan if 0 < a <= 90]
 
-        if len(left) > 0 and len(right) > 0:
+        if left_all and right_all:
+            w += (np.mean(right_all) - np.mean(left_all)) * 0.002
 
-            left_mean = np.mean(left)
-            right_mean = np.mean(right)
-
-            bias = (right_mean - left_mean) * 0.002
-
-            w += bias
-
-        # limit
         w = max(-MAX_W, min(MAX_W, w))
 
-        # speed scaling (turn 많이 하면 감속)
         speed = FORWARD_SPEED * (1.0 - min(abs(w)/MAX_W, 0.7))
 
         return speed, w
