@@ -45,7 +45,6 @@ class GapPlanner:
             center = gap[len(gap)//2][0]
             avg_dist = np.mean([d for _, d in gap])
 
-            # GRP-style scoring
             score = 0
 
             # forward bias
@@ -80,15 +79,34 @@ class GapPlanner:
         if target is None:
             return 0.0, 1.5
 
-        # steering
+        # =========================
+        # steering (base FGM/GRP)
+        # =========================
         w = -math.radians(target) * 1.2
 
         # dead-end escape boost
         if abs(target) < 10:
             w += 0.5 if target > 0 else -0.5
 
+        # =========================
+        # 🔥 추가: 좌우 밸런스 보정 (30cm 통로 핵심)
+        # =========================
+        left = [d for a, d in scan if -90 <= a < 0]
+        right = [d for a, d in scan if 0 < a <= 90]
+
+        if len(left) > 0 and len(right) > 0:
+
+            left_mean = np.mean(left)
+            right_mean = np.mean(right)
+
+            bias = (right_mean - left_mean) * 0.002
+
+            w += bias
+
+        # limit
         w = max(-MAX_W, min(MAX_W, w))
 
+        # speed scaling (turn 많이 하면 감속)
         speed = FORWARD_SPEED * (1.0 - min(abs(w)/MAX_W, 0.7))
 
         return speed, w
