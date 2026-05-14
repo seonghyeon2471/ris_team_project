@@ -10,29 +10,42 @@ class SimpleLidar:
         self.ser = serial.Serial(
             LIDAR_PORT,
             LIDAR_BAUD,
-            timeout=1
+            timeout=0.1
         )
 
     def read_scan(self):
 
         points = []
 
-        while self.ser.in_waiting >= 47:
+        while True:
+
+            # 헤더 탐색
+            b = self.ser.read(1)
+
+            if len(b) == 0:
+                break
+
+            if b[0] != 0x54:
+                continue
+
+            second = self.ser.read(1)
+
+            if len(second) == 0:
+                continue
+
+            # packet length 확인
+            if second[0] != 0x2C:
+                continue
+
+            rest = self.ser.read(45)
+
+            if len(rest) != 45:
+                continue
+
+            data = b + second + rest
 
             try:
 
-                # 헤더 찾기
-                b = self.ser.read(1)
-
-                if b[0] != 0x54:
-                    continue
-
-                data = b + self.ser.read(46)
-
-                if len(data) != 47:
-                    continue
-
-                # 패킷 파싱
                 start_angle = (
                     data[4] |
                     (data[5] << 8)
@@ -64,11 +77,9 @@ class SimpleLidar:
                         angle_step * i
                     )
 
-                    # -180 ~ 180 변환
                     if angle > 180:
                         angle -= 360
 
-                    # 범위 제한
                     if angle < ANGLE_MIN:
                         continue
 
@@ -87,5 +98,9 @@ class SimpleLidar:
 
             except:
                 pass
+
+            # 어느 정도 모이면 반환
+            if len(points) > 80:
+                break
 
         return points
