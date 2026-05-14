@@ -1,5 +1,5 @@
-import serial
-import math
+from rplidar import RPLidar
+import time
 
 from config import *
 
@@ -7,100 +7,65 @@ class SimpleLidar:
 
     def __init__(self):
 
-        self.ser = serial.Serial(
+        self.lidar = RPLidar(
             LIDAR_PORT,
-            LIDAR_BAUD,
-            timeout=0.1
+            baudrate=LIDAR_BAUD,
+            timeout=3
+        )
+
+        # 내부 상태 초기화
+        self.lidar.stop()
+
+        time.sleep(1)
+
+        self.lidar.reset()
+
+        time.sleep(2)
+
+        # 모터 시작
+        self.lidar.start_motor()
+
+        time.sleep(2)
+
+        self.iterator = self.lidar.iter_scans(
+            max_buf_meas=500
         )
 
     def read_scan(self):
 
+        scan = next(self.iterator)
+
         points = []
 
-        while True:
+        for (_, angle, distance) in scan:
 
-            # 헤더 탐색
-            b = self.ser.read(1)
+            # 0~360 -> -180~180
+            if angle > 180:
+                angle -= 360
 
-            if len(b) == 0:
-                break
-
-            if b[0] != 0x54:
+            # 전방만 사용
+            if angle < ANGLE_MIN:
                 continue
 
-            second = self.ser.read(1)
-
-            if len(second) == 0:
+            if angle > ANGLE_MAX:
                 continue
 
-            # packet length 확인
-            if second[0] != 0x2C:
+            if distance < MIN_LIDAR_DIST:
                 continue
 
-            rest = self.ser.read(45)
-
-            if len(rest) != 45:
+            if distance > MAX_LIDAR_DIST:
                 continue
 
-            data = b + second + rest
-
-            try:
-
-                start_angle = (
-                    data[4] |
-                    (data[5] << 8)
-                ) / 100.0
-
-                end_angle = (
-                    data[42] |
-                    (data[43] << 8)
-                ) / 100.0
-
-                if end_angle < start_angle:
-                    end_angle += 360
-
-                angle_step = (
-                    end_angle - start_angle
-                ) / 11.0
-
-                for i in range(12):
-
-                    offset = 6 + i * 3
-
-                    dist = (
-                        data[offset] |
-                        (data[offset + 1] << 8)
-                    )
-
-                    angle = (
-                        start_angle +
-                        angle_step * i
-                    )
-
-                    if angle > 180:
-                        angle -= 360
-
-                    if angle < ANGLE_MIN:
-                        continue
-
-                    if angle > ANGLE_MAX:
-                        continue
-
-                    if dist < MIN_LIDAR_DIST:
-                        continue
-
-                    if dist > MAX_LIDAR_DIST:
-                        continue
-
-                    points.append(
-                        (angle, dist)
-                    )
-
-            except:
-                pass
-
-            # 어느 정도 모이면 반환
-            if len(points) > 80:
-                break
+            points.append(
+                (angle, distance)
+            )
 
         return points
+
+    def stop(self):
+
+        self.lidar.stop()
+
+        self.lidar.stop_motor()
+
+        self.lidar.disconnect()
