@@ -1,40 +1,46 @@
-import numpy as np
-import math
+from rplidar import RPLidar
+import time
 from config import *
 
-class LocalMapper:
+class SimpleLidar:
 
     def __init__(self):
 
-        self.grid = np.zeros((MAP_SIZE, MAP_SIZE), dtype=np.float32)
-        self.visit = np.zeros((MAP_SIZE, MAP_SIZE), dtype=np.float32)
+        self.lidar = RPLidar(LIDAR_PORT, baudrate=LIDAR_BAUD, timeout=3)
 
-        self.robot_x = MAP_SIZE // 2
-        self.robot_y = MAP_SIZE - 50
+        self.lidar.stop()
+        time.sleep(1)
 
-    # 🔥 출발 뒤쪽 + 하단 완전 금지
-    def add_virtual_wall(self):
+        self.lidar.reset()
+        time.sleep(2)
 
-        self.grid[self.robot_y:, :] = 1.0
+        self.lidar.start_motor()
+        time.sleep(2)
 
-    def update(self, scan):
+        self.iterator = self.lidar.iter_scans(max_buf_meas=500)
 
-        # decay
-        self.visit *= VISIT_DECAY
+    def read_scan(self):
 
-        # robot footprint
-        self.visit[self.robot_y-2:self.robot_y+2,
-                   self.robot_x-2:self.robot_x+2] += 1.0
+        scan = next(self.iterator)
 
-        self.add_virtual_wall()
+        points = []
 
-        # lidar projection
-        for angle, dist in scan:
+        for (_, angle, dist) in scan:
 
-            rad = math.radians(angle)
+            if angle > 180:
+                angle -= 360
 
-            x = int(self.robot_x + (dist/1000.0) * math.sin(rad) / MAP_RESOLUTION)
-            y = int(self.robot_y - (dist/1000.0) * math.cos(rad) / MAP_RESOLUTION)
+            if angle < ANGLE_MIN or angle > ANGLE_MAX:
+                continue
 
-            if 0 <= x < MAP_SIZE and 0 <= y < MAP_SIZE:
-                self.grid[y, x] = 1.0
+            if dist < MIN_LIDAR_DIST or dist > MAX_LIDAR_DIST:
+                continue
+
+            points.append((angle, dist))
+
+        return points
+
+    def stop(self):
+        self.lidar.stop()
+        self.lidar.stop_motor()
+        self.lidar.disconnect()
