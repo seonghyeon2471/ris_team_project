@@ -11,8 +11,7 @@ class MotorController:
 
     def send(self, v, w):
 
-        msg = f"{v:.3f},{w:.3f}\n"
-        self.ser.write(msg.encode())
+        self.ser.write(f"{v:.3f},{w:.3f}\n".encode())
 
     def stop(self):
         self.send(0.0, 0.0)
