@@ -48,11 +48,11 @@ WHEEL_BASE   = 17.0
 
 MAX_SPEED = 0.20
 MIN_SPEED = 0.07
-MAX_W     = 1.5
-TURN_GAIN = 1.8
+MAX_W     = 1.1
+TURN_GAIN = 1.1
 
 SCAN_LIMIT   = 150
-FRONT_RANGE  = 70
+FRONT_RANGE  = 72
 
 # =========================================
 # FILTER PARAMETER
