@@ -39,28 +39,27 @@ SCAN_LIMIT  = 150
 FRONT_RANGE = 60
 
 # =========================================
-# FILTER
-# =========================================
-EMA_ALPHA = 0.3
-MEDIAN_K  = 2
-
-# =========================================
-# SAFETY
+# SAFETY PARAM
 # =========================================
 SAFE_DIST          = 15
 INFLATION_MAX_DIST = 20
 DANGER_DIST        = 10
 EMERGENCY_DIST     = 7
 
-FRONT_CLEAR_DIST  = 23
-FRONT_CLEAR_RANGE = 15
+BACKUP_DIST        = 9
+BACKUP_SPEED       = -0.08
+BACKUP_TIME        = 0.15
+
+FRONT_CLEAR_DIST   = 23
+FRONT_CLEAR_RANGE  = 15
 
 # =========================================
 # STATE
 # =========================================
 STATE_NORMAL  = 0
-STATE_REVERSE = 1
-STATE_ROTATE  = 2
+STATE_BACKUP  = 1
+STATE_REVERSE = 2
+STATE_ROTATE  = 3
 
 state = STATE_NORMAL
 maneuver_end_time = 0
@@ -75,6 +74,9 @@ w_cmd = 0.0
 # =========================================
 # FILTER
 # =========================================
+EMA_ALPHA = 0.3
+MEDIAN_K  = 2
+
 def apply_ema(angle, dist):
     scan_data[angle] = (1-EMA_ALPHA)*scan_data[angle] + EMA_ALPHA*dist
 
@@ -87,7 +89,7 @@ def apply_median():
     scan_data[:] = out
 
 # =========================================
-# DYNAMIC INFLATION RADIUS
+# DYNAMIC INFLATION
 # =========================================
 def get_turn_inflation_radius(v, w):
     if abs(w) < 0.05:
@@ -97,9 +99,6 @@ def get_turn_inflation_radius(v, w):
     rear_orbit = math.sqrt(R**2 + LIDAR_TO_REAR_AXLE**2)
     return ROBOT_RADIUS + (rear_orbit - R)
 
-# =========================================
-# INFLATION
-# =========================================
 def inflate(dists, radius):
     out = dists.copy()
 
@@ -107,7 +106,7 @@ def inflate(dists, radius):
         if d < 5 or d > INFLATION_MAX_DIST:
             continue
 
-        alpha = math.degrees(math.asin(min(radius / d, 1.0)))
+        alpha = math.degrees(math.asin(min(radius/d, 1.0)))
 
         s = max(0, int(i - alpha))
         e = min(len(dists)-1, int(i + alpha))
@@ -140,13 +139,12 @@ def find_gaps(dists):
 
 def score_gap(gap, dists):
     s, e = gap
-    width = e - s
-    center = (s + e) // 2
+    center = (s + e)//2
 
     return (
-        width * 1.2 +
-        np.mean(dists[s:e+1]) * 1.8 -
-        abs(center) * 0.15
+        (e - s) * 1.5 +
+        np.mean(dists[s:e+1]) * 2.0 -
+        abs(center) * 0.2
     )
 
 
@@ -170,7 +168,6 @@ def find_best(v_prev, w_prev, smoothing=0.55):
         return None
 
     s, e = best_gap(gaps, proc)
-
     gap_angle = float(angles[(s+e)//2])
 
     front_min = np.min(scan_data[np.arange(-10,11)%360])
@@ -180,7 +177,7 @@ def find_best(v_prev, w_prev, smoothing=0.55):
     else:
         target = gap_angle
 
-    target = prev_angle * smoothing + target * (1 - smoothing)
+    target = prev_angle*smoothing + target*(1-smoothing)
     prev_angle = target
 
     return target
@@ -232,7 +229,25 @@ try:
 
         front_min = np.min(scan_data[np.arange(-10,11)%360])
 
+        # =====================================
+        # BACKUP (벽 너무 가까움)
+        # =====================================
+        if state == STATE_BACKUP:
+            if time.time() < maneuver_end_time:
+                send(BACKUP_SPEED, 0)
+                continue
+            else:
+                state = STATE_NORMAL
+
+        if front_min < BACKUP_DIST:
+            state = STATE_BACKUP
+            maneuver_end_time = time.time() + BACKUP_TIME
+            send(BACKUP_SPEED, 0)
+            continue
+
+        # =====================================
         # EMERGENCY
+        # =====================================
         if front_min < EMERGENCY_DIST:
             send(-0.1, 0)
             continue
