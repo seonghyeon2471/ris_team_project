@@ -117,7 +117,7 @@ RAMP_INFLATION_MAX = 10
 RAMP_SAFE_DIST     = 8
 
 # ★ 측면 경사 벽 추종 파라미터
-WALL_FOLLOW_TARGET = 25    # 목표 측면 유지 거리 (cm)
+WALL_FOLLOW_TARGET = 15    # 목표 측면 유지 거리 (cm)
 WALL_FOLLOW_KP     = 0.4   # 거리 오차 → 조향각 비례 게인
 WALL_FOLLOW_MAX_W  = 0.8   # 벽 추종 중 최대 각속도 (rad/s)
 WALL_RAMP_DIST     = 20    # 측면 경사 감지 임계 거리 (cm)
