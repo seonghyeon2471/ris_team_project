@@ -280,7 +280,7 @@ def compute_cmd(target_angle):
 
 
 def send_cmd(v, w):
-    arduino_ser.write(f"{v:.3f},{w:.3f}\n".encode())
+    arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
 
 def stop_robot():
