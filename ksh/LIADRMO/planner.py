@@ -212,7 +212,7 @@ class GapPlanner:
         # Steering
         # =========================
 
-        w = -math.radians(target_angle) * 0.75
+        w = math.radians(target_angle) * 0.75
 
         # 작은 진동 제거
         if abs(w) < 0.05:
