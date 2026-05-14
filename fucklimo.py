@@ -49,7 +49,7 @@ WHEEL_BASE   = 17.0
 MAX_SPEED = 0.30   # ★ 0.20 → 0.30 (50% 상향)
 MIN_SPEED = 0.10   # ★ 0.07 → 0.10
 MAX_W     = 2.25   # ★ 1.5  → 2.25 (50% 상향)
-TURN_GAIN = 1.8
+TURN_GAIN = 1.2    # ★ 1.8 → 1.2 (과회전 억제)
 
 SCAN_LIMIT   = 150
 FRONT_RANGE  = 60
@@ -65,8 +65,8 @@ MEDIAN_K  = 2
 # SMOOTHING PARAMETER
 # =========================================
 
-SMOOTHING_NORMAL = 0.80   # ★ 0.55 → 0.80 (직선 주행 중 각도 안정화)
-SMOOTHING_DANGER = 0.25   # ★ 0.20 → 0.25
+SMOOTHING_NORMAL = 0.70   # ★ 0.80 → 0.70 (꺾임 후 복귀 빠르게)
+SMOOTHING_DANGER = 0.25
 DANGER_DIST      = 18
 
 # =========================================
