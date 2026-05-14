@@ -5,23 +5,12 @@ from mapping import LocalMapper
 from planner import GapPlanner
 from motor import MotorController
 
-# =========================
-# INIT
-# =========================
-
 lidar = SimpleLidar()
-
 mapper = LocalMapper()
-
 planner = GapPlanner()
-
 motor = MotorController()
 
 print("SYSTEM START")
-
-# =========================
-# LOOP
-# =========================
 
 try:
 
@@ -29,7 +18,7 @@ try:
 
         scan = lidar.read_scan()
 
-        if len(scan) == 0:
+        if not scan:
             continue
 
         mapper.update(scan)
@@ -38,16 +27,12 @@ try:
 
         motor.send(v, w)
 
-        print(
-            f"SCAN:{len(scan)} "
-            f"v:{v:.2f} "
-            f"w:{w:.2f}"
-        )
+        print(f"v={v:.2f}, w={w:.2f}")
 
         time.sleep(0.03)
 
 except KeyboardInterrupt:
 
     print("STOP")
-
     motor.stop()
+    lidar.stop()
