@@ -39,7 +39,7 @@ print("LIDAR START")
 # ROBOT PHYSICAL PARAMETER  (단위: cm)
 # =========================================
 
-ROBOT_RADIUS = 14.0
+ROBOT_RADIUS = 11.0
 WHEEL_BASE   = 17.0
 
 # =========================================
