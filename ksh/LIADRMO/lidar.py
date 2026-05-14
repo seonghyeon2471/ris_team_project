@@ -1,77 +1,55 @@
-from rplidar import RPLidar
-import time
-
+import serial
+import math
 from config import *
 
 class SimpleLidar:
 
     def __init__(self):
 
-        self.lidar = RPLidar(
+        self.ser = serial.Serial(
             LIDAR_PORT,
-            baudrate=LIDAR_BAUD,
-            timeout=3
-        )
-
-        # 안정화
-        self.lidar.stop()
-
-        time.sleep(1)
-
-        self.lidar.reset()
-
-        time.sleep(2)
-
-        self.lidar.start_motor()
-
-        time.sleep(2)
-
-        self.iterator = self.lidar.iter_scans(
-            max_buf_meas=5000
+            LIDAR_BAUD,
+            timeout=1
         )
 
     def read_scan(self):
 
-        raw_scan = next(self.iterator)
-
         points = []
 
-        for (_, angle, distance) in raw_scan:
+        while self.ser.in_waiting > 2000:
 
-            # 0~360 -> -180~180
-            if angle > 180:
-                angle -= 360
+            data = self.ser.read(47)
 
-            # 전방만 사용
-            if angle < ANGLE_MIN:
+            if len(data) < 47:
                 continue
 
-            if angle > ANGLE_MAX:
-                continue
+            try:
 
-            # 거리 제한
-            if distance < MIN_LIDAR_DIST:
-                continue
+                for i in range(12):
 
-            if distance > MAX_LIDAR_DIST:
-                continue
+                    offset = 11 + i * 3
 
-            points.append(
-                (angle, distance)
-            )
+                    raw_dist = data[offset] | (data[offset + 1] << 8)
+                    raw_angle = data[offset + 2]
 
-        # =========================
-        # 다운샘플링
-        # =========================
-        if len(points) > 120:
-            points = points[::2]
-            
+                    dist = raw_dist
+                    angle = raw_angle - 128
+
+                    if angle < ANGLE_MIN:
+                        continue
+
+                    if angle > ANGLE_MAX:
+                        continue
+
+                    if dist < MIN_LIDAR_DIST:
+                        continue
+
+                    if dist > MAX_LIDAR_DIST:
+                        continue
+
+                    points.append((angle, dist))
+
+            except:
+                pass
+
         return points
-
-    def stop(self):
-
-        self.lidar.stop()
-
-        self.lidar.stop_motor()
-
-        self.lidar.disconnect()
