@@ -1,47 +1,91 @@
 import time
+import math
 
 from lidar import SimpleLidar
-from mapping import LocalMapper
-from planner import GapPlanner
 from motor import MotorController
+from planner import GapPlanner
 
-# =========================
+# =========================================
 # INIT
-# =========================
-
+# =========================================
 lidar = SimpleLidar()
-
-mapper = LocalMapper()
-
-planner = GapPlanner()
-
 motor = MotorController()
+planner = GapPlanner()
 
 print("SYSTEM START")
 
-# =========================
-# LOOP
-# =========================
+# =========================================
+# PARAMETERS
+# =========================================
+SAFE_DIST = 0.35
+BASE_SPEED = 0.25
 
-try:
+prev_angle = 0
 
-    while True:
+# =========================================
+# SPEED LIMIT
+# =========================================
+def clip_speed(v, w):
+    MAX_W = 0.8
 
-        scan = lidar.read_scan()
+    if abs(w) > MAX_W:
+        w = MAX_W if w > 0 else -MAX_W
 
-        if len(scan) == 0:
-            continue
+    return v, w
 
-        mapper.update(scan)
 
-        v, w = planner.compute_control(scan)
+# =========================================
+# MAIN LOOP
+# =========================================
+while True:
 
+    scan = lidar.get_scan()
+
+    if scan is None or len(scan) == 0:
+        continue
+
+    # -----------------------------------------
+    # 1. GAP PLANNING
+    # -----------------------------------------
+    angle = planner.find_best_gap(scan)
+
+    # -----------------------------------------
+    # 2. SMOOTHING (핵심 안정화)
+    # -----------------------------------------
+    angle = 0.7 * prev_angle + 0.3 * angle
+    prev_angle = angle
+
+    # -----------------------------------------
+    # 3. EMERGENCY FRONT CHECK
+    # -----------------------------------------
+    n = len(scan)
+    front = scan[:15] + scan[-15:]
+
+    if min(front) < SAFE_DIST:
+        # 무조건 회피 (후진 + 회전)
+        v = -0.15
+        w = 0.8 if sum(scan[:n//2]) > sum(scan[n//2:]) else -0.8
+
+        v, w = clip_speed(v, w)
         motor.send(v, w)
+        continue
 
-        time.sleep(0.03)
+    # -----------------------------------------
+    # 4. SPEED CONTROL (angle 기반 감속)
+    # -----------------------------------------
+    v = BASE_SPEED * (1 - min(abs(angle), 1.0))
 
-except KeyboardInterrupt:
+    # steering
+    w = angle
 
-    print("STOP")
+    # -----------------------------------------
+    # 5. LIMITS
+    # -----------------------------------------
+    v, w = clip_speed(v, w)
 
-    motor.stop()
+    # -----------------------------------------
+    # 6. SEND TO MOTOR
+    # -----------------------------------------
+    motor.send(v, w)
+
+    time.sleep(0.02)
