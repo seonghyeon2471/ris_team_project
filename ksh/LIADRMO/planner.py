@@ -46,6 +46,25 @@ def astar(inflated_map, start, goal):
     gx, gy = goal
     size_y, size_x = inflated_map.shape
 
+    # goal 자체가 막혀있으면 주변 자유 셀로 대체
+    if inflated_map[gy, gx] != 0:
+        found = False
+        for r in range(1, 15):
+            for dy in range(-r, r+1):
+                for dx in range(-r, r+1):
+                    nx, ny = gx+dx, gy+dy
+                    if 0 <= nx < size_x and 0 <= ny < size_y:
+                        if inflated_map[ny, nx] == 0:
+                            gx, gy = nx, ny
+                            found = True
+                            break
+                if found:
+                    break
+            if found:
+                break
+        else:
+            return []   # 주변도 전부 막힘
+
     def h(x, y):
         return math.hypot(gx - x, gy - y)
 
@@ -185,9 +204,9 @@ class LocalPathPlanner:
     비상 상황은 GapPlanner가 오버라이드.
     """
 
-    LOOKAHEAD_M      = 0.50   # A* 목표까지 거리 (m) — 0.60 → 0.50 (맵 여유 확보)
+    LOOKAHEAD_M      = 0.40   # A* 목표까지 거리 (m)
     WP_ARRIVAL_M     = 0.12   # 웨이포인트 도착 판정 (m)
-    REPLAN_INTERVAL  = 4      # 8 → 4: 초기 경로를 더 빠르게 잡음
+    REPLAN_INTERVAL  = 4      # 몇 루프마다 재계획
 
     def __init__(self):
         self._gap = GapPlanner()
@@ -196,39 +215,21 @@ class LocalPathPlanner:
         self._loop_count = 0
 
     # ------------------------------------------------------------------
-    # 목표 셀 선택
+    # 목표 셀 선택 — lookahead 거리를 단계적으로 줄여서 반드시 자유 셀 확보
     # ------------------------------------------------------------------
 
     def _make_goal(self, mapper):
         rx, ry = mapper.robot_cell()
-        lookahead_cells = int(self.LOOKAHEAD_M / MAP_RESOLUTION)
 
-        best_score, best_cell = -999999, None
+        # lookahead를 0.40m → 0.20m → 0.10m 순으로 줄여가며 시도
+        for lookahead_m in [self.LOOKAHEAD_M, 0.25, 0.15]:
+            lookahead_cells = int(lookahead_m / MAP_RESOLUTION)
+            best_score, best_cell = -999999, None
 
-        # 각도 범위 -60~60 → -80~80 으로 확대 (좁은 공간에서 목표를 못 찾는 경우 방지)
-        for angle_deg in range(-80, 81, 5):
-            rad = math.radians(angle_deg)
-            cx = int(rx + lookahead_cells * math.sin(rad))
-            cy = int(ry - lookahead_cells * math.cos(rad))
-
-            if not mapper.is_free(cx, cy):
-                continue
-
-            fwd_score    =  math.cos(rad) * GOAL_DIRECTION_WEIGHT
-            visit_score  = -mapper.visit[cy, cx] * VISIT_WEIGHT * 0.01
-            center_score = -abs(angle_deg) * 0.01 * CENTER_WEIGHT
-
-            score = fwd_score + visit_score + center_score
-            if score > best_score:
-                best_score, best_cell = score, (cx, cy)
-
-        # lookahead 거리에서 못 찾으면 절반 거리로 재시도
-        if best_cell is None:
-            short_cells = max(1, lookahead_cells // 2)
             for angle_deg in range(-80, 81, 5):
                 rad = math.radians(angle_deg)
-                cx = int(rx + short_cells * math.sin(rad))
-                cy = int(ry - short_cells * math.cos(rad))
+                cx = int(rx + lookahead_cells * math.sin(rad))
+                cy = int(ry - lookahead_cells * math.cos(rad))
 
                 if not mapper.is_free(cx, cy):
                     continue
@@ -241,10 +242,10 @@ class LocalPathPlanner:
                 if score > best_score:
                     best_score, best_cell = score, (cx, cy)
 
-        if best_cell is None:
-            print("[WARN] _make_goal: 자유 셀을 찾지 못했습니다. 맵이 전부 막혀 있을 수 있습니다.")
+            if best_cell is not None:
+                return best_cell
 
-        return best_cell
+        return None   # 모든 거리에서 실패
 
     # ------------------------------------------------------------------
     # 재계획
@@ -255,6 +256,7 @@ class LocalPathPlanner:
         goal = self._make_goal(mapper)
 
         if goal is None:
+            print("[PLANNER] goal=None: lookahead 범위 내 자유 셀 없음")
             self._waypoints = []
             self._wp_idx = 0
             return
@@ -262,7 +264,7 @@ class LocalPathPlanner:
         raw_path = astar(mapper.inflated, (rx, ry), goal)
 
         if not raw_path:
-            print(f"[WARN] A* 경로 없음: start=({rx},{ry}) goal={goal}")
+            print(f"[PLANNER] A* 실패: start={rx,ry} goal={goal}")
             self._waypoints = []
             self._wp_idx = 0
             return
@@ -291,7 +293,6 @@ class LocalPathPlanner:
             wp = self._waypoints[self._wp_idx]
 
         # 셀 좌표 → 로봇 기준 각도
-        # 맵 y 증가 = 아래 = 로봇 후방
         dy_cells =  ry - wp[1]   # 전방이 양수
         dx_cells =  wp[0] - rx   # 우측이 양수
         return math.degrees(math.atan2(dx_cells, dy_cells))
