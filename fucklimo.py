@@ -46,9 +46,9 @@ WHEEL_BASE   = 17.0
 # DRIVE PARAMETER
 # =========================================
 
-MAX_SPEED = 0.20
-MIN_SPEED = 0.07
-MAX_W     = 1.5
+MAX_SPEED = 0.30   # ★ 0.20 → 0.30 (50% 상향)
+MIN_SPEED = 0.10   # ★ 0.07 → 0.10
+MAX_W     = 2.25   # ★ 1.5  → 2.25 (50% 상향)
 TURN_GAIN = 1.8
 
 SCAN_LIMIT   = 150
@@ -65,8 +65,8 @@ MEDIAN_K  = 2
 # SMOOTHING PARAMETER
 # =========================================
 
-SMOOTHING_NORMAL = 0.55
-SMOOTHING_DANGER = 0.20
+SMOOTHING_NORMAL = 0.80   # ★ 0.55 → 0.80 (직선 주행 중 각도 안정화)
+SMOOTHING_DANGER = 0.25   # ★ 0.20 → 0.25
 DANGER_DIST      = 18
 
 # =========================================
@@ -112,7 +112,7 @@ LIDAR_DROP_THRESH  = 30.0   # cm — 한 스캔 사이 전방 거리 급증량
 RAMP_LIDAR_TIMEOUT = 3.0    # 경사 상태 최대 유지 시간 (초)
 
 # 경사 통과 중 주행 파라미터
-RAMP_SPEED         = 0.14   # 경사 통과 선속도 (m/s) — 감속
+RAMP_SPEED         = 0.21   # ★ 0.14 → 0.21 (50% 상향)
 RAMP_INFLATION_MAX = 10     # 경사 중 팽창 최대 거리 (cm) — 과팽창 억제
 RAMP_SAFE_DIST     = 8      # 경사 중 Gap 최소 거리 (cm) — 기준 완화
 
@@ -360,18 +360,22 @@ def find_best_direction(smoothing, on_ramp=False):
 # CONTROL
 # =========================================
 
-ALIGN_THRESHOLD = 15   # ★ 10 → 15° (Gap 방향 선회 중 직진 빠르게 재개)
+ALIGN_THRESHOLD = 15   # ★ 10 → 15° (Gap 방향 선회 후 직진 빠르게 재개)
+DEADBAND_ANGLE  =  5   # ★ 추가: ±5° 이내는 w=0 강제 → 직선 주행 중 미세 지그재그 제거
 
 def compute_cmd(target_angle, on_ramp=False):
     w = math.radians(target_angle) * TURN_GAIN
     w = float(np.clip(w, -MAX_W, MAX_W))
 
+    # ★ 데드밴드: ±DEADBAND_ANGLE 이내면 w=0 → 직선 주행 중 지그재그 방지
+    if abs(target_angle) <= DEADBAND_ANGLE:
+        w = 0.0
+
     if abs(target_angle) > ALIGN_THRESHOLD:
         return 0.0, w
 
-    front_min      = float(np.min(scan_data[np.arange(-10, 11) % 360]))
+    front_min = float(np.min(scan_data[np.arange(-10, 11) % 360]))
 
-    # ★ 경사 중: 속도 고정 (obstacle_scale 미적용)
     if on_ramp:
         return RAMP_SPEED, w
 
