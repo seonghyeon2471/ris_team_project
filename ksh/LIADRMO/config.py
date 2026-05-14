@@ -6,7 +6,7 @@ MOTOR_PORT = "/dev/serial0"
 MOTOR_BAUD = 115200
 
 LIDAR_PORT = "/dev/ttyUSB0"
-LIDAR_BAUD = 256000
+LIDAR_BAUD = 460800
 
 # =========================
 # ROBOT
