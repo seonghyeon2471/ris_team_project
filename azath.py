@@ -85,9 +85,9 @@ rotate_dir        = 1      # +1: 좌회전, -1: 우회전 (교번)
 
 EMERGENCY_DIST   =  6     # 긴급회피 진입 거리 (cm)
 REVERSE_DURATION = 0.35   # 후진 지속 시간 (초)
-ROTATE_DURATION  = 1.00   # 회전 지속 시간 (초) — ≈69° 회전
+ROTATE_DURATION  = 1.00   # 회전 지속 시간 (초) — ≈52° 회전
 REVERSE_SPEED    = -0.10  # 후진 선속도 (m/s)
-ROTATE_W         =  1.2   # 회전 각속도 (rad/s)
+ROTATE_W         =  0.9   # 회전 각속도 (rad/s) — 1.2 → 0.9 (69°→52° 감소)
 
 # =========================================
 # STATE
@@ -434,7 +434,4 @@ except KeyboardInterrupt:
 
 finally:
     stop_robot()
-    lidar_ser.write(bytes([0xA5, 0x25]))   # LiDAR 정지
-    lidar_ser.close()
-    arduino_ser.close()
-    print("END")
+    lidar_ser.write(bytes([0xA5, 0x25]))
