@@ -1,15 +1,38 @@
-from lidar import SimpleLidar
+from rplidar import RPLidar
+import time
 
-lidar = SimpleLidar()
+PORT = "/dev/ttyUSB0"
 
-while True:
+lidar = RPLidar(
+    PORT,
+    baudrate=460800,
+    timeout=3
+)
 
-    scan = lidar.read_scan()
+print("connected")
 
-    if len(scan) > 0:
+time.sleep(1)
 
-        print(
-            scan[:5],
-            "count =",
-            len(scan)
-        )
+print("reset")
+lidar.reset()
+
+time.sleep(2)
+
+print("motor start")
+lidar.start_motor()
+
+time.sleep(2)
+
+print("get info")
+print(lidar.get_info())
+
+print("health")
+print(lidar.get_health())
+
+print("scan start")
+
+for scan in lidar.iter_scans():
+
+    print("count =", len(scan))
+
+    print(scan[:5])
