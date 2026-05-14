@@ -1,227 +1,315 @@
 import serial
-import time
 import math
+import time
+import numpy as np
 
-# =========================
+# =========================================
 # SERIAL
-# =========================
-lidar = serial.Serial("/dev/ttyUSB0", 460800, timeout=1)
-motor = serial.Serial("/dev/serial0", 115200, timeout=1)
+# =========================================
+arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
+lidar_ser   = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)
 
-# =========================
+# =========================================
+# LIDAR START
+# =========================================
+lidar_ser.write(bytes([0xA5, 0x40]))
+time.sleep(2)
+lidar_ser.reset_input_buffer()
+
+lidar_ser.write(bytes([0xA5, 0x20]))
+lidar_ser.read(7)
+
+print("LIDAR START")
+
+# =========================================
 # PARAMETER
-# =========================
-FOV = 120
-MAX_DIST = 2.0
+# =========================================
+SCAN_LIMIT = 150
 
-THRESHOLD = 0.7
+MAX_SPEED = 0.20
+MIN_SPEED = 0.07
+MAX_W     = 1.5
+TURN_GAIN = 1.8
 
-EMERGENCY_DIST = 0.10   # ⚠ 7cm → 실제는 10cm 추천
-BASE_V = 0.15
+FRONT_RANGE = 60
 
-# robot footprint
-ROBOT_HALF_WIDTH = 0.10   # 20cm / 2
+# filter
+EMA_ALPHA = 0.3
+MEDIAN_K  = 2
+
+# obstacle
+SAFE_DIST = 17
+INFLATION_MAX_DIST = 25
+
+FRONT_CLEAR_DIST  = 23
+FRONT_CLEAR_RANGE = 15
+
+# emergency
+EMERGENCY_DIST = 10   # cm (7cm → 너무 타이트해서 보정)
+REVERSE_SPEED  = -0.10
+REVERSE_TIME   = 0.2
+ROTATE_TIME    = 1.0
+ROTATE_W       = 0.9
+
+# footprint
+ROBOT_HALF_WIDTH = 0.10
 SAFE_MARGIN = 0.05
 SAFE_WIDTH = ROBOT_HALF_WIDTH + SAFE_MARGIN
 
-# =========================
-# LiDAR PARSER (여기만 실제 라이브러리 연결)
-# =========================
-def get_lidar_points():
-    """
-    return: [(angle, dist), ...]
-    angle: -180 ~ 180 기준으로 정규화 필요
-    """
-    return []
+# smoothing
+SMOOTHING = 0.55
 
-# =========================
-# FILTER FRONT
-# =========================
-def filter_front(points):
+# =========================================
+# STATE
+# =========================================
+STATE_NORMAL  = 0
+STATE_REVERSE = 1
+STATE_ROTATE  = 2
 
-    front = []
+state = STATE_NORMAL
+t_end = 0
+rotate_dir = 1
 
-    for angle, dist in points:
+scan_data = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
+prev_angle = 0.0
 
-        if dist <= 0 or dist > MAX_DIST:
+# =========================================
+# UTIL
+# =========================================
+def normalize(a):
+    return int(a) % 360
+
+# =========================================
+# LIDAR PARSER (RAW FIXED)
+# =========================================
+def read_lidar_packet():
+    raw = lidar_ser.read(5)
+    if len(raw) != 5:
+        return None
+
+    s_flag = raw[0] & 0x01
+    s_inv  = (raw[0] & 0x02) >> 1
+
+    if s_inv != (1 - s_flag):
+        return None
+
+    if (raw[1] & 0x01) != 1:
+        return None
+
+    quality = raw[0] >> 2
+    if quality < 3:
+        return None
+
+    angle_raw = (raw[1] >> 1) | (raw[2] << 7)
+    angle = int(angle_raw / 64.0) % 360
+
+    dist_raw = raw[3] | (raw[4] << 8)
+    dist_cm = (dist_raw / 4.0) / 10.0
+
+    if dist_cm < 3 or dist_cm > SCAN_LIMIT:
+        return None
+
+    return angle, dist_cm, s_flag
+
+# =========================================
+# SCAN UPDATE (EMA)
+# =========================================
+def update_scan():
+    pkt = read_lidar_packet()
+    if pkt is None:
+        return False
+
+    angle, dist, s_flag = pkt
+
+    scan_data[angle] = (
+        (1 - EMA_ALPHA) * scan_data[angle]
+        + EMA_ALPHA * dist
+    )
+
+    return s_flag == 1
+
+# =========================================
+# FILTER
+# =========================================
+def median_filter():
+    k = MEDIAN_K
+    tmp = np.copy(scan_data)
+
+    for i in range(360):
+        idx = [(i + d) % 360 for d in range(-k, k+1)]
+        tmp[i] = np.median(scan_data[idx])
+
+    scan_data[:] = tmp
+
+# =========================================
+# INFLATION
+# =========================================
+def inflate(dists):
+    out = dists.copy()
+
+    for i in range(len(dists)):
+        d = dists[i]
+        if d < 5 or d > INFLATION_MAX_DIST:
             continue
 
-        if -60 <= angle <= 60:
-            front.append((angle, dist))
+        alpha = math.degrees(math.asin(min(ROBOT_HALF_WIDTH / d, 1.0)))
 
-    return front
+        s = max(0, int(i - alpha))
+        e = min(len(dists)-1, int(i + alpha))
 
-# =========================
-# EMERGENCY CHECK
-# =========================
-def emergency_check(front):
+        out[s:e+1] = 0
 
-    for angle, dist in front:
-        if -30 <= angle <= 30 and dist <= EMERGENCY_DIST:
-            return True
+    return out
 
-    return False
-
-# =========================
-# ESCAPE DIRECTION
-# =========================
-def escape_direction(points):
-
-    left = []
-    right = []
-
-    for angle, dist in points:
-
-        if 60 <= angle <= 120:
-            left.append(dist)
-
-        if -120 <= angle <= -60:
-            right.append(dist)
-
-    left_avg = sum(left)/len(left) if left else 0.01
-    right_avg = sum(right)/len(right) if right else 0.01
-
-    return 1 if left_avg > right_avg else -1
-
-# =========================
-# GAP EXTRACTION
-# =========================
-def extract_gaps(front):
-
+# =========================================
+# GAP SEARCH
+# =========================================
+def find_gaps(dists):
     gaps = []
-    current = []
+    start = None
 
-    for angle, dist in front:
-
-        free = dist > THRESHOLD
-
-        if free:
-            current.append((angle, dist))
+    for i, d in enumerate(dists):
+        if d > SAFE_DIST:
+            if start is None:
+                start = i
         else:
-            if len(current) > 0:
-                gaps.append(current)
-                current = []
+            if start is not None:
+                gaps.append((start, i-1))
+                start = None
 
-    if len(current) > 0:
-        gaps.append(current)
+    if start is not None:
+        gaps.append((start, len(dists)-1))
 
     return gaps
 
-# =========================
-# FOOTPRINT CHECK (핵심)
-# =========================
-def is_gap_safe(gap):
+# =========================================
+# GAP SCORE
+# =========================================
+def score(gap, dists):
+    s, e = gap
+    w = e - s
+    center = (s + e) / 2
+    center_d = dists[int(center)]
+    avg = np.mean(dists[s:e+1])
+    mn  = np.min(dists[s:e+1])
 
-    angles = [a for a, d in gap]
-    dists  = [d for a, d in gap]
+    return w*1.5 + avg*2.0 + mn - abs(center-180)*0.15
 
-    center_dist = sum(dists) / len(dists)
-
-    required_angle = math.degrees(
-        math.atan(SAFE_WIDTH / center_dist)
-    )
-
-    actual_width = abs(max(angles) - min(angles))
-
-    return actual_width > (2 * required_angle)
-
-# =========================
-# GAP SELECTION (GRP + FOOTPRINT)
-# =========================
-def select_best_gap(gaps):
-
-    best_score = -999
+# =========================================
+# SELECT GAP
+# =========================================
+def select_gaps(gaps, dists):
     best = None
+    best_s = -1e9
 
     for g in gaps:
-
-        if not is_gap_safe(g):
-            continue
-
-        angles = [a for a, d in g]
-        dists  = [d for a, d in g]
-
-        center = (min(angles) + max(angles)) / 2
-        width  = abs(max(angles) - min(angles))
-        dmin   = min(dists)
-
-        score = width * (dmin + 0.1)
-
-        if score > best_score:
-            best_score = score
-            best = (center, dmin, width)
+        s = score(g, dists)
+        if s > best_s:
+            best_s = s
+            best = g
 
     return best
 
-# =========================
-# CONTROL (GRP simplified)
-# =========================
-def control(gap):
+# =========================================
+# CONTROL
+# =========================================
+def control(target):
+    global prev_angle
 
-    if gap is None:
-        return 0.12, 0
+    w = math.radians(target) * TURN_GAIN
+    w = np.clip(w, -MAX_W, MAX_W)
 
-    center, dmin, width = gap
+    if abs(target) > 15:
+        return 0.0, w
 
-    # GRP weighting
-    alpha = 1.0
-    beta  = 0.6
+    front = np.min(scan_data[170:190])
 
-    w = alpha * center + beta * (1.0 / (dmin + 0.01))
-
-    w = w / 120.0
-
-    v = BASE_V
-
-    # slowdown in tight space
-    if dmin < 0.5:
-        v *= 0.7
+    v = MAX_SPEED if front > 40 else MIN_SPEED
 
     return v, w
 
-# =========================
-# SEND TO ARDUINO
-# =========================
+# =========================================
+# SEND
+# =========================================
 def send(v, w):
-    motor.write(f"{v},{w}\n".encode())
+    arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
-# =========================
+# =========================================
+# ESCAPE DIR
+# =========================================
+def escape():
+    left = np.mean(scan_data[60:120])
+    right = np.mean(scan_data[240:300])
+    return 1 if left > right else -1
+
+# =========================================
 # MAIN LOOP
-# =========================
+# =========================================
+print("START")
+
 while True:
 
-    points = get_lidar_points()
-    front = filter_front(points)
-
-    # =========================
-    # EMERGENCY STOP
-    # =========================
-    if emergency_check(front):
-
-        print("EMERGENCY STOP")
-
-        send(0, 0)
-        time.sleep(0.3)
-
-        direction = escape_direction(points)
-
-        # escape rotation
-        for _ in range(6):
-            send(0, 0.6 * direction)
-            time.sleep(0.1)
-
+    ok = update_scan()
+    if not ok:
         continue
 
-    # =========================
-    # GAP LOGIC
-    # =========================
-    gaps = extract_gaps(front)
-    best_gap = select_best_gap(gaps)
+    median_filter()
 
-    v, w = control(best_gap)
+    front_min = np.min(scan_data[170:190])
+
+    now = time.time()
+
+    # =========================
+    # EMERGENCY
+    # =========================
+    if state == STATE_NORMAL and front_min < EMERGENCY_DIST:
+
+        rotate_dir = escape()
+        state = STATE_REVERSE
+        t_end = now + REVERSE_TIME
+
+    # =========================
+    # REVERSE
+    # =========================
+    if state == STATE_REVERSE:
+        if now < t_end:
+            send(REVERSE_SPEED, 0)
+            continue
+        else:
+            state = STATE_ROTATE
+            t_end = now + ROTATE_TIME
+            continue
+
+    # =========================
+    # ROTATE
+    # =========================
+    if state == STATE_ROTATE:
+        if now < t_end:
+            send(0, ROTATE_W * rotate_dir)
+            continue
+        else:
+            state = STATE_NORMAL
+            continue
+
+    # =========================
+    # NORMAL
+    # =========================
+    d = inflate(scan_data)
+    gaps = find_gaps(d)
+
+    if not gaps:
+        send(REVERSE_SPEED, 0)
+        continue
+
+    best = select_gaps(gaps, d)
+
+    s, e = best
+    target = (s + e) / 2
+
+    target = (target - 180) * SMOOTHING
+
+    v, w = control(target)
 
     send(v, w)
 
-    print("v:", v, " w:", w)
-
-    time.sleep(0.1)
+    print("v:", v, "w:", w, "front:", front_min)
