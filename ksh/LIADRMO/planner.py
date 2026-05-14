@@ -96,7 +96,7 @@ class GapPlanner:
             return 0.0, 1.5
 
         # steering
-        w = -math.radians(target_angle) * 1.4
+        w = -math.radians(target_angle) * 0.8
 
         if abs(w) < 0.08:
             w = 0.0
