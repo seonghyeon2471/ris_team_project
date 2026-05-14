@@ -10,14 +10,12 @@ import numpy as np
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
 lidar_ser   = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)
 
-# IMU (MPU-6050 등) I2C — smbus2 사용
-# 없으면 아래 두 줄 주석 처리 후 USE_IMU = False
 USE_IMU = True
 try:
     import smbus2
     imu_bus  = smbus2.SMBus(1)
     IMU_ADDR = 0x68
-    imu_bus.write_byte_data(IMU_ADDR, 0x6B, 0)   # wake up
+    imu_bus.write_byte_data(IMU_ADDR, 0x6B, 0)
 except Exception:
     USE_IMU = False
     print("[WARN] IMU 초기화 실패 → IMU 비활성화")
@@ -26,17 +24,17 @@ except Exception:
 # LIDAR START
 # =========================================
 
-lidar_ser.write(bytes([0xA5, 0x40]))   # Reset
+lidar_ser.write(bytes([0xA5, 0x40]))
 time.sleep(2)
 lidar_ser.reset_input_buffer()
 
-lidar_ser.write(bytes([0xA5, 0x20]))   # Scan Start
-lidar_ser.read(7)                       # 응답 헤더 소비
+lidar_ser.write(bytes([0xA5, 0x20]))
+lidar_ser.read(7)
 
 print("LIDAR START")
 
 # =========================================
-# ROBOT PHYSICAL PARAMETER  (단위: cm)
+# ROBOT PHYSICAL PARAMETER
 # =========================================
 
 ROBOT_RADIUS = 14.0
@@ -46,19 +44,19 @@ WHEEL_BASE   = 17.0
 # DRIVE PARAMETER
 # =========================================
 
-MAX_SPEED = 0.20   # ★ 0.30 → 0.20
-MIN_SPEED = 0.07   # ★ 0.10 → 0.07
-MAX_W     = 1.8    # ★ 2.25 → 1.8 (속도 하향에 맞춰 조정)
+MAX_SPEED = 0.20
+MIN_SPEED = 0.07
+MAX_W     = 1.8
 TURN_GAIN = 1.2
 
-SCAN_LIMIT   = 150
-FRONT_RANGE  = 60
+SCAN_LIMIT  = 150
+FRONT_RANGE = 60
 
 # =========================================
 # FILTER PARAMETER
 # =========================================
 
-EMA_ALPHA = 0.5   # ★ 0.3 → 0.5 (장애물 빠른 반영)
+EMA_ALPHA = 0.5
 MEDIAN_K  = 2
 
 # =========================================
@@ -67,16 +65,16 @@ MEDIAN_K  = 2
 
 SMOOTHING_NORMAL = 0.70
 SMOOTHING_DANGER = 0.25
-DANGER_DIST      = 30   # ★ 20 → 30cm (EMERGENCY 15cm보다 충분히 크게 — 미리 반응)
+DANGER_DIST      = 30
 
 # =========================================
-# GAP PARAMETER  (단위: cm)
+# GAP PARAMETER
 # =========================================
 
 SAFE_DIST          = 17
 INFLATION_MAX_DIST = 25
 
-FRONT_CLEAR_DIST  = 25   # ★ 35 → 25cm (너무 크면 경사면도 막힘 판정 → v=0 루프)
+FRONT_CLEAR_DIST  = 25
 FRONT_CLEAR_RANGE = 15
 
 # =========================================
@@ -86,48 +84,42 @@ FRONT_CLEAR_RANGE = 15
 STATE_NORMAL  = 0
 STATE_REVERSE = 1
 STATE_ROTATE  = 2
-STATE_RAMP    = 3   # ★ 경사면 통과 상태 추가
+STATE_RAMP    = 3
 
 state             = STATE_NORMAL
 maneuver_end_time = 0.0
 rotate_dir        = 1
 
-EMERGENCY_DIST   =  8     # ★ 15 → 8cm
-EMERGENCY_RANGE  =  5     # ★ 추가: 긴급회피는 정면 ±5°만 판단 (측면 벽 오판 방지)
-REVERSE_DURATION = 0.25   # ★ 0.18 → 0.25 (긴급거리 늘어난 만큼 후진도 조금 더)
-ROTATE_DURATION  = 1.00
+EMERGENCY_DIST   = 8
+EMERGENCY_RANGE  = 5
+REVERSE_DURATION = 0.25
 REVERSE_SPEED    = -0.10
-ROTATE_W         =  0.9
+
+# ── [수정 2] 회전 각도 축소 ──────────────────────────
+ROTATE_DURATION  = 0.65   # 1.00 → 0.65s
+ROTATE_W         = 0.70   # 0.90 → 0.70 rad/s
+# ─────────────────────────────────────────────────────
 
 # =========================================
-# ★ RAMP PARAMETER
+# RAMP PARAMETER
 # =========================================
 
-# IMU 기반 경사 감지
 RAMP_PITCH_THRESH  = 8.0
 RAMP_EXIT_PITCH    = 3.0
-
-# IMU 없을 때: LiDAR 패턴으로 경사 추정
 LIDAR_DROP_THRESH  = 30.0
 RAMP_LIDAR_TIMEOUT = 3.0
-
-# 경사 통과 중 주행 파라미터
 RAMP_SPEED         = 0.12
 RAMP_INFLATION_MAX = 10
 RAMP_SAFE_DIST     = 8
 
-# ★ 측면 경사 벽 추종 파라미터
-WALL_FOLLOW_TARGET = 15    # 목표 측면 유지 거리 (cm)
-WALL_FOLLOW_KP     = 0.4   # 거리 오차 → 조향각 비례 게인
-WALL_FOLLOW_MAX_W  = 0.8   # 벽 추종 중 최대 각속도 (rad/s)
-WALL_RAMP_DIST     = 20    # 측면 경사 감지 임계 거리 (cm)
+WALL_FOLLOW_TARGET = 25
+WALL_FOLLOW_KP     = 0.4
+WALL_FOLLOW_MAX_W  = 0.8
+WALL_RAMP_DIST     = 20
 
-# 벽 추종 모드
-RAMP_MODE_NORMAL     = 0   # 기존 Gap 추종
-RAMP_MODE_WALL_LEFT  = 1   # 왼쪽 경사 → 오른쪽 벽 기준 추종
-RAMP_MODE_WALL_RIGHT = 2   # 오른쪽 경사 → 왼쪽 벽 기준 추종
-
-ramp_mode = RAMP_MODE_NORMAL
+RAMP_MODE_NORMAL     = 0
+RAMP_MODE_WALL_LEFT  = 1
+RAMP_MODE_WALL_RIGHT = 2
 
 # =========================================
 # STATE
@@ -137,7 +129,8 @@ scan_data       = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
 prev_angle      = 0.0
 prev_front_avg  = float(SCAN_LIMIT)
 ramp_start_time = 0.0
-ramp_mode       = RAMP_MODE_NORMAL   # ★ 추가
+# [수정 1] global 선언 제거 → 모듈 수준 변수로 직접 관리
+ramp_mode       = RAMP_MODE_NORMAL
 
 # =========================================
 # UTIL
@@ -148,39 +141,27 @@ def normalize_angle(angle):
 
 
 # =========================================
-# ★ 측면 경사 감지 + 벽 추종
+# 측면 경사 감지 + 벽 추종
 # =========================================
 
 def detect_side_ramp():
-    """
-    좌(85~95°) / 우(265~275°) 평균 거리로 측면 경사 감지.
-    반환: RAMP_MODE_WALL_LEFT / RAMP_MODE_WALL_RIGHT / RAMP_MODE_NORMAL
-    """
-    left_dist  = float(np.mean(scan_data[85:96]))    # 왼쪽 90° 부근
-    right_dist = float(np.mean(scan_data[265:276]))  # 오른쪽 270° 부근
+    left_dist  = float(np.mean(scan_data[85:96]))
+    right_dist = float(np.mean(scan_data[265:276]))
 
     if left_dist < WALL_RAMP_DIST and right_dist >= WALL_RAMP_DIST:
-        return RAMP_MODE_WALL_LEFT   # 왼쪽 경사 → 오른쪽 벽 추종
+        return RAMP_MODE_WALL_LEFT
     if right_dist < WALL_RAMP_DIST and left_dist >= WALL_RAMP_DIST:
-        return RAMP_MODE_WALL_RIGHT  # 오른쪽 경사 → 왼쪽 벽 추종
+        return RAMP_MODE_WALL_RIGHT
     return RAMP_MODE_NORMAL
 
 
 def compute_wall_follow_cmd(mode):
-    """
-    측면 벽과 WALL_FOLLOW_TARGET 거리 유지하며 직진.
-    mode: RAMP_MODE_WALL_LEFT  → 오른쪽 벽(270°) 기준
-          RAMP_MODE_WALL_RIGHT → 왼쪽 벽(90°) 기준
-    """
     if mode == RAMP_MODE_WALL_LEFT:
-        # 오른쪽 벽 거리 기준 (270° 부근 평균)
         wall_dist = float(np.mean(scan_data[265:276]))
-        # 오른쪽 벽이 너무 가까우면 왼쪽으로, 너무 멀면 오른쪽으로
         error = WALL_FOLLOW_TARGET - wall_dist
         w = float(np.clip(-error * WALL_FOLLOW_KP, -WALL_FOLLOW_MAX_W, WALL_FOLLOW_MAX_W))
         label = "WALL_FOLLOW_L(right_wall)"
     else:
-        # 왼쪽 벽 거리 기준 (90° 부근 평균)
         wall_dist = float(np.mean(scan_data[85:96]))
         error = WALL_FOLLOW_TARGET - wall_dist
         w = float(np.clip(error * WALL_FOLLOW_KP, -WALL_FOLLOW_MAX_W, WALL_FOLLOW_MAX_W))
@@ -190,15 +171,10 @@ def compute_wall_follow_cmd(mode):
 
 
 # =========================================
-# ★ IMU 읽기
+# IMU
 # =========================================
 
 def read_imu_pitch() -> float:
-    """
-    MPU-6050 가속도계로 피치각(°) 반환.
-    IMU 없으면 0.0 반환.
-    축 방향은 실제 장착 방향에 맞게 조정 필요.
-    """
     if not USE_IMU:
         return 0.0
     try:
@@ -208,11 +184,9 @@ def read_imu_pitch() -> float:
             val = (h << 8) | l
             return val - 65536 if val >= 0x8000 else val
 
-        ax = read_word(0x3B) / 16384.0   # ±2g 스케일
+        ax = read_word(0x3B) / 16384.0
         ay = read_word(0x3D) / 16384.0
         az = read_word(0x3F) / 16384.0
-
-        # 전후 피치각: atan2(ax, sqrt(ay²+az²))
         pitch = math.degrees(math.atan2(ax, math.sqrt(ay**2 + az**2)))
         return abs(pitch)
     except Exception:
@@ -220,34 +194,25 @@ def read_imu_pitch() -> float:
 
 
 # =========================================
-# ★ 경사면 감지
+# 경사면 감지
 # =========================================
 
 def detect_ramp(front_avg: float) -> bool:
-    """
-    IMU 우선, 없으면 LiDAR 전방 거리 급증으로 판단.
-    front_avg: 현재 전방 ±10° 평균 거리 (cm)
-    """
     global prev_front_avg
 
-    # 1) IMU 피치 기반
     if USE_IMU:
         pitch = read_imu_pitch()
         prev_front_avg = front_avg
         return pitch >= RAMP_PITCH_THRESH
 
-    # 2) LiDAR 패턴 기반 (fallback)
-    # ★ 버그 수정: 비교 먼저 → 그 다음 갱신 (기존엔 덮어쓰고 비교해서 항상 drop=0)
     drop = front_avg - prev_front_avg
     prev_front_avg = front_avg
     return drop >= LIDAR_DROP_THRESH
 
 
 def ramp_exited() -> bool:
-    """경사면 통과 완료 판단"""
     if USE_IMU:
         return read_imu_pitch() < RAMP_EXIT_PITCH
-    # LiDAR fallback: 타임아웃으로만 판단
     return (time.time() - ramp_start_time) > RAMP_LIDAR_TIMEOUT
 
 
@@ -277,7 +242,6 @@ def apply_median_filter():
 
 # =========================================
 # OBSTACLE INFLATION
-# inflation_max: 경사 상태에 따라 동적으로 전달받음
 # =========================================
 
 def inflate_obstacles(dists, inflation_max=None):
@@ -288,15 +252,11 @@ def inflate_obstacles(dists, inflation_max=None):
 
     for i in range(len(dists)):
         d = dists[i]
-
         if d < 5 or d >= inflation_max:
             continue
-
-        alpha = math.degrees(math.asin(min(ROBOT_RADIUS / d, 1.0)))
-
+        alpha     = math.degrees(math.asin(min(ROBOT_RADIUS / d, 1.0)))
         start_idx = max(0, int(i - alpha))
         end_idx   = min(len(dists) - 1, int(i + alpha))
-
         proc[start_idx : end_idx + 1] = 0.0
 
     return proc
@@ -336,11 +296,6 @@ def score_gap(gap, proc_dists, angles):
     avg_dist     = np.mean(proc_dists[start : end + 1])
     min_dist     = np.min(proc_dists[start : end + 1])
 
-    # ★ 개선된 점수 계산
-    # - width 가중치 상향:      0.5 → 1.5  (좁은 Gap 선호 억제)
-    # - avg_dist 가중치 상향:   1.2 → 2.0  (실제 열린 공간 우선)
-    # - min_dist 추가:          × 1.0      (Gap 내 최소 거리 — 막힌 틈 억제)
-    # - 정면 편향 패널티 완화:  0.4 → 0.15 (먼 방향도 공정하게 평가)
     score = (
         width               * 1.5
         + avg_dist          * 2.0
@@ -368,16 +323,11 @@ def select_best_gap(gaps, proc_dists, angles):
 # =========================================
 
 def find_best_direction(smoothing, on_ramp=False):
-    """
-    on_ramp=True 이면 팽창·Gap 기준을 완화하여
-    경사면을 장애물로 오인하지 않도록 처리
-    """
     global prev_angle
 
-    angles     = np.arange(-FRONT_RANGE, FRONT_RANGE + 1)
-    dists      = np.array([scan_data[a % 360] for a in angles], dtype=np.float32)
+    angles    = np.arange(-FRONT_RANGE, FRONT_RANGE + 1)
+    dists     = np.array([scan_data[a % 360] for a in angles], dtype=np.float32)
 
-    # ★ 경사 중: 팽창 최대 거리·Safe 거리 완화
     infl_max  = RAMP_INFLATION_MAX if on_ramp else INFLATION_MAX_DIST
     safe_dist = RAMP_SAFE_DIST     if on_ramp else SAFE_DIST
 
@@ -397,12 +347,9 @@ def find_best_direction(smoothing, on_ramp=False):
     ))
 
     if front_clear > FRONT_CLEAR_DIST:
-        # 전방 열림 → 직진 편향 (Gap 방향 20%만 반영)
         target     = gap_angle * 0.2
         bias_label = "STRAIGHT"
     else:
-        # 전방 막힘 → Gap 방향 100% 추종
-        # 정면+오른쪽 막혀있을 때 왼쪽 Gap을 확실히 추종
         target     = gap_angle * 1.0
         bias_label = "GAP"
 
@@ -416,26 +363,23 @@ def find_best_direction(smoothing, on_ramp=False):
 # CONTROL
 # =========================================
 
-ALIGN_THRESHOLD = 25   # ★ 15 → 25° (GAP 방향 틀 때도 직진 병행, v=0 루프 방지)
+ALIGN_THRESHOLD = 25
 DEADBAND_ANGLE  =  5
 
 def compute_cmd(target_angle, on_ramp=False):
     w = math.radians(target_angle) * TURN_GAIN
     w = float(np.clip(w, -MAX_W, MAX_W))
 
-    # 데드밴드: ±DEADBAND_ANGLE 이내면 w=0 → 직선 주행 중 지그재그 방지
     if abs(target_angle) <= DEADBAND_ANGLE:
         w = 0.0
-
-    front_min = float(np.min(scan_data[np.arange(-10, 11) % 360]))
 
     if on_ramp:
         return RAMP_SPEED, w
 
     if abs(target_angle) > ALIGN_THRESHOLD:
-        # ★ 크게 꺾어야 할 때도 MIN_SPEED로 서행 직진 병행 → v=0 루프 탈출
         return MIN_SPEED, w
 
+    front_min      = float(np.min(scan_data[np.arange(-10, 11) % 360]))
     obstacle_scale = min(front_min / 60.0, 1.0)
     speed          = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
 
@@ -472,6 +416,9 @@ def choose_avoid_direction():
 
 print("NAVIGATION START")
 
+# [수정 1] 루프 밖에서 ramp_mode를 nonlocal 없이 쓰기 위해
+# 모듈 수준 변수를 직접 참조 (global 키워드는 함수 안에서만 필요)
+
 try:
     while True:
 
@@ -506,6 +453,22 @@ try:
 
         apply_ema(angle, dist_cm)
 
+        # ── [수정 3] Emergency 체크를 스캔 완료(s_flag==1) 전에 배치 ──────
+        # 매 패킷마다 정면 ±EMERGENCY_RANGE° 최솟값을 확인하여
+        # s_flag 조건과 무관하게 즉각 반응
+        if state == STATE_NORMAL:
+            emergency_min = float(np.min(
+                scan_data[np.arange(-EMERGENCY_RANGE, EMERGENCY_RANGE + 1) % 360]
+            ))
+            if emergency_min < EMERGENCY_DIST:
+                rotate_dir        = choose_avoid_direction()
+                state             = STATE_REVERSE
+                maneuver_end_time = time.time() + REVERSE_DURATION
+                print(f"EMERGENCY(early)! front:{emergency_min:.1f}cm → REVERSE")
+                send_cmd(REVERSE_SPEED, 0.0)
+                continue
+        # ─────────────────────────────────────────────────────────────────
+
         if s_flag != 1:
             continue
 
@@ -513,7 +476,6 @@ try:
 
         now = time.time()
 
-        # 현재 전방 평균 (경사 감지용)
         front_avg = float(np.mean(scan_data[np.arange(-10, 11) % 360]))
         front_min = float(np.min(scan_data[np.arange(-10, 11) % 360]))
 
@@ -548,19 +510,21 @@ try:
                 print("  [NORMAL] maneuver done / scan reset ±45°")
             continue
 
-        # ── ★ STATE_RAMP : 경사면 통과 ──
+        # ── STATE_RAMP ──
         if state == STATE_RAMP:
-            global ramp_mode
+            # [수정 1] global 키워드 제거 → 모듈 수준 ramp_mode 직접 참조
+            # (루프 안 대입은 모듈 변수를 바꾸므로 global 불필요)
             if ramp_exited():
-                state     = STATE_NORMAL
-                ramp_mode = RAMP_MODE_NORMAL
+                state          = STATE_NORMAL
+                ramp_mode      = RAMP_MODE_NORMAL   # ← global 없이 정상 작동
                 prev_front_avg = float(SCAN_LIMIT)
                 print("  [RAMP→NORMAL] 경사 통과 완료")
                 send_cmd(RAMP_SPEED, 0.0)
                 continue
 
-            # ★ 정면 EMERGENCY 먼저 체크 — 경사면이어도 정면 충돌은 막음
-            emergency_min = float(np.min(scan_data[np.arange(-EMERGENCY_RANGE, EMERGENCY_RANGE + 1) % 360]))
+            emergency_min = float(np.min(
+                scan_data[np.arange(-EMERGENCY_RANGE, EMERGENCY_RANGE + 1) % 360]
+            ))
             if emergency_min < EMERGENCY_DIST:
                 rotate_dir        = choose_avoid_direction()
                 state             = STATE_REVERSE
@@ -570,18 +534,15 @@ try:
                 send_cmd(REVERSE_SPEED, 0.0)
                 continue
 
-            # ★ 측면 경사 감지 → 모드 결정
             detected_mode = detect_side_ramp()
             if detected_mode != RAMP_MODE_NORMAL:
-                ramp_mode = detected_mode  # 측면 경사 감지되면 벽 추종 모드로
+                ramp_mode = detected_mode
 
             if ramp_mode != RAMP_MODE_NORMAL:
-                # 측면 벽 추종 모드
                 v, w, wall_dist, label = compute_wall_follow_cmd(ramp_mode)
                 send_cmd(v, w)
                 print(f"  [RAMP/{label}] wall:{wall_dist:.1f}cm v:{v:.2f} w:{w:.2f}")
             else:
-                # 기존 Gap 추종 모드
                 result = find_best_direction(SMOOTHING_NORMAL, on_ramp=True)
                 if result is not None:
                     target_angle, bias_label, front_clear = result
@@ -601,8 +562,10 @@ try:
 
         # ── STATE_NORMAL ──
 
-        # 긴급회피 진입 — ★ 정면 ±EMERGENCY_RANGE°만 판단 (측면 벽 오판 방지)
-        emergency_min = float(np.min(scan_data[np.arange(-EMERGENCY_RANGE, EMERGENCY_RANGE + 1) % 360]))
+        # Emergency (스캔 완료 후 재확인 — 필터 적용된 값으로 정밀 판단)
+        emergency_min = float(np.min(
+            scan_data[np.arange(-EMERGENCY_RANGE, EMERGENCY_RANGE + 1) % 360]
+        ))
         if emergency_min < EMERGENCY_DIST:
             rotate_dir        = choose_avoid_direction()
             state             = STATE_REVERSE
@@ -611,16 +574,14 @@ try:
             send_cmd(REVERSE_SPEED, 0.0)
             continue
 
-        # ★ 경사 감지 → STATE_RAMP 진입
         if detect_ramp(front_avg):
             state           = STATE_RAMP
             ramp_start_time = now
             pitch           = read_imu_pitch()
             print(f"RAMP DETECTED! pitch:{pitch:.1f}° front_avg:{front_avg:.1f}cm → STATE_RAMP")
-            send_cmd(RAMP_SPEED, 0.0)   # ★ 진입 즉시 서행 명령 (명령 공백 방지)
+            send_cmd(RAMP_SPEED, 0.0)
             continue
 
-        # 위험 거리 기반 스무딩 전환
         smoothing = SMOOTHING_DANGER if front_min < DANGER_DIST else SMOOTHING_NORMAL
 
         result = find_best_direction(smoothing)
@@ -647,7 +608,7 @@ try:
             f"smooth:{smoothing:.2f}"
         )
 
-        prev_front_avg = front_avg   # LiDAR fallback용 갱신
+        prev_front_avg = front_avg
 
 except KeyboardInterrupt:
     print("STOP")
