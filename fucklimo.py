@@ -67,7 +67,7 @@ MEDIAN_K  = 2
 
 SMOOTHING_NORMAL = 0.70
 SMOOTHING_DANGER = 0.25
-DANGER_DIST      = 28   # ★ 18 → 28cm (위험 스무딩 더 일찍 전환)
+DANGER_DIST      = 20   # ★ 28 → 20cm (과민 반응 방지)
 
 # =========================================
 # GAP PARAMETER  (단위: cm)
@@ -76,7 +76,7 @@ DANGER_DIST      = 28   # ★ 18 → 28cm (위험 스무딩 더 일찍 전환)
 SAFE_DIST          = 17
 INFLATION_MAX_DIST = 25
 
-FRONT_CLEAR_DIST  = 35   # ★ 23 → 35cm (전방 열림 판단 거리 확대 → 회피 더 일찍 시작)
+FRONT_CLEAR_DIST  = 25   # ★ 35 → 25cm (너무 크면 경사면도 막힘 판정 → v=0 루프)
 FRONT_CLEAR_RANGE = 15
 
 # =========================================
@@ -175,15 +175,15 @@ def detect_ramp(front_avg: float) -> bool:
     global prev_front_avg
 
     # 1) IMU 피치 기반
-    pitch = read_imu_pitch()
-    prev_front_avg = front_avg
-
     if USE_IMU:
+        pitch = read_imu_pitch()
+        prev_front_avg = front_avg
         return pitch >= RAMP_PITCH_THRESH
 
     # 2) LiDAR 패턴 기반 (fallback)
-    #    경사를 오를 때 LiDAR가 허공을 보게 되어 전방 거리가 급증
+    # ★ 버그 수정: 비교 먼저 → 그 다음 갱신 (기존엔 덮어쓰고 비교해서 항상 drop=0)
     drop = front_avg - prev_front_avg
+    prev_front_avg = front_avg
     return drop >= LIDAR_DROP_THRESH
 
 
@@ -360,26 +360,27 @@ def find_best_direction(smoothing, on_ramp=False):
 # CONTROL
 # =========================================
 
-ALIGN_THRESHOLD = 15   # ★ 10 → 15° (Gap 방향 선회 후 직진 빠르게 재개)
-DEADBAND_ANGLE  =  5   # ★ 추가: ±5° 이내는 w=0 강제 → 직선 주행 중 미세 지그재그 제거
+ALIGN_THRESHOLD = 25   # ★ 15 → 25° (GAP 방향 틀 때도 직진 병행, v=0 루프 방지)
+DEADBAND_ANGLE  =  5
 
 def compute_cmd(target_angle, on_ramp=False):
     w = math.radians(target_angle) * TURN_GAIN
     w = float(np.clip(w, -MAX_W, MAX_W))
 
-    # ★ 데드밴드: ±DEADBAND_ANGLE 이내면 w=0 → 직선 주행 중 지그재그 방지
+    # 데드밴드: ±DEADBAND_ANGLE 이내면 w=0 → 직선 주행 중 지그재그 방지
     if abs(target_angle) <= DEADBAND_ANGLE:
         w = 0.0
-
-    if abs(target_angle) > ALIGN_THRESHOLD:
-        return 0.0, w
 
     front_min = float(np.min(scan_data[np.arange(-10, 11) % 360]))
 
     if on_ramp:
         return RAMP_SPEED, w
 
-    obstacle_scale = min(front_min / 60.0, 1.0)   # ★ 40 → 60cm (더 일찍 감속 시작)
+    if abs(target_angle) > ALIGN_THRESHOLD:
+        # ★ 크게 꺾어야 할 때도 MIN_SPEED로 서행 직진 병행 → v=0 루프 탈출
+        return MIN_SPEED, w
+
+    obstacle_scale = min(front_min / 60.0, 1.0)
     speed          = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
 
     return speed, w
@@ -495,9 +496,11 @@ try:
         if state == STATE_RAMP:
             if ramp_exited():
                 state = STATE_NORMAL
+                prev_front_avg = float(SCAN_LIMIT)  # ★ 경사 종료 후 감지 기준 리셋
                 print("  [RAMP→NORMAL] 경사 통과 완료")
+                # 종료 직후에도 이번 스캔은 서행 직진으로 처리 (명령 공백 방지)
+                send_cmd(RAMP_SPEED, 0.0)
             else:
-                # 경사 중: 완화된 파라미터로 직진 유지
                 result = find_best_direction(SMOOTHING_NORMAL, on_ramp=True)
                 if result is not None:
                     target_angle, bias_label, front_clear = result
@@ -511,7 +514,6 @@ try:
                         f"front:{front_min:.1f}cm"
                     )
                 else:
-                    # 경사 중에도 완전히 막히면 서행 직진 유지
                     send_cmd(RAMP_SPEED, 0.0)
                     print("  [RAMP] NO GAP → 서행 직진 유지")
             continue
@@ -531,9 +533,9 @@ try:
         if detect_ramp(front_avg):
             state           = STATE_RAMP
             ramp_start_time = now
-            prev_front_avg  = front_avg
             pitch           = read_imu_pitch()
             print(f"RAMP DETECTED! pitch:{pitch:.1f}° front_avg:{front_avg:.1f}cm → STATE_RAMP")
+            send_cmd(RAMP_SPEED, 0.0)   # ★ 진입 즉시 서행 명령 (명령 공백 방지)
             continue
 
         # 위험 거리 기반 스무딩 전환
