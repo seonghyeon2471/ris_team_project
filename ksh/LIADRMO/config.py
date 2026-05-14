@@ -38,7 +38,7 @@ MAX_LIDAR_DIST = 2500
 # =========================
 # GAP DETECTION (핵심 안정성)
 # =========================
-GAP_DISTANCE_THRESHOLD = 420   # 450 → 420 (gap 더 잘 잡힘)
+GAP_DISTANCE_THRESHOLD = 350
 MIN_GAP_SIZE = 6               # 8 → 6 (작은 gap도 활용)
 
 # =========================
