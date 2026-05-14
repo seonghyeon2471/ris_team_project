@@ -39,7 +39,7 @@ print("LIDAR START")
 # ROBOT PHYSICAL PARAMETER  (단위: cm)
 # =========================================
 
-ROBOT_RADIUS = 11.0
+ROBOT_RADIUS = 14.0
 WHEEL_BASE   = 17.0
 
 # =========================================
@@ -96,7 +96,7 @@ EMERGENCY_DIST   =  6
 REVERSE_DURATION = 0.18
 ROTATE_DURATION  = 1.00
 REVERSE_SPEED    = -0.10
-ROTATE_W         =  0.9
+ROTATE_W         =  0.7
 
 # =========================================
 # ★ RAMP PARAMETER
