@@ -1,6 +1,5 @@
 import numpy as np
 import math
-from scipy.ndimage import binary_dilation
 
 from config import *
 
@@ -44,6 +43,7 @@ class LocalMapper:
 
         # 원형 커널
         r = inflate_cells
+        self._inflate_r = r
         y_idx, x_idx = np.ogrid[-r:r + 1, -r:r + 1]
         self._inflate_kernel = (x_idx ** 2 + y_idx ** 2 <= r ** 2)
 
@@ -89,15 +89,32 @@ class LocalMapper:
             if 0 <= x < MAP_SIZE and 0 <= y < MAP_SIZE:
                 self.grid[y, x] = 1
 
-        # footprint 팽창 → inflated costmap 재계산
-        occupied = self.grid.astype(bool)
-        self.inflated = binary_dilation(
-            occupied,
-            structure=self._inflate_kernel
-        ).astype(np.uint8)
+        # footprint 팽창 → inflated costmap 재계산 (numpy only)
+        self.inflated = self._dilate(self.grid)
 
         # 뒷영역은 항상 막음
         self.inflated[self.robot_y:, :] = 1
+
+    # ------------------------------------------------------------------
+    # numpy only binary dilation (scipy 불필요)
+    # ------------------------------------------------------------------
+
+    def _dilate(self, grid):
+        """
+        원형 커널로 grid 팽창. scipy 없이 numpy stride trick으로 구현.
+        커널 크기가 작으므로 (~13셀 반지름) 충분히 빠름.
+        """
+        r = self._inflate_r
+        h, w = grid.shape
+        # pad → 슬라이딩 합산
+        padded = np.pad(grid, r, mode='constant', constant_values=0)
+        out = np.zeros((h, w), dtype=np.uint8)
+
+        ky, kx = self._inflate_kernel.nonzero()
+        for dy, dx in zip(ky, kx):
+            out |= padded[dy:dy + h, dx:dx + w]
+
+        return out
 
     # ------------------------------------------------------------------
     # 외부에서 쉽게 쿼리할 수 있는 헬퍼
