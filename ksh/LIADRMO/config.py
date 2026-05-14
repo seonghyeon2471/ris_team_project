@@ -36,7 +36,7 @@ WHEEL_BASE = 0.17
 # SPEED
 # =========================
 
-FORWARD_SPEED = 0.20
+FORWARD_SPEED = 0.15
 
 # 최대 회전 속도
 MAX_W = 0.8
