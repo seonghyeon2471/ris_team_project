@@ -39,12 +39,6 @@ try:
 
         if counter % 5 == 0:
 
-            print(
-                f"SCAN:{len(scan)} "
-                f"v:{v:.2f} "
-                f"w:{w:.2f}"
-            )
-
         time.sleep(0.02)
 
 except KeyboardInterrupt:
