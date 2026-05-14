@@ -36,7 +36,7 @@ WHEEL_BASE = 0.17
 # SPEED
 # =========================
 
-FORWARD_SPEED = 0.15
+FORWARD_SPEED = 0.20
 
 # 최대 회전 속도
 MAX_W = 0.8
@@ -55,8 +55,8 @@ EMERGENCY_DISTANCE = 0.12
 # LIDAR
 # =========================
 
-ANGLE_MIN = -80
-ANGLE_MAX = 80
+ANGLE_MIN = -100
+ANGLE_MAX = 100
 
 MIN_LIDAR_DIST = 80
 MAX_LIDAR_DIST = 2500
