@@ -28,7 +28,7 @@ ROBOT_HALF_LENGTH = ROBOT_LENGTH / 2   # 0.10 m
 ROBOT_HALF_WIDTH  = ROBOT_WIDTH  / 2   # 0.10 m
 
 # 여유 마진 (m) - 오차 버퍼
-FOOTPRINT_MARGIN = 0.03
+FOOTPRINT_MARGIN = 0.01
 
 # =========================
 # SPEED
