@@ -32,7 +32,7 @@ try:
         if len(scan) == 0:
             continue
 
-        mapper.update(scan)
+        # mapper.update(scan)
 
         v, w = planner.compute_control(scan)
 
