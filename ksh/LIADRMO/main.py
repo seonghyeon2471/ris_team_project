@@ -29,10 +29,12 @@ try:
 
         print(f"v={v:.2f}, w={w:.2f}")
 
-        time.sleep(0.03)
+        # 🔥 핵심: sleep 너무 크면 buffer 쌓임
+        time.sleep(0.01)
 
 except KeyboardInterrupt:
 
     print("STOP")
+
     motor.stop()
     lidar.stop()
