@@ -24,7 +24,7 @@ print("LIDAR START")
 # =========================================
 # ROBOT PHYSICAL PARAMETER
 # =========================================
-ROBOT_RADIUS = 17.0   # 상향 조정: 물리 반지름 + 측면 안전 마진 (cm)
+ROBOT_RADIUS = 15.0   # 상향 조정: 물리 반지름 + 측면 안전 마진 (cm)
 WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 
 # =========================================
@@ -47,14 +47,14 @@ MEDIAN_K     = 2      # 중앙값 필터 범위
 # =========================================
 # SMOOTHING PARAMETER
 # =========================================
-SMOOTHING_NORMAL = 0.55
+SMOOTHING_NORMAL = 0.4
 SMOOTHING_DANGER = 0.20
 DANGER_DIST      = 18     # 위험 감지 거리 (cm)
 
 # =========================================
 # GAP & INFLATION PARAMETER
 # =========================================
-SAFE_DIST          = 17   # Gap 유효 최소 거리 (cm)
+SAFE_DIST          = 15   # Gap 유효 최소 거리 (cm)
 INFLATION_MAX_DIST = 25   # 팽창 적용 최대 거리 (cm)
 
 FRONT_CLEAR_DIST   = 23   # 직진 편향 판단 거리 (cm)
