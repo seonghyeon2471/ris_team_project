@@ -13,27 +13,32 @@ motor = serial.Serial("/dev/serial0", 115200, timeout=1)
 # =========================
 FOV = 120
 MAX_DIST = 2.0
+
 THRESHOLD = 0.7
 
-EMERGENCY_DIST = 0.07   # 7cm
+EMERGENCY_DIST = 0.10   # ⚠ 7cm → 실제는 10cm 추천
 BASE_V = 0.15
 
+# robot footprint
+ROBOT_HALF_WIDTH = 0.10   # 20cm / 2
+SAFE_MARGIN = 0.05
+SAFE_WIDTH = ROBOT_HALF_WIDTH + SAFE_MARGIN
+
 # =========================
-# -------------------------
-# LiDAR DATA PARSER (placeholder)
-# -------------------------
+# LiDAR PARSER (여기만 실제 라이브러리 연결)
+# =========================
 def get_lidar_points():
     """
-    TODO: RPLIDAR C1 library 붙이면 scan 데이터 넣기
-    return [(angle, dist), ...]
-    angle: -180 ~ 180 기준 변환 필요
+    return: [(angle, dist), ...]
+    angle: -180 ~ 180 기준으로 정규화 필요
     """
     return []
 
 # =========================
-# FILTER FRONT 120 DEG
+# FILTER FRONT
 # =========================
 def filter_front(points):
+
     front = []
 
     for angle, dist in points:
@@ -47,7 +52,7 @@ def filter_front(points):
     return front
 
 # =========================
-# EMERGENCY CHECK (핵심)
+# EMERGENCY CHECK
 # =========================
 def emergency_check(front):
 
@@ -58,7 +63,7 @@ def emergency_check(front):
     return False
 
 # =========================
-# ESCAPE DIRECTION (좌/우 비교)
+# ESCAPE DIRECTION
 # =========================
 def escape_direction(points):
 
@@ -103,7 +108,25 @@ def extract_gaps(front):
     return gaps
 
 # =========================
-# GAP SELECTION (GRP STYLE)
+# FOOTPRINT CHECK (핵심)
+# =========================
+def is_gap_safe(gap):
+
+    angles = [a for a, d in gap]
+    dists  = [d for a, d in gap]
+
+    center_dist = sum(dists) / len(dists)
+
+    required_angle = math.degrees(
+        math.atan(SAFE_WIDTH / center_dist)
+    )
+
+    actual_width = abs(max(angles) - min(angles))
+
+    return actual_width > (2 * required_angle)
+
+# =========================
+# GAP SELECTION (GRP + FOOTPRINT)
 # =========================
 def select_best_gap(gaps):
 
@@ -111,6 +134,9 @@ def select_best_gap(gaps):
     best = None
 
     for g in gaps:
+
+        if not is_gap_safe(g):
+            continue
 
         angles = [a for a, d in g]
         dists  = [d for a, d in g]
@@ -137,15 +163,19 @@ def control(gap):
 
     center, dmin, width = gap
 
-    # GRP weighting (simplified)
+    # GRP weighting
     alpha = 1.0
     beta  = 0.6
 
     w = alpha * center + beta * (1.0 / (dmin + 0.01))
 
-    w = w / 120.0   # normalize
+    w = w / 120.0
 
     v = BASE_V
+
+    # slowdown in tight space
+    if dmin < 0.5:
+        v *= 0.7
 
     return v, w
 
@@ -164,18 +194,18 @@ while True:
     front = filter_front(points)
 
     # =========================
-    # 🚨 EMERGENCY STOP
+    # EMERGENCY STOP
     # =========================
     if emergency_check(front):
 
-        print("EMERGENCY!")
+        print("EMERGENCY STOP")
 
         send(0, 0)
         time.sleep(0.3)
 
         direction = escape_direction(points)
 
-        # 회전 탈출
+        # escape rotation
         for _ in range(6):
             send(0, 0.6 * direction)
             time.sleep(0.1)
