@@ -1,55 +1,51 @@
-import serial
-import math
+from rplidar import RPLidar
 from config import *
 
 class SimpleLidar:
 
     def __init__(self):
 
-        self.ser = serial.Serial(
+        self.lidar = RPLidar(
             LIDAR_PORT,
-            LIDAR_BAUD,
-            timeout=1
+            baudrate=LIDAR_BAUD
         )
+
+        self.iterator = self.lidar.iter_scans()
 
     def read_scan(self):
 
+        scan = next(self.iterator)
+
         points = []
 
-        while self.ser.in_waiting > 2000:
+        for (_, angle, distance) in scan:
 
-            data = self.ser.read(47)
+            # angle 변환
+            if angle > 180:
+                angle -= 360
 
-            if len(data) < 47:
+            # 전방만 사용
+            if angle < ANGLE_MIN:
                 continue
 
-            try:
+            if angle > ANGLE_MAX:
+                continue
 
-                for i in range(12):
+            # 거리 제한
+            if distance < MIN_LIDAR_DIST:
+                continue
 
-                    offset = 11 + i * 3
+            if distance > MAX_LIDAR_DIST:
+                continue
 
-                    raw_dist = data[offset] | (data[offset + 1] << 8)
-                    raw_angle = data[offset + 2]
-
-                    dist = raw_dist
-                    angle = raw_angle - 128
-
-                    if angle < ANGLE_MIN:
-                        continue
-
-                    if angle > ANGLE_MAX:
-                        continue
-
-                    if dist < MIN_LIDAR_DIST:
-                        continue
-
-                    if dist > MAX_LIDAR_DIST:
-                        continue
-
-                    points.append((angle, dist))
-
-            except:
-                pass
+            points.append(
+                (angle, distance)
+            )
 
         return points
+
+    def stop(self):
+
+        self.lidar.stop()
+
+        self.lidar.disconnect()
