@@ -18,8 +18,8 @@ WHEEL_BASE = 0.17
 # SPEED
 # =========================
 
-FORWARD_SPEED = 0.22
-MAX_W = 2.0
+FORWARD_SPEED = 0.18   # ↓ 안정성 위해 낮춤
+MAX_W = 2.5            # ↑ 회전 강화
 
 # =========================
 # SAFETY
@@ -42,7 +42,7 @@ MAX_LIDAR_DIST = 2500
 # GAP
 # =========================
 
-GAP_DISTANCE_THRESHOLD = 450
+GAP_DISTANCE_THRESHOLD = 400  # 조금 줄임 (더 민감하게)
 MIN_GAP_SIZE = 8
 
 # =========================
