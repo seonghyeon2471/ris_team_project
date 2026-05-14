@@ -38,12 +38,6 @@ try:
 
         motor.send(v, w)
 
-        print(
-            f"SCAN:{len(scan)} "
-            f"v:{v:.2f} "
-            f"w:{w:.2f}"
-        )
-
         time.sleep(0.03)
 
 except KeyboardInterrupt:
