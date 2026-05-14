@@ -60,6 +60,12 @@ class SimpleLidar:
                 (angle, distance)
             )
 
+        # =========================
+        # 다운샘플링
+        # =========================
+        if len(points) > 120:
+            points = points[::2]
+            
         return points
 
     def stop(self):
