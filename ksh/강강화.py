@@ -25,8 +25,7 @@ print("LIDAR START")
 # ROBOT PARAM
 # =========================================
 ROBOT_RADIUS = 17.0
-WHEEL_BASE   = 17.0
-LIDAR_TO_REAR_AXLE = 13.5   # ★ 핵심 추가
+LIDAR_TO_REAR_AXLE = 13.5
 
 # =========================================
 # DRIVE PARAM
@@ -46,7 +45,7 @@ EMA_ALPHA = 0.3
 MEDIAN_K  = 2
 
 # =========================================
-# SAFETY PARAM
+# SAFETY
 # =========================================
 SAFE_DIST          = 15
 INFLATION_MAX_DIST = 20
@@ -67,13 +66,14 @@ state = STATE_NORMAL
 maneuver_end_time = 0
 rotate_dir = 1
 
-scan_data  = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
+scan_data = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
+
 prev_angle = 0.0
 v_cmd = 0.0
 w_cmd = 0.0
 
 # =========================================
-# UTIL
+# FILTER
 # =========================================
 def apply_ema(angle, dist):
     scan_data[angle] = (1-EMA_ALPHA)*scan_data[angle] + EMA_ALPHA*dist
@@ -87,7 +87,7 @@ def apply_median():
     scan_data[:] = out
 
 # =========================================
-# ★ 핵심: 동적 팽창 반경
+# DYNAMIC INFLATION RADIUS
 # =========================================
 def get_turn_inflation_radius(v, w):
     if abs(w) < 0.05:
@@ -102,13 +102,18 @@ def get_turn_inflation_radius(v, w):
 # =========================================
 def inflate(dists, radius):
     out = dists.copy()
+
     for i, d in enumerate(dists):
         if d < 5 or d > INFLATION_MAX_DIST:
             continue
-        alpha = math.degrees(math.asin(min(radius/d, 1.0)))
-        s = max(0, int(i-alpha))
-        e = min(len(dists)-1, int(i+alpha))
+
+        alpha = math.degrees(math.asin(min(radius / d, 1.0)))
+
+        s = max(0, int(i - alpha))
+        e = min(len(dists)-1, int(i + alpha))
+
         out[s:e+1] = 0
+
     return out
 
 # =========================================
@@ -117,26 +122,36 @@ def inflate(dists, radius):
 def find_gaps(dists):
     gaps = []
     start = None
-    for i,d in enumerate(dists):
+
+    for i, d in enumerate(dists):
         if d > SAFE_DIST:
             if start is None:
                 start = i
         else:
             if start is not None:
-                gaps.append((start,i-1))
+                gaps.append((start, i-1))
                 start = None
+
     if start is not None:
-        gaps.append((start,len(dists)-1))
+        gaps.append((start, len(dists)-1))
+
     return gaps
 
-def score(gap, dists):
-    s,e = gap
-    width = e-s
-    center = (s+e)//2
-    return width + np.mean(dists[s:e+1]) - abs(center*0.1)
+
+def score_gap(gap, dists):
+    s, e = gap
+    width = e - s
+    center = (s + e) // 2
+
+    return (
+        width * 1.2 +
+        np.mean(dists[s:e+1]) * 1.8 -
+        abs(center) * 0.15
+    )
+
 
 def best_gap(gaps, dists):
-    return max(gaps, key=lambda g: score(g,dists))
+    return max(gaps, key=lambda g: score_gap(g, dists))
 
 # =========================================
 # PLANNING
@@ -145,7 +160,7 @@ def find_best(v_prev, w_prev, smoothing=0.55):
     global prev_angle
 
     angles = np.arange(-FRONT_RANGE, FRONT_RANGE+1)
-    dists  = np.array([scan_data[a%360] for a in angles])
+    dists  = np.array([scan_data[a % 360] for a in angles])
 
     radius = get_turn_inflation_radius(v_prev, w_prev)
     proc   = inflate(dists, radius)
@@ -154,42 +169,44 @@ def find_best(v_prev, w_prev, smoothing=0.55):
     if not gaps:
         return None
 
-    s,e = best_gap(gaps, proc)
+    s, e = best_gap(gaps, proc)
+
     gap_angle = float(angles[(s+e)//2])
 
-    front = np.min(scan_data[np.arange(-10,11)%360])
+    front_min = np.min(scan_data[np.arange(-10,11)%360])
 
-    if front > FRONT_CLEAR_DIST:
+    if front_min > FRONT_CLEAR_DIST:
         target = gap_angle * 0.3
     else:
         target = gap_angle
 
-    target = prev_angle*smoothing + target*(1-smoothing)
+    target = prev_angle * smoothing + target * (1 - smoothing)
     prev_angle = target
 
-    return target, front
+    return target
 
 # =========================================
 # CONTROL
 # =========================================
-def compute(v_target):
-    w = math.radians(v_target) * TURN_GAIN
+def compute(target_angle):
+    w = math.radians(target_angle) * TURN_GAIN
     w = float(np.clip(w, -MAX_W, MAX_W))
 
     front_min = np.min(scan_data[np.arange(-10,11)%360])
 
-    if abs(v_target) > 10:
-        v = 0.02 if front_min > 20 else 0
+    if abs(target_angle) > 10:
+        v = 0.02 if front_min > 20 else 0.0
     else:
         v = max(MIN_SPEED, min(MAX_SPEED, front_min/40))
 
     return v, w
 
-def send(v,w):
+
+def send(v, w):
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
 # =========================================
-# MAIN
+# MAIN LOOP
 # =========================================
 print("START")
 
@@ -213,11 +230,9 @@ try:
 
         apply_median()
 
-        now = time.time()
-
         front_min = np.min(scan_data[np.arange(-10,11)%360])
 
-        # emergency
+        # EMERGENCY
         if front_min < EMERGENCY_DIST:
             send(-0.1, 0)
             continue
@@ -225,15 +240,16 @@ try:
         result = find_best(v_cmd, w_cmd)
 
         if result is None:
-            send(-0.1, rotate_dir*0.9)
+            send(-0.1, rotate_dir * 0.9)
             continue
 
-        target, front = result
-        v_cmd, w_cmd = compute(target)
+        target_angle = result
+
+        v_cmd, w_cmd = compute(target_angle)
         send(v_cmd, w_cmd)
 
-        print(f"v:{v_cmd:.2f} w:{w_cmd:.2f} front:{front:.1f}")
+        print(f"v:{v_cmd:.2f} w:{w_cmd:.2f} front:{front_min:.1f}")
 
 except KeyboardInterrupt:
-    send(0,0)
-    lidar_ser.write(bytes([0xA5,0x25]))
+    send(0, 0)
+    lidar_ser.write(bytes([0xA5, 0x25]))
