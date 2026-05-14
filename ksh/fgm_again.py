@@ -1,61 +1,92 @@
 import serial
-import math
 import time
-import numpy as np
+import math
 
 # =========================
-# LiDAR
+# SERIAL
 # =========================
 lidar = serial.Serial("/dev/ttyUSB0", 460800, timeout=1)
-
-# =========================
-# Arduino
-# =========================
 motor = serial.Serial("/dev/serial0", 115200, timeout=1)
 
 # =========================
-# PARAM
+# PARAMETER
 # =========================
-FOV = 120              # deg
-MAX_DIST = 2.0         # m
-THRESHOLD = 0.7        # obstacle 판단
-CENTER = 180           # LiDAR 기준 (0~360 가정)
+FOV = 120
+MAX_DIST = 2.0
+THRESHOLD = 0.7
 
+EMERGENCY_DIST = 0.07   # 7cm
 BASE_V = 0.15
 
 # =========================
-# parse dummy (너 코드에 맞게 수정 필요)
-# =========================
+# -------------------------
+# LiDAR DATA PARSER (placeholder)
+# -------------------------
 def get_lidar_points():
-    # 실제 rplidar lib 쓰면 scan으로 교체
-    # (angle, distance)
+    """
+    TODO: RPLIDAR C1 library 붙이면 scan 데이터 넣기
+    return [(angle, dist), ...]
+    angle: -180 ~ 180 기준 변환 필요
+    """
     return []
 
 # =========================
-# filter front 120deg
+# FILTER FRONT 120 DEG
 # =========================
 def filter_front(points):
-    filtered = []
+    front = []
 
     for angle, dist in points:
 
-        if dist == 0 or dist > MAX_DIST:
+        if dist <= 0 or dist > MAX_DIST:
             continue
 
-        # front 120 deg
         if -60 <= angle <= 60:
-            filtered.append((angle, dist))
+            front.append((angle, dist))
 
-    return filtered
+    return front
 
 # =========================
-# gap detection
+# EMERGENCY CHECK (핵심)
 # =========================
-def extract_gaps(data):
+def emergency_check(front):
+
+    for angle, dist in front:
+        if -30 <= angle <= 30 and dist <= EMERGENCY_DIST:
+            return True
+
+    return False
+
+# =========================
+# ESCAPE DIRECTION (좌/우 비교)
+# =========================
+def escape_direction(points):
+
+    left = []
+    right = []
+
+    for angle, dist in points:
+
+        if 60 <= angle <= 120:
+            left.append(dist)
+
+        if -120 <= angle <= -60:
+            right.append(dist)
+
+    left_avg = sum(left)/len(left) if left else 0.01
+    right_avg = sum(right)/len(right) if right else 0.01
+
+    return 1 if left_avg > right_avg else -1
+
+# =========================
+# GAP EXTRACTION
+# =========================
+def extract_gaps(front):
+
     gaps = []
     current = []
 
-    for angle, dist in data:
+    for angle, dist in front:
 
         free = dist > THRESHOLD
 
@@ -72,9 +103,9 @@ def extract_gaps(data):
     return gaps
 
 # =========================
-# choose best gap
+# GAP SELECTION (GRP STYLE)
 # =========================
-def select_gap(gaps):
+def select_best_gap(gaps):
 
     best_score = -999
     best = None
@@ -88,7 +119,6 @@ def select_gap(gaps):
         width  = abs(max(angles) - min(angles))
         dmin   = min(dists)
 
-        # GRP style weighting
         score = width * (dmin + 0.1)
 
         if score > best_score:
@@ -98,37 +128,32 @@ def select_gap(gaps):
     return best
 
 # =========================
-# control law (GRP simplified)
+# CONTROL (GRP simplified)
 # =========================
 def control(gap):
 
     if gap is None:
-        return 0.15, 0
+        return 0.12, 0
 
     center, dmin, width = gap
 
-    # GRP weighting
-    alpha = 1.2
+    # GRP weighting (simplified)
+    alpha = 1.0
     beta  = 0.6
 
-    phi_gap = center
-    phi_ref = 0
+    w = alpha * center + beta * (1.0 / (dmin + 0.01))
 
-    w = alpha * phi_gap + beta * (1.0 / (dmin + 0.01))
-
-    # normalize
-    w = w / 100.0
+    w = w / 120.0   # normalize
 
     v = BASE_V
 
     return v, w
 
 # =========================
-# send to arduino
+# SEND TO ARDUINO
 # =========================
 def send(v, w):
-    msg = f"{v},{w}\n"
-    motor.write(msg.encode())
+    motor.write(f"{v},{w}\n".encode())
 
 # =========================
 # MAIN LOOP
@@ -137,13 +162,36 @@ while True:
 
     points = get_lidar_points()
     front = filter_front(points)
-    gaps = extract_gaps(front)
-    best = select_gap(gaps)
 
-    v, w = control(best)
+    # =========================
+    # 🚨 EMERGENCY STOP
+    # =========================
+    if emergency_check(front):
+
+        print("EMERGENCY!")
+
+        send(0, 0)
+        time.sleep(0.3)
+
+        direction = escape_direction(points)
+
+        # 회전 탈출
+        for _ in range(6):
+            send(0, 0.6 * direction)
+            time.sleep(0.1)
+
+        continue
+
+    # =========================
+    # GAP LOGIC
+    # =========================
+    gaps = extract_gaps(front)
+    best_gap = select_best_gap(gaps)
+
+    v, w = control(best_gap)
 
     send(v, w)
 
-    print("v:", v, "w:", w)
+    print("v:", v, " w:", w)
 
     time.sleep(0.1)
