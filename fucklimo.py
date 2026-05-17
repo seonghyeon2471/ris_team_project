@@ -22,7 +22,7 @@ print("LIDAR START")
 # =========================================
 # ROBOT PHYSICAL PARAMETER
 # =========================================
-ROBOT_RADIUS = 14.0
+ROBOT_RADIUS = 16.0
 WHEEL_BASE   = 17.0
 
 # =========================================
@@ -52,7 +52,7 @@ DANGER_DIST      = 18
 # =========================================
 # GAP & INFLATION PARAMETER
 # =========================================
-SAFE_DIST          = 14
+SAFE_DIST          = 16
 INFLATION_MAX_DIST = 25
 FRONT_CLEAR_DIST   = 23
 FRONT_CLEAR_RANGE  = 15
@@ -61,8 +61,8 @@ FRONT_CLEAR_RANGE  = 15
 # [핵심] 사각형 Emergency 감지 박스
 # 로봇 정면 기준 앞 5cm x 좌우 ±20cm 직사각형
 # =========================================
-EMERGENCY_FRONT = 10.0    # 앞 방향 감지 거리 (cm)
-EMERGENCY_SIDE  = 8.0   # 좌우 방향 감지 거리 (cm)
+EMERGENCY_FRONT = 9.0    # 앞 방향 감지 거리 (cm)
+EMERGENCY_SIDE  = 9.0   # 좌우 방향 감지 거리 (cm)
 
 # =========================================
 # STATE MACHINE
