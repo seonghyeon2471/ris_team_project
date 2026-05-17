@@ -10,14 +10,15 @@ arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.05)
 lidar_ser = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.0)
 
 # =========================================
-# 로봇 스펙 (최신)
+# 로봇 스펙
 # =========================================
-ROBOT_WIDTH = 0.22        # ← 22cm로 변경
+ROBOT_WIDTH = 0.22
 LIDAR_OFFSET_FRONT = 0.025
 
-MAX_SPEED = 0.15
-STEERING_GAIN = 3.6
-INFLATION_MARGIN = 0.06   # 6cm inflation (너비 증가에 맞춰 조정)
+MAX_SPEED = 0.14
+STEERING_GAIN = 1.8        # ← 크게 낮춤
+SMOOTH_FACTOR = 0.88       # ← smoothing 매우 강하게
+DEADZONE = 12.0            # ±12도 이내는 직진
 
 print("LIDAR 시작 중...")
 lidar_ser.write(bytes([0xA5, 0x40]))
@@ -25,67 +26,47 @@ time.sleep(1.5)
 lidar_ser.reset_input_buffer()
 lidar_ser.write(bytes([0xA5, 0x20]))
 lidar_ser.read(7)
-print("✅ ROBOT_WIDTH = 22cm 적용 버전 시작")
+print("✅ 도리도리 방지 + 안정 버전 시작")
 
 
-class SafePathFollower:
+class StableFollower:
     def __init__(self):
         self.prev_steering = 0.0
 
-    def inflate_obstacles(self, angles, ranges):
-        """장애물 주변 안전 공간 확장"""
-        proc = ranges.copy()
-        half_width = ROBOT_WIDTH / 2 + INFLATION_MARGIN
-
-        for i in range(1, len(ranges)-1):
-            if ranges[i] < 2.0:
-                d_near = max(min(ranges[i], ranges[i-1]), 0.08)
-                delta = math.asin(half_width / d_near)
-                mask = int(math.ceil(delta / math.radians(1.0)))
-                for k in range(-mask, mask + 1):
-                    idx = i + k
-                    if 0 <= idx < len(proc):
-                        proc[idx] = 0.0
-        return proc
-
     def process(self, angles_deg, ranges):
-        if len(ranges) < 35:
+        if len(ranges) < 40:
             return 0.0, 0.13
 
         mask = (angles_deg > -90) & (angles_deg < 90)
         angles = angles_deg[mask]
         ranges = ranges[mask]
 
-        safe_ranges = self.inflate_obstacles(angles, ranges)
+        left_clear = np.min(ranges[angles < -20]) if np.any(angles < -20) else 3.0
+        right_clear = np.min(ranges[angles > 20]) if np.any(angles > 20) else 3.0
 
-        free_mask = safe_ranges > 0.10
-        if not np.any(free_mask):
-            return 0.0, -0.18   # 후진
+        diff = right_clear - left_clear
+        target_angle = diff * 22.0          # 민감도 낮춤
 
-        free_angles = angles[free_mask]
-        free_ranges = safe_ranges[free_mask]
-
-        # 가중 중앙 계산
-        weights = free_ranges ** 1.8
-        target_angle = np.average(free_angles, weights=weights)
-
-        # smoothing
+        # 강력 smoothing
         steering = STEERING_GAIN * target_angle
-        steering = 0.75 * steering + 0.25 * self.prev_steering
+        steering = SMOOTH_FACTOR * steering + (1 - SMOOTH_FACTOR) * self.prev_steering
         self.prev_steering = steering
 
-        steering = np.clip(steering, -0.62, 0.62)
+        # Deadzone (작은 오차는 무시 → 도리도리 방지)
+        if abs(steering) < DEADZONE:
+            steering = 0.0
+
+        steering = np.clip(steering, -0.55, 0.55)
 
         # 속도
-        v = np.clip(np.max(free_ranges) * 0.45, 0.18, MAX_SPEED)
-        d_min = np.min(ranges) if len(ranges) > 0 else 1.0
-        if d_min < 0.40:
-            v *= 0.6
+        v = np.clip(np.max(ranges) * 0.45, 0.18, MAX_SPEED)
+        if np.min(ranges) < 0.40:
+            v *= 0.65
 
         return steering, v
 
 
-follower = SafePathFollower()
+follower = StableFollower()
 
 buffer = bytearray()
 
@@ -111,12 +92,12 @@ try:
                 pass
             i += 5
 
-        if len(points) >= 40:
+        if len(points) >= 45:
             angles = np.array([p[0] for p in points])
             ranges = np.array([p[1] for p in points])
 
             steering, v = follower.process(angles, ranges)
-            w = steering * 4.0
+            w = steering * 3.5
 
             cmd = f"{v:.3f},{w:.3f}\n"
             arduino_ser.write(cmd.encode('utf-8'))
