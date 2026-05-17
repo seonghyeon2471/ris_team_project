@@ -31,7 +31,7 @@ WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 # DRIVE PARAMETER
 # =========================================
 MAX_SPEED    = 0.14   # 최대 선속도 (m/s)
-MIN_SPEED    = 0.9    # 최소 속도
+MIN_SPEED    = 0.09    # 최소 속도
 MAX_W        = 1.5    # 최대 각속도 (rad/s)
 TURN_GAIN    = 2.2    # 조향 게인
 
