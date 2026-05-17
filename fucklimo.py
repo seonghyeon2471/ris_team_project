@@ -76,14 +76,14 @@ maneuver_end_time = 0.0
 # =========================================
 # ROTATE: 목표각도 기반
 # =========================================
-rotate_dir         = 1       # +1=좌, -1=우
-rotate_target_deg  = 90.0    # 회전할 목표 각도 (degrees)
-rotate_accumulated = 0.0     # 누적 회전각
-rotate_last_time   = 0.0     # 마지막 루프 시각
+rotate_dir         = 1
+rotate_target_deg  = 90.0
+rotate_accumulated = 0.0
+rotate_last_time   = 0.0
 
 REVERSE_DURATION = 0.1
 REVERSE_SPEED    = -0.10
-ROTATE_W         = 0.8      # rad/s
+ROTATE_W         = 0.8
 
 # =========================================
 # SCAN DATA
@@ -98,12 +98,12 @@ def apply_ema(angle, new_dist_cm):
     scan_data[angle] = (1.0 - EMA_ALPHA) * scan_data[angle] + EMA_ALPHA * new_dist_cm
 
 def apply_median_filter():
-    k      = MEDIAN_K
-    window = 2 * k + 1
+    k        = MEDIAN_K
+    window   = 2 * k + 1
     filtered = np.empty(360, dtype=np.float32)
     for i in range(360):
-        indices  = [(i + d) % 360 for d in range(-k, k + 1)]
-        values   = np.sort(scan_data[indices])
+        indices     = [(i + d) % 360 for d in range(-k, k + 1)]
+        values      = np.sort(scan_data[indices])
         filtered[i] = values[window // 2]
     scan_data[:] = filtered
 
@@ -159,61 +159,60 @@ def find_gaps(proc_dists, angles):
         gaps.append((gap_start, len(proc_dists) - 1))
     return gaps
 
-def score_gap(gap, proc_dists, angles):
+# 일반 주행용: 정면 가까울수록 가산점
+def score_gap_normal(gap, proc_dists, angles):
     start, end   = gap
     center_i     = (start + end) / 2.0
     center_angle = angles[int(center_i)]
     avg_dist     = np.mean(proc_dists[start : end + 1])
     width        = end - start
-    # 넓고, 멀고, 정면에 가까울수록 높은 점수
     return (width * 0.5 + avg_dist * 1.2 - abs(center_angle) * 0.4)
 
-def select_best_gap(gaps, proc_dists, angles):
+# Emergency용: 정면 바이어스 없음, 넓고 먼 갭 우선
+def score_gap_emergency(gap, proc_dists, angles):
+    start, end = gap
+    avg_dist   = np.mean(proc_dists[start : end + 1])
+    width      = end - start
+    return (width * 0.7 + avg_dist * 1.3)
+
+def select_best_gap(gaps, proc_dists, angles, score_fn):
     best_gap, best_score = None, -1e9
     for gap in gaps:
-        s = score_gap(gap, proc_dists, angles)
+        s = score_fn(gap, proc_dists, angles)
         if s > best_score:
             best_score, best_gap = s, gap
     return best_gap
 
 # =========================================
-# [핵심] Emergency용 180도 갭 탐색
-# -90 ~ +90 전체를 분석해 최적 방향/각도 반환
+# Emergency용 180도 갭 탐색
 # =========================================
 def find_best_direction_180():
-    """
-    전방 180도(-90 ~ +90)에서 갭 탐색 후
-    가장 좋은 갭의 중심각도와 회전방향을 반환.
-    반환: (rotate_dir, target_degrees)
-      rotate_dir: +1=좌회전, -1=우회전
-      target_degrees: 실제 회전해야 할 각도 (절댓값, degrees)
-    갭이 없으면: (좌우 평균 비교로 fallback, 90도)
-    """
-    angles    = np.arange(-90, 91)
-    dists     = np.array([scan_data[a % 360] for a in angles], dtype=np.float32)
-    proc      = inflate_obstacles(dists)
-    gaps      = find_gaps(proc, angles)
+    angles = np.arange(-90, 91)
+    dists  = np.array([scan_data[a % 360] for a in angles], dtype=np.float32)
+    proc   = inflate_obstacles(dists)
+    gaps   = find_gaps(proc, angles)
 
     if not gaps:
-        # fallback: 좌우 평균으로 결정
         left_avg  = float(np.mean(scan_data[271:360]))
         right_avg = float(np.mean(scan_data[1:91]))
         if left_avg >= right_avg:
+            print("[180 SCAN] No gap → fallback LEFT 90°")
             return +1, 90.0
         else:
+            print("[180 SCAN] No gap → fallback RIGHT 90°")
             return -1, 90.0
 
-    best_gap  = select_best_gap(gaps, proc, angles)
-    start, end = best_gap
-    center_i  = int((start + end) / 2.0)
-    target_angle = float(angles[center_i])  # 음수=우, 양수=좌
+    best_gap     = select_best_gap(gaps, proc, angles, score_gap_emergency)
+    start, end   = best_gap
+    center_i     = int((start + end) / 2.0)
+    target_angle = float(angles[center_i])
 
-    rotate_dir_out  = 1 if target_angle >= 0 else -1
-    target_degrees  = min(abs(target_angle), 90.0)
+    rotate_dir_out = 1 if target_angle >= 0 else -1
+    target_degrees = min(abs(target_angle), 90.0)
+    target_degrees = max(target_degrees, 20.0)
 
-    # 너무 작은 회전은 의미없으므로 최소 20도 보장
-    target_degrees  = max(target_degrees, 20.0)
-
+    direction_str = "LEFT" if rotate_dir_out > 0 else "RIGHT"
+    print(f"[180 SCAN] Best gap → {direction_str} {target_degrees:.1f}°")
     return rotate_dir_out, target_degrees
 
 # =========================================
@@ -221,18 +220,17 @@ def find_best_direction_180():
 # =========================================
 def find_best_direction(smoothing):
     global prev_angle
-    angles    = np.arange(-FRONT_RANGE, FRONT_RANGE + 1)
-    dists     = np.array([scan_data[a % 360] for a in angles], dtype=np.float32)
-    proc      = inflate_obstacles(dists)
-    gaps      = find_gaps(proc, angles)
+    angles = np.arange(-FRONT_RANGE, FRONT_RANGE + 1)
+    dists  = np.array([scan_data[a % 360] for a in angles], dtype=np.float32)
+    proc   = inflate_obstacles(dists)
+    gaps   = find_gaps(proc, angles)
 
     if not gaps:
         return None
 
-    best_gap  = select_best_gap(gaps, proc, angles)
-    start, end = best_gap
-    gap_angle  = float(angles[int((start + end) / 2.0)])
-
+    best_gap    = select_best_gap(gaps, proc, angles, score_gap_normal)
+    start, end  = best_gap
+    gap_angle   = float(angles[int((start + end) / 2.0)])
     front_clear = float(np.min(scan_data[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]))
 
     if front_clear > FRONT_CLEAR_DIST:
@@ -280,7 +278,7 @@ def stop_robot():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("NAVIGATION START (180-degree Gap Emergency)")
+print("NAVIGATION START (180-degree Gap Emergency, No Center Bias)")
 print(f"Emergency box: front={EMERGENCY_FRONT}cm x side=±{EMERGENCY_SIDE}cm")
 
 try:
@@ -314,31 +312,29 @@ try:
             if now < maneuver_end_time:
                 send_cmd(REVERSE_SPEED, 0.0)
             else:
-                # 후진 완료 → 180도 갭탐색 후 회전 파라미터 설정
                 rotate_dir, rotate_target_deg = find_best_direction_180()
                 rotate_accumulated = 0.0
                 rotate_last_time   = now
                 state = STATE_ROTATE
-                print(f"[ROTATE START] dir={'LEFT' if rotate_dir>0 else 'RIGHT'} target={rotate_target_deg:.1f}°")
             continue
 
         # --------------------------------------------------
-        # STATE_ROTATE: 목표각도까지 회전
+        # STATE_ROTATE: 목표각도까지 회전 (emergency 중첩 없음)
         # --------------------------------------------------
         if state == STATE_ROTATE:
             dt                  = now - rotate_last_time
             rotate_last_time    = now
-            rotate_accumulated += math.degrees(ROTATE_W * abs(rotate_dir) * dt)
+            rotate_accumulated += math.degrees(ROTATE_W * dt)
 
             if rotate_accumulated < rotate_target_deg:
                 send_cmd(0.0, ROTATE_W * rotate_dir)
             else:
-                # 목표각도 도달 → NORMAL 복귀
                 state      = STATE_NORMAL
                 prev_angle = 0.0
                 rotate_accumulated = 0.0
-                # 정면 스캔 초기화 (오래된 데이터 제거)
-                for a in range(-45, 46):
+                # [핵심 수정] 회전 중 쌓인 스캔 데이터 전부 초기화
+                # 기존 -45~45 → -90~90으로 확장
+                for a in range(-90, 91):
                     scan_data[a % 360] = float(SCAN_LIMIT)
                 print("[ROTATE DONE] → NORMAL")
             continue
@@ -349,7 +345,6 @@ try:
         is_emergency, front_min = check_emergency()
 
         if is_emergency:
-            # 180도 갭탐색은 후진 완료 후 수행 (후진으로 공간 확보 먼저)
             state             = STATE_REVERSE
             maneuver_end_time = now + REVERSE_DURATION
             send_cmd(REVERSE_SPEED, 0.0)
@@ -360,7 +355,6 @@ try:
         result    = find_best_direction(smoothing)
 
         if result is None:
-            # 갭 없음 → emergency와 동일한 탈출 루틴
             state             = STATE_REVERSE
             maneuver_end_time = now + REVERSE_DURATION
             send_cmd(REVERSE_SPEED, 0.0)
