@@ -1,144 +1,131 @@
-import serial
 import time
 import math
 import numpy as np
-from rplidar import RPLidar  # 또는 rplidarc1
+from rplidar import RPLidar  # pip install rplidar-roboticia
 
 # =========================================
-# SERIAL & HARDWARE
+# SERIAL
 # =========================================
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
 
+# =========================================
 # RPLIDAR C1
-lidar = RPLidar('/dev/ttyUSB0', baudrate=460800, timeout=1)  # C1은 460800이 표준
+# =========================================
+lidar = RPLidar('/dev/ttyUSB0', baudrate=460800, timeout=1)
 
-# 로봇 치수 (cm)
-ROBOT_LENGTH = 21
-ROBOT_WIDTH = 16
-LIDAR_OFFSET = 2.5          # 앞쪽에서 LIDAR까지 거리
-WHEEL_AXIS_FROM_REAR = 3.5
-WHEEL_PROTRUDE = 2          # 양쪽 바퀴 돌출
+# =========================================
+# ROBOT PARAMETERS (단위: meter)
+# =========================================
+ROBOT_WIDTH = 0.16
+ROBOT_LENGTH = 0.21
+LIDAR_X_OFFSET = -0.025      # 라이다가 앞에서 2.5cm 뒤 → 앞쪽이 negative
+WHEEL_BASE = 0.17            # Arduino와 동일
 
-# 안전 거리 (cm)
-SAFE_DISTANCE = 25          # 정면/측면 최소 거리
-MIN_PATH_WIDTH = 40         # 통로 최소 폭 (로봇 폭 + 여유)
+SAFE_DIST = 0.30             # 30cm
+MIN_PATH_WIDTH = 0.45        # 통로 최소 폭
 
-# PID 게인 (중앙 추종용)
-KP = 0.8
-KI = 0.01
-KD = 0.3
+# PID for angular control
+KP = 1.2
+KI = 0.05
+KD = 0.4
 
-integral = 0
-last_error = 0
+integral = 0.0
+last_error = 0.0
+last_time = time.time()
 
-def send_motor_command(left_speed: int, right_speed: int):
-    """Arduino로 PWM 명령 전송 (예: L150 R-120 형식)"""
-    cmd = f"L{left_speed} R{right_speed}\n"
+print("🚀 RPLIDAR + Differential Drive Navigation Start")
+
+lidar.start_motor()
+time.sleep(2)
+lidar.clear_input_buffer()
+
+def send_vw(v: float, w: float):
+    """Arduino로 v, w 전송 (m/s, rad/s)"""
+    cmd = f"{v:.3f},{w:.3f}\n"
     arduino_ser.write(cmd.encode())
     arduino_ser.flush()
 
-def get_lidar_scan():
-    """한 번의 scan 데이터 가져오기 (cm 단위)"""
+def get_lidar_points():
+    """한 스캔 데이터 가져오기 (미터 단위)"""
     try:
-        scan = next(lidar.iter_scans(max_buf_meas=2000))
+        scan = next(lidar.iter_scans(max_buf_meas=1500))
         points = []
-        for quality, angle, distance in scan:
-            if distance > 0 and distance < 1200:  # 12m 이내
+        for _, angle, dist in scan:
+            if 150 < dist < 12000:          # 0.15m ~ 12m
                 rad = math.radians(angle)
-                x = distance * math.cos(rad)   # cm
-                y = distance * math.sin(rad)
-                points.append((angle, distance, x, y))
+                x = (dist / 1000.0) * math.cos(rad)   # meter
+                y = (dist / 1000.0) * math.sin(rad)
+                points.append((angle, dist/1000.0, x, y))
         return points
     except:
         return []
 
-def find_path_center(points):
-    """
-    LiDAR로 '통로 중앙' 찾기
-    - 앞쪽 60° ~ 120° (로봇 기준 전방)에서 빈 공간(거리 큰 영역) 탐색
-    - 좌/우 벽까지 거리 차이 → error
-    """
-    front_left_dist = 999
-    front_right_dist = 999
-    left_wall_dist = 999
-    right_wall_dist = 999
+def find_center_error(points):
+    """전방 좌/우 gap을 이용한 중앙 편차 계산"""
+    left_dist = 999.0
+    right_dist = 999.0
 
     for angle, dist, x, y in points:
-        if dist < 10: continue  # 노이즈
+        if dist < 0.15: 
+            continue
 
-        # 전방 영역 (로봇 기준)
-        if 30 < angle < 150:   # 0°=정면 오른쪽, 90°=정면, 180°=뒤
-            if 30 < angle < 90:   # 오른쪽 전방
-                front_right_dist = min(front_right_dist, dist)
-            else:                 # 왼쪽 전방
-                front_left_dist = min(front_left_dist, dist)
+        # 전방 60° ~ 120° 영역 (90° = 정면)
+        if 45 < angle < 135:
+            if angle < 90:          # 오른쪽 전방
+                right_dist = min(right_dist, dist)
+            else:                   # 왼쪽 전방
+                left_dist = min(left_dist, dist)
 
-        # 측면 벽 (로봇 폭 고려)
-        if 0 < angle < 30:    # 오른쪽
-            right_wall_dist = min(right_wall_dist, dist)
-        elif 150 < angle < 180:  # 왼쪽
-            left_wall_dist = min(left_wall_dist, dist)
+    # 너무 가까우면 위험
+    if left_dist < SAFE_DIST or right_dist < SAFE_DIST:
+        return None
 
-    # 중앙 편차 계산 (cm)
-    left_open = front_left_dist
-    right_open = front_right_dist
-    error = (left_open - right_open) / 2.0   # 양수면 왼쪽이 더 넓음 → 오른쪽으로 correction 필요
-
-    # 너무 좁으면 후진/정지
-    path_width = left_open + right_open
-    if path_width < MIN_PATH_WIDTH or min(left_open, right_open) < SAFE_DISTANCE:
-        return None, error  # 위험
-
-    return error, error   # (center_error, wall_error)
-
-def pid_control(error):
-    global integral, last_error
-    integral += error
-    derivative = error - last_error
-    last_error = error
-
-    steer = KP * error + KI * integral + KD * derivative
-    steer = max(min(steer, 80), -80)  # 최대 steer 제한
-    return steer
-
-print("LIDAR + Navigation Start!")
-
-lidar.start_motor()   # 모터 ON (C1은 start_motor 필요)
+    # 중앙 편차 (양수 = 왼쪽이 더 넓음 → 오른쪽으로 돌려야 함)
+    error = left_dist - right_dist
+    return error
 
 try:
     while True:
-        points = get_lidar_scan()
-        if len(points) < 50:
-            send_motor_command(0, 0)
+        points = get_lidar_points()
+        if len(points) < 60:
+            send_vw(0.0, 0.0)
             time.sleep(0.1)
             continue
 
-        error, _ = find_path_center(points)
+        error = find_center_error(points)
 
-        if error is None:  # 장애물/막다른 길
-            send_motor_command(-80, -80)  # 후진
+        current_time = time.time()
+        dt = current_time - last_time
+        last_time = current_time
+
+        if error is None:                     # 장애물 감지
+            send_vw(-0.15, 0.0)               # 후진
+            time.sleep(0.6)
+            send_vw(0.0, 1.2)                 # 강하게 좌/우 회전 (필요시 번갈아)
             time.sleep(0.8)
-            send_motor_command(100, -100)  # 제자리 회전 (방향 전환)
-            time.sleep(1.0)
             continue
 
-        steer = pid_control(error)
+        # PID
+        integral += error * dt
+        derivative = (error - last_error) / dt if dt > 0 else 0
+        last_error = error
 
-        base_speed = 120
-        left_speed = int(base_speed + steer)
-        right_speed = int(base_speed - steer)
+        w = KP * error + KI * integral + KD * derivative
+        w = max(min(w, 2.5), -2.5)            # angular velocity limit (rad/s)
 
-        # 속도 제한
-        left_speed = max(min(left_speed, 255), -150)
-        right_speed = max(min(right_speed, 255), -150)
+        v = 0.25                              # 기본 전진 속도 (m/s) → 상황에 따라 0.15~0.35 조정
 
-        send_motor_command(left_speed, right_speed)
+        # 좁은 통로에서는 속도 줄임
+        if min(left_dist if 'left_dist' in locals() else 999, 
+               right_dist if 'right_dist' in locals() else 999) < 0.5:
+            v = 0.15
 
-        time.sleep(0.05)  # 20Hz 제어
+        send_vw(v, w)
+        time.sleep(0.05)   # 20Hz 제어 루프
 
 except KeyboardInterrupt:
-    print("Stop")
-    send_motor_command(0, 0)
+    print("\n🛑 Stopping...")
+    send_vw(0.0, 0.0)
     lidar.stop_motor()
     lidar.disconnect()
     arduino_ser.close()
