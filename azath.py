@@ -24,14 +24,15 @@ print("LIDAR START")
 # =========================================
 # ROBOT PHYSICAL PARAMETER
 # =========================================
-ROBOT_RADIUS = 17.0   # 물리 반지름 + 측면 안전 마진 (cm)
+# [튜닝] 안전 마진을 줄여 로봇이 좁은 틈새를 벽으로 인식하지 않도록 합니다.
+ROBOT_RADIUS = 12.0   # 기존 17.0 -> 12.0 (실제 물리 반지름에 가깝게 하향)
 WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 
 # =========================================
 # DRIVE PARAMETER
 # =========================================
-MAX_SPEED    = 0.14   # 최대 선속도 (m/s)
-MIN_SPEED    = 0.05   # [수정] 최소 속도를 0.05로 하향 조정
+MAX_SPEED    = 0.16   # 최대 선속도 (m/s)
+MIN_SPEED    = 0.06   # 최소 속도 (m/s)
 MAX_W        = 1.5    # 최대 각속도 (rad/s)
 TURN_GAIN    = 2.2    # 조향 게인
 
@@ -47,10 +48,11 @@ SMOOTHING_NORMAL = 0.55
 SMOOTHING_DANGER = 0.10
 DANGER_DIST      = 14
 
-SAFE_DIST          = 17
-INFLATION_MAX_DIST = 25
-FRONT_CLEAR_DIST   = 23
-FRONT_CLEAR_RANGE  = 15
+# [튜닝] 틈새 판단 플래그 및 범위 최적화
+SAFE_DIST          = 12.0   # 기존 17.0 -> ROBOT_RADIUS와 동기화 (이 정도 틈만 있어도 진입 시도)
+INFLATION_MAX_DIST = 60.0   # 기존 25.0 -> 60.0 (멀리서부터 장애물을 부풀려 착시현상 방지)
+FRONT_CLEAR_DIST   = 20.0   # 기존 23.0 -> 20.0 (좁은 문 통과 시 조기 감속 완화)
+FRONT_CLEAR_RANGE  = 12     # 기존 15 -> 12 (정면 시야각을 좁혀 측면 벽 간섭 줄임)
 
 # =========================================
 # GLOBAL DIRECTION PARAMETERS (단위: rad)
@@ -157,7 +159,7 @@ def score_gap(gap, proc_dists, angles, is_critical=False):
 
     base_score = (width * 0.5 + avg_dist * 1.2 - abs(center_angle) * 0.4)
     
-    # 박기 직전(is_critical)일 때는 목적지 가중치를 끄고 회피에 집중
+    # 크리티컬 상황(벽에 너무 붙음)일 때는 방향 가중치를 강제 배제
     if is_critical:
         return base_score
 
@@ -232,13 +234,12 @@ def compute_cmd(target_angle):
     search_indices = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     relevant_min = float(np.min(scan_data[search_indices]))
 
-    # [수정] 조향각이 클 때 v가 0으로 변해 멈추는 버그 원천 차단 로직
+    # 조향각이 클 때 완전히 멈추지 않고 연속 주행을 유도하는 로직
     if abs(target_angle) > ALIGN_THRESHOLD:
-        # 근처에 장애물이 있더라도 완전히 멈추지 않고 최소 0.05m/s ~ 극도로 좁을 때 0.03m/s로 야금야금 탈출
         v = MIN_SPEED if relevant_min > 15.0 else 0.03
         return v, w
 
-    # 정면 주행 시 거리 비례 속도 감속 로직
+    # 정면 주행 속도 감속 제어
     obstacle_scale = min(relevant_min / 25.0, 1.0)
     speed = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
 
@@ -258,7 +259,7 @@ def choose_avoid_direction():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("NAVIGATION START (Global Direction Aware & No-Lock Continuous Drive Mode)")
+print("NAVIGATION START (Gap Optimized & No-Lock Continuous Drive Mode)")
 try:
     last_odom_time = time.time()
     v_active, w_active = 0.0, 0.0
@@ -301,7 +302,7 @@ try:
                 state, prev_angle = STATE_NORMAL, 0.0
                 is_recovering = True  
                 
-                # 회전 직후 라이다 값이 다 채워질 때까지 보수적으로 움직이도록 세팅
+                # 회전 후 데이터 정상 수신 전까지 안전 경계값 유지
                 for a in range(-45, 46): 
                     scan_data[a % 360] = float(SAFE_DIST)
             continue
