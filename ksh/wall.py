@@ -1,93 +1,136 @@
 import serial
 import time
 import math
-from rplidar import RPLidar   # pip install rplidar (또는 당신이 쓰는 LiDAR 라이브러리)
 
-# ================== 설정 ==================
-SERIAL_PORT = '/dev/ttyACM0'   # Arduino와 연결된 포트 (확인: ls /dev/tty*)
-BAUDRATE = 115200
-DESIRED_WALL_DISTANCE = 0.25   # 벽까지 유지할 거리 (m)
-FRONT_THRESHOLD = 0.35         # 앞벽 감지 threshold (m)
-TURN_SPEED = 0.4               # 원 그리며 돌 때 angular speed (rad/s)
-LINEAR_SPEED = 0.25            # 기본 직진 속도 (m/s)
+# =========================================
+# SERIAL 설정 (당신 이전 코드 그대로)
+# =========================================
+arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)   # Arduino (UART)
+lidar_ser = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)    # LiDAR
 
-# Arduino에 보낼 명령 형식 예시: "L{left_pwm},R{right_pwm}\n"
-ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=0.1)
+# =========================================
+# LIDAR START (당신 이전 코드 그대로)
+# =========================================
+lidar_ser.write(bytes([0xA5, 0x40]))
 time.sleep(2)
+lidar_ser.reset_input_buffer()
+lidar_ser.write(bytes([0xA5, 0x20]))
+lidar_ser.read(7)          # 헤더 스킵
+print("LIDAR START")
 
-# LiDAR 초기화 (USB 포트 확인)
-lidar = RPLidar('/dev/ttyUSB0')   # ← 당신 LiDAR 포트로 변경
+# =========================================
+# 파라미터
+# =========================================
+DESIRED_WALL_DISTANCE = 0.25   # 벽 유지 거리 (미터)
+FRONT_THRESHOLD       = 0.35   # 앞벽 감지 거리 (미터)
+TURN_SPEED            = 0.45   # 원 그리며 돌 때 각속도 (rad/s)
+LINEAR_SPEED          = 0.25   # 기본 직진 속도 (m/s)
 
-follow_side = "right"   # 처음엔 오른쪽 벽 따라가기 (left로 바꿔도 OK)
-
-def send_motor_command(left_speed, right_speed):
-    # PWM 값으로 변환 (0~255, 음수면 후진)
-    cmd = f"L{int(left_speed*255)},R{int(right_speed*255)}\n"
-    ser.write(cmd.encode())
-    print(f"→ Motor: L{left_speed:.2f} R{right_speed:.2f}")
-
+# =========================================
+# LiDAR 스캔 읽기 (rplidar 라이브러리 없이 직접 파싱)
+# =========================================
 def get_lidar_scan():
-    # 한 번 스캔 (실제로는 continuous scan 권장)
-    for scan in lidar.iter_scans(max_buf_meas=2000):
-        return scan   # [(quality, angle, distance), ...]
+    scan_data = []                     # [(angle_deg, distance_m), ...]
+    buffer = b''
+    
+    start_time = time.time()
+    while len(scan_data) < 360 and time.time() - start_time < 0.25:   # 최대 0.25초 동안 수집
+        if lidar_ser.in_waiting > 0:
+            chunk = lidar_ser.read(lidar_ser.in_waiting)
+            buffer += chunk
+            
+            # 5바이트씩 파싱 (RPLIDAR 표준 측정 프레임)
+            while len(buffer) >= 5:
+                # 체크 비트 확인 (새 스캔 시작 표시)
+                if (buffer[0] & 0x01) == 0:
+                    buffer = buffer[1:]
+                    continue
+                
+                quality = buffer[0] >> 2
+                angle_raw = ((buffer[1] >> 1) | (buffer[2] << 7))
+                dist_raw  = (buffer[3] | (buffer[4] << 8))
+                
+                angle_deg = angle_raw / 64.0          # 0.64도 단위
+                dist_m    = dist_raw / 4000.0         # 4mm 단위 → 미터
+                
+                if quality > 0 and 0 < dist_m < 5.0:  # 유효한 데이터만
+                    scan_data.append((angle_deg, dist_m))
+                
+                buffer = buffer[5:]
+    
+    return scan_data
 
-def find_distances(scan):
-    # angle 0° = 앞, 90° = 오른쪽, 270° = 왼쪽 (rplidar 기준)
+# =========================================
+# 모터 명령 (Arduino v,w 방식)
+# =========================================
+def send_motor_command(v, w):
+    """v: 선속도(m/s), w: 각속도(rad/s)"""
+    cmd = f"{v:.3f},{w:.3f}\n"
+    arduino_ser.write(cmd.encode())
+    # print(f"→ v={v:.2f}  w={w:.2f}")
+
+# =========================================
+# 거리 계산 (front / right / left)
+# =========================================
+def find_distances(scan_data):
     front = right = left = 999.0
-    for _, angle, dist in scan:
-        dist_m = dist / 1000.0
-        if 355 <= angle or angle <= 5:      # front
-            front = min(front, dist_m)
-        elif 80 <= angle <= 100:            # right
-            right = min(right, dist_m)
-        elif 260 <= angle <= 280:           # left
-            left = min(left, dist_m)
+    for angle, dist in scan_data:
+        if dist <= 0: continue
+        if angle <= 15 or angle >= 345:           # 앞
+            front = min(front, dist)
+        elif 75 <= angle <= 105:                  # 오른쪽
+            right = min(right, dist)
+        elif 255 <= angle <= 285:                 # 왼쪽
+            left = min(left, dist)
     return front, right, left
 
-# ================== 메인 루프 ==================
+# =========================================
+# 메인 루프
+# =========================================
+print("=== 벽 따라 원 그리기 + 앞벽 반전 시작 ===")
+follow_side = "right"   # 처음 오른쪽 벽 따라가기
+
 try:
-    print("장애물 회피 시작! (벽 따라 원 그리기 + front-wall reverse)")
     while True:
         scan = get_lidar_scan()
+        if len(scan) < 50:                     # 데이터 부족하면 대기
+            time.sleep(0.05)
+            continue
+            
         front, right, left = find_distances(scan)
         
         # 1. 앞벽 감지 → 방향 반전
         if front < FRONT_THRESHOLD:
-            print("!!! 앞벽 감지 → 방향 반전 !!!")
+            print(f"!!! 앞벽 감지 ({front:.2f}m) → 방향 반전 !!!")
             follow_side = "left" if follow_side == "right" else "right"
-            # 순간적으로 강하게 반대 방향으로 턴 (약 1초)
+            
+            # 강하게 반대 방향으로 턴
             if follow_side == "right":
-                send_motor_command(0.6, -0.6)   # 오른쪽으로 빠르게 턴
+                send_motor_command(0.0, 1.2)     # 왼쪽으로 빠르게 턴
             else:
-                send_motor_command(-0.6, 0.6)
-            time.sleep(0.8)
+                send_motor_command(0.0, -1.2)    # 오른쪽으로 빠르게 턴
+            time.sleep(0.9)
             continue
         
-        # 2. 선택된 쪽 벽 따라가며 원 그리기 (P-control)
+        # 2. 선택된 쪽 벽 따라가며 원 그리기 (P 제어)
         if follow_side == "right":
             wall_dist = right
-            # 오른쪽 벽이 멀면 오른쪽으로 턴 (시계방향 원)
             error = DESIRED_WALL_DISTANCE - wall_dist
-            angular = TURN_SPEED + 1.2 * error   # P gain
+            angular = -TURN_SPEED + 1.8 * error     # 오른쪽으로 돌기
         else:
             wall_dist = left
             error = DESIRED_WALL_DISTANCE - wall_dist
-            angular = -TURN_SPEED - 1.2 * error  # 반대 방향
-            
-        # linear speed는 앞이 좀 막히면 살짝 줄임
-        linear = LINEAR_SPEED * (1 if front > 0.6 else 0.6)
+            angular = TURN_SPEED - 1.8 * error      # 왼쪽으로 돌기
         
-        # diff-drive 변환
-        left_vel = linear - angular
-        right_vel = linear + angular
+        # 앞이 좀 막히면 속도 줄임
+        linear = LINEAR_SPEED * (0.7 if front < 0.8 else 1.0)
         
-        send_motor_command(left_vel, right_vel)
+        send_motor_command(linear, angular)
         time.sleep(0.05)   # 20Hz 제어
 
 except KeyboardInterrupt:
     send_motor_command(0, 0)
-    print("정지")
+    print("\n=== 정지 ===")
 finally:
-    lidar.stop()
-    lidar.disconnect()
-    ser.close()
+    lidar_ser.close()
+    arduino_ser.close()
