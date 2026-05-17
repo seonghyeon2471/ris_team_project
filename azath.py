@@ -24,14 +24,14 @@ print("LIDAR START")
 # =========================================
 # ROBOT PHYSICAL PARAMETER
 # =========================================
-ROBOT_RADIUS = 17.0   # 상향 조정: 물리 반지름 + 측면 안전 마진 (cm)
+ROBOT_RADIUS = 17.0   # 물리 반지름 + 측면 안전 마진 (cm)
 WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 
 # =========================================
-# DRIVE PARAMETER (버전 2: 전역 최소 속도 하한선 수정)
+# DRIVE PARAMETER (하한선 대폭 상향 조정)
 # =========================================
 MAX_SPEED    = 0.14   # 최대 선속도 (m/s)
-MIN_SPEED    = 0.09   # [수정] 최소 선속도 하한선 상향 (0.05 -> 0.09) 주행 답답함 해소
+MIN_SPEED    = 0.11   # [수정] 최소 속도를 0.11m/s로 대폭 상향 (감속을 거의 하지 않음)
 MAX_W        = 1.5    # 최대 각속도 (rad/s)
 TURN_GAIN    = 1.8    # 조향 게인
 
@@ -184,7 +184,7 @@ def find_best_direction(smoothing):
     return target, bias_label, front_clear
 
 # =========================================
-# CONTROL (수정된 전역 MIN_SPEED가 적용되는 함수)
+# CONTROL (상향된 하한선 반영 및 추가 감속 제거)
 # =========================================
 ALIGN_THRESHOLD = 10
 
@@ -199,19 +199,19 @@ def compute_cmd(target_angle):
 
     # 3. 정렬 상태 판단
     if abs(target_angle) > ALIGN_THRESHOLD:
-        v = 0.02 if relevant_min > 20.0 else 0.0
+        # 큰 조향 시에도 전진 동력을 조금 더 유지 (0.02 -> 0.05)하여 시원하게 꺾음
+        v = 0.05 if relevant_min > 20.0 else 0.0
         return v, w
 
-    # 4. 직진 속도 계산 (상향된 MIN_SPEED 반영)
-    # 나눗셈 계수를 40.0에서 30.0으로 낮추어 감속 진입 시점을 늦춤
-    obstacle_scale = min(relevant_min / 30.0, 1.0)
+    # 4. 직진 속도 계산 (고속 지향형 튜닝)
+    # 감속 진입 시점을 완전히 늦춤 (25cm 이내일 때만 수식 작동)
+    obstacle_scale = min(relevant_min / 25.0, 1.0)
     
-    # 상향 조정된 MIN_SPEED(0.09) 미만으로 절대로 내려가지 않음
+    # [수정] 아무리 좁은 곳이라도 상향된 MIN_SPEED(0.11m/s) 이하로는 속도가 떨어지지 않음
     speed = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
 
-    # 좁은 공간 감속 보정치도 마일드하게 변경 (0.8 -> 0.88)
-    if relevant_min < 22.0:
-        speed *= 0.88
+    # [수정] 기존에 존재하던 좁은 공간 진입 시 추가 감속(speed *= 0.8) 로직을 과감히 제거하여
+    # 좁은 틈새나 코너에서도 머뭇거림 없이 고속(최소 0.11 m/s)을 뚝심 있게 유지하도록 세팅함
 
     return speed, w
 
@@ -229,7 +229,7 @@ def choose_avoid_direction():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("NAVIGATION START (Version 2: Global Parameter Tune)")
+print("NAVIGATION START (High-Speed & High-Minimum Drive Mode)")
 try:
     while True:
         raw = lidar_ser.read(5)
