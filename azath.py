@@ -58,7 +58,7 @@ SAFE_DIST          = 14
 INFLATION_MAX_DIST = 25
 
 FRONT_CLEAR_DIST   = 23   # ★ 수정: 12 → 23 (CRITICAL_DIST=12와 달라야 3단계 정상 작동)
-FRONT_CLEAR_RANGE  = 12
+FRONT_CLEAR_RANGE  = 10
 
 # =========================================
 # ★ GOAL PARAMETER
@@ -83,7 +83,7 @@ maneuver_end_time = 0.0
 rotate_dir        = 1
 
 EMERGENCY_DIST    = 6
-REVERSE_DURATION  = 0.18
+REVERSE_DURATION  = 0.20
 ROTATE_DURATION   = 1.00
 REVERSE_SPEED     = -0.10
 ROTATE_W          = 0.9
