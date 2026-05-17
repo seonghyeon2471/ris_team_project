@@ -3,25 +3,25 @@ import math
 import serial
 from collections import deque
 
-# ====================== 설정 (벽 돌진 방지 강화) ======================
+# ====================== 설정 (정면 충돌 방지 강화) ======================
 LIDAR_PORT = '/dev/ttyUSB0'
 ARDUINO_PORT = '/dev/serial0'
 
 V_MAX = 0.14
 V_MIN = 0.06
-W_MAX = 1.9                     # ← 회전 강도 대폭 낮춤 (급회전 방지)
+W_MAX = 2.2
 
-ALPHA = 40.0
-BETA = 1.8                      # ← 직진 강하게 선호 (벽으로 돌진 방지)
-GAP_THRESHOLD = 420             # ← 작은 gap 무시
-SAFETY_DIST = 350
-SAFETY_WALL_DIST = 280          # 벽 감지 거리
-MAX_OBSTACLE_DIST = 2000
+ALPHA = 50.0                    # gap 가중치 ↑
+BETA = 1.2
+GAP_THRESHOLD = 400
+SAFETY_DIST = 450               # ← 정면 안전거리 크게 증가 (45cm부터 반응)
+SAFETY_WALL_DIST = 280
+MAX_OBSTACLE_DIST = 2200
 
 TIME_LIMIT = 58.0
 INITIAL_STRAIGHT_TIME = 2.0
 
-MEMORY_SCANS = 8                # 기억 개수 줄임 (너무 오래 기억하면 오판 가능성 ↑)
+MEMORY_SCANS = 8
 # ================================================
 
 ser_lidar = None
@@ -60,34 +60,46 @@ def merge_memory():
                 merged[ang] = info
     return merged
 
-def wall_avoidance(scan_data, elapsed_time):
-    if elapsed_time < INITIAL_STRAIGHT_TIME:
-        return 0.0
-
+def emergency_front_avoid(scan_data):
+    """정면이 막혔을 때 가장 강력한 회피"""
     if not scan_data:
-        return 0.0
+        return None
 
-    left_wall = min((info["d_mm"] for ang, info in scan_data.items() if -125 < ang < -45), default=9999)
-    right_wall = min((info["d_mm"] for ang, info in scan_data.items() if 45 < ang < 125), default=9999)
+    front = [info["d_mm"] for ang, info in scan_data.items() if -40 < ang < 40]
+    front_min = min(front) if front else 9999
 
-    if left_wall < SAFETY_WALL_DIST:
-        print(f"⚠️ 좌측 벽 가까움 ({left_wall:.0f}mm) → 강 우회전")
-        return -2.0
-    elif right_wall < SAFETY_WALL_DIST:
-        print(f"⚠️ 우측 벽 가까움 ({right_wall:.0f}mm) → 강 좌회전")
-        return 2.0
+    if front_min < SAFETY_DIST:
+        left = min((info["d_mm"] for ang, info in scan_data.items() if 30 < ang < 120), default=9999)
+        right = min((info["d_mm"] for ang, info in scan_data.items() if -120 < ang < -30), default=9999)
 
+        if left > right:
+            print(f"🚨 정면 막힘! ({front_min:.0f}mm) → 강 좌회전")
+            return 2.2
+        else:
+            print(f"🚨 정면 막힘! ({front_min:.0f}mm) → 강 우회전")
+            return -2.2
     return None
 
 def find_best_gap_and_steering(scan_data, elapsed_time):
-    wall_steer = wall_avoidance(scan_data, elapsed_time)
-    if wall_steer is not None:
-        return wall_steer, 0
+    # 1. 정면 긴급 회피 (최우선)
+    emergency = emergency_front_avoid(scan_data)
+    if emergency is not None:
+        return emergency, 0
 
+    # 2. 벽 회피
+    if elapsed_time > INITIAL_STRAIGHT_TIME:
+        left_wall = min((info["d_mm"] for ang, info in scan_data.items() if -125 < ang < -45), default=9999)
+        right_wall = min((info["d_mm"] for ang, info in scan_data.items() if 45 < ang < 125), default=9999)
+        if left_wall < SAFETY_WALL_DIST:
+            return -2.0, 0
+        if right_wall < SAFETY_WALL_DIST:
+            return 2.0, 0
+
+    # 3. 정상 GRP + memory
     merged = merge_memory()
     current_merged = {**merged, **scan_data}
 
-    if not current_merged or len(current_merged) < 40:
+    if not current_merged or len(current_merged) < 30:
         return 0.0, 9999
 
     points = [(ang, info["d_mm"]) for ang, info in current_merged.items()]
@@ -102,12 +114,12 @@ def find_best_gap_and_steering(scan_data, elapsed_time):
         start_idx = i
         while i < n and points[i][1] >= GAP_THRESHOLD:
             i += 1
-        if i > start_idx + 3:                     # ← 최소 gap 폭도 요구 (너무 좁은 gap 무시)
+        if i > start_idx + 3:   # 너무 좁은 gap은 무시
             gap_start = points[start_idx][0]
             gap_end = points[i-1][0]
             gap_width = gap_end - gap_start
             gap_center = gap_start + gap_width / 2.0
-            ref_bias = abs(gap_center) * 0.55     # ← 직진 선호 더 강화
+            ref_bias = abs(gap_center) * 0.55
             score = gap_width - ref_bias
             if score > max_score:
                 max_score = score
@@ -116,7 +128,7 @@ def find_best_gap_and_steering(scan_data, elapsed_time):
 
     front_min = min((d for ang, d in points if -40 < ang < 40), default=9999)
     if front_min < SAFETY_DIST:
-        best_gap_center *= 1.7
+        best_gap_center *= 2.0   # 정면 막히면 steering 강하게
 
     d_min = front_min if front_min < 2000 else 2000
     phi_gap = best_gap_center
@@ -133,7 +145,7 @@ def main():
     print(f"🔌 Arduino 연결: {ARDUINO_PORT}")
 
     ser_lidar = serial.Serial(LIDAR_PORT, 460800, timeout=0.1)
-    print("🚀 RPLIDAR + 기억하면서 주행 (벽 돌진 방지 버전)")
+    print("🚀 RPLIDAR + 기억하면서 주행 (정면 충돌 방지 강화)")
 
     ser_lidar.write(b'\xA5\x20')
     time.sleep(1.5)
@@ -155,15 +167,15 @@ def main():
 
             gap_angle, d_min = find_best_gap_and_steering(current_scan, elapsed)
 
-            w = math.radians(gap_angle) * 2.0          # 회전 강도 더 낮춤
+            w = math.radians(gap_angle) * 2.4
             w = max(min(w, W_MAX), -W_MAX)
-            v = V_MIN if abs(gap_angle) > 45 else V_MAX
+            v = V_MIN if abs(gap_angle) > 40 else V_MAX
 
             send_command(v, w)
 
             print(f"Gap: {gap_angle:6.1f}° | d_min: {d_min:4.0f}mm | v:{v:.2f} w:{w:.2f}", end="\r")
 
-            time.sleep(0.18)
+            time.sleep(0.16)
 
     except KeyboardInterrupt:
         print("\n🛑 중단됨")
