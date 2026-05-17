@@ -1,8 +1,8 @@
 # =========================================
-# ★ 좁은 길 통과 강화 버전
-# - Narrow Passage Detection 추가
-# - SAFE_DIST / Inflation 동적 조정
-# - Wall Bias 완화
+# ★ 벽 센터링 수정 + 안정화 버전
+# - wall_bias 방향 완전 수정
+# - Rate Limiter + Smoothing 강화
+# - 좁은 길 통과 가능
 # =========================================
 import serial
 import math
@@ -42,84 +42,57 @@ print("LIDAR START")
 # ROBOT PARAM
 # =========================================
 ROBOT_RADIUS = 12.5
-WHEEL_BASE = 17.0
-LIDAR_TO_REAR_AXLE = 13.5
-
-# =========================================
-# DRIVE
-# =========================================
-MAX_SPEED = 0.20
+MAX_SPEED = 0.19
 MIN_SPEED = 0.07
-MAX_W = 0.85
-TURN_GAIN = 1.05
+MAX_W = 0.78
+TURN_GAIN = 0.68           # ★ 안정화 위해 낮춤
 SCAN_LIMIT = 150
 FRONT_RANGE = 90
 
-# =========================================
 # FILTER
-# =========================================
-EMA_ALPHA = 0.30
+EMA_ALPHA = 0.28
 MEDIAN_K = 2
 
-# =========================================
 # SMOOTHING
-# =========================================
-SMOOTHING_NORMAL = 0.55
-SMOOTHING_DANGER = 0.22
+SMOOTHING_NORMAL = 0.68
+SMOOTHING_DANGER = 0.38
 DANGER_DIST = 8
 
-# =========================================
 # GAP & INFLATION
-# =========================================
 SAFE_DIST_NORMAL = 10
-SAFE_DIST_NARROW = 6.5          # ★ 좁은 길 허용
-
+SAFE_DIST_NARROW = 6.5
 INFLATION_MAX_DIST_NORMAL = 25
-INFLATION_MAX_DIST_NARROW = 17   # ★ 좁은 길 허용
+INFLATION_MAX_DIST_NARROW = 17.5
 
 FRONT_CLEAR_DIST = 23
 FRONT_CLEAR_RANGE = 18
 
-# =========================================
 # STATE
-# =========================================
 STATE_NORMAL = 0
 STATE_ROTATE = 1
 STATE_RAMP = 2
-
 state = STATE_NORMAL
 maneuver_end_time = 0.0
 rotate_dir = 1
-EMERGENCY_DIST = 6
+EMERGENCY_DIST = 6.0
 ROTATE_DURATION = 0.55
 ROTATE_W = 0.55
 
-# =========================================
 # RAMP
-# =========================================
 RAMP_PITCH_THRESH = 8.0
 RAMP_EXIT_PITCH = 3.0
-LIDAR_DROP_THRESH = 30.0
 RAMP_LIDAR_TIMEOUT = 3.0
 RAMP_SPEED = 0.14
 RAMP_INFLATION_MAX = 10
 RAMP_SAFE_DIST = 8
 
-# =========================================
 # DATA
-# =========================================
 scan_data = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
 prev_angle = 0.0
 prev_front_avg = float(SCAN_LIMIT)
 ramp_start_time = 0.0
 v_cmd = 0.0
 w_cmd = 0.0
-
-# =========================================
-# UTIL
-# =========================================
-def normalize_angle(angle):
-    return int(angle) % 360
 
 # =========================================
 # IMU
@@ -142,23 +115,6 @@ def read_imu_pitch():
         return 0.0
 
 # =========================================
-# RAMP
-# =========================================
-def detect_ramp(front_avg):
-    global prev_front_avg
-    pitch = read_imu_pitch()
-    drop = front_avg - prev_front_avg
-    prev_front_avg = front_avg
-    if USE_IMU:
-        return pitch >= RAMP_PITCH_THRESH
-    return drop >= LIDAR_DROP_THRESH
-
-def ramp_exited():
-    if USE_IMU:
-        return read_imu_pitch() < RAMP_EXIT_PITCH
-    return (time.time() - ramp_start_time) > RAMP_LIDAR_TIMEOUT
-
-# =========================================
 # FILTER
 # =========================================
 def apply_ema(angle, new_dist_cm):
@@ -179,11 +135,10 @@ def get_dynamic_radius(v, w):
     if abs(w) < 0.05:
         return ROBOT_RADIUS + 1.0
     R = abs(v / w)
-    rear_orbit = math.sqrt(R**2 + LIDAR_TO_REAR_AXLE**2)
+    rear_orbit = math.sqrt(R**2 + 13.5**2)
     inner_cut = rear_orbit - R
     dyn = ROBOT_RADIUS + inner_cut
-    dyn = min(dyn, ROBOT_RADIUS + 3.5)
-    return dyn
+    return min(dyn, ROBOT_RADIUS + 3.5)
 
 # =========================================
 # INFLATION
@@ -197,7 +152,7 @@ def inflate_obstacles(dists, inflation_max, dynamic_radius):
         ratio = min(dynamic_radius / d, 0.92)
         alpha = math.degrees(math.asin(ratio))
         start = max(0, int(i - alpha))
-        end = min(len(dists) - 1, int(i + alpha))
+        end = min(len(dists)-1, int(i + alpha))
         proc[start:end+1] = 0.0
     return proc
 
@@ -213,10 +168,10 @@ def find_gaps(proc_dists, safe_dist):
                 gap_start = i
         else:
             if gap_start is not None:
-                if (i - gap_start) >= 20:        # 최소 gap width
-                    gaps.append((gap_start, i - 1))
+                if (i - gap_start) >= 22:
+                    gaps.append((gap_start, i-1))
                 gap_start = None
-    if gap_start is not None and (len(proc_dists) - gap_start) >= 20:
+    if gap_start is not None and (len(proc_dists) - gap_start) >= 22:
         gaps.append((gap_start, len(proc_dists)-1))
     return gaps
 
@@ -228,24 +183,20 @@ def score_gap(gap, proc_dists, angles):
     avg_dist = np.mean(proc_dists[start:end+1])
     
     score = (
-        width * 2.3 +           # 폭 중요도 ↑
-        avg_dist * 1.35 -       # 거리 중요도 ↓
-        abs(center_angle) * 0.07
+        width * 2.15 +
+        avg_dist * 1.4 -
+        abs(center_angle) * 0.11 +
+        (60 - abs(center_angle)) * 0.09   # 중앙 선호
     )
     return score
 
 def select_best_gap(gaps, proc_dists, angles):
-    best_gap = None
-    best_score = -1e9
-    for gap in gaps:
-        s = score_gap(gap, proc_dists, angles)
-        if s > best_score:
-            best_score = s
-            best_gap = gap
-    return best_gap
+    if not gaps:
+        return None
+    return max(gaps, key=lambda g: score_gap(g, proc_dists, angles))
 
 # =========================================
-# PLANNING
+# PLANNING - 핵심 수정
 # =========================================
 def find_best_direction(smoothing, on_ramp=False):
     global prev_angle
@@ -254,19 +205,15 @@ def find_best_direction(smoothing, on_ramp=False):
     angles = np.arange(-FRONT_RANGE, FRONT_RANGE + 1)
     dists = np.array([scan_data[a % 360] for a in angles])
 
-    # ==================== 좁은 길 판단 ====================
-    front_min = float(np.min(scan_data[np.arange(-45, 46) % 360]))
+    # 좁은 길 판단
+    front_min = float(np.min(scan_data[np.arange(-45,46)%360]))
     side_left = np.mean(scan_data[50:110])
     side_right = np.mean(scan_data[250:310])
     side_clear = min(side_left, side_right)
-    
     is_narrow = (front_min < 55 and side_clear < 22)
 
-    # ==================== 파라미터 선택 ====================
-    infl_max = (RAMP_INFLATION_MAX if on_ramp else 
-                INFLATION_MAX_DIST_NARROW if is_narrow else INFLATION_MAX_DIST_NORMAL)
-    safe_dist = (RAMP_SAFE_DIST if on_ramp else 
-                 SAFE_DIST_NARROW if is_narrow else SAFE_DIST_NORMAL)
+    infl_max = RAMP_INFLATION_MAX if on_ramp else (INFLATION_MAX_DIST_NARROW if is_narrow else INFLATION_MAX_DIST_NORMAL)
+    safe_dist = RAMP_SAFE_DIST if on_ramp else (SAFE_DIST_NARROW if is_narrow else SAFE_DIST_NORMAL)
 
     dynamic_radius = get_dynamic_radius(v_cmd, w_cmd)
     proc = inflate_obstacles(dists, infl_max, dynamic_radius)
@@ -275,22 +222,28 @@ def find_best_direction(smoothing, on_ramp=False):
     if not gaps:
         return None
 
-    best_gap = select_best_gap(gaps, proc, angles)
-    start, end = best_gap
+    start, end = select_best_gap(gaps, proc, angles)
     center_i = (start + end) // 2
     target = float(angles[center_i])
 
-    # ==================== 복도 중앙 유지 (좁은 길에서는 약하게) ====================
-    left_wall = np.mean(scan_data[60:100])
-    right_wall = np.mean(scan_data[260:300])
-    wall_bias = (left_wall - right_wall) * (0.13 if not is_narrow else 0.04)
-    target -= wall_bias
+    # ==================== Wall Centering (수정됨) ====================
+    left_dist  = np.mean(scan_data[50:110])   # 왼쪽 벽 거리
+    right_dist = np.mean(scan_data[250:310])  # 오른쪽 벽 거리
+    
+    # 오른쪽 벽이 더 가까우면 → 왼쪽으로 (양수), 왼쪽 벽이 더 가까우면 → 오른쪽으로 (음수)
+    wall_bias = (right_dist - left_dist) * (0.18 if not is_narrow else 0.055)
+    target += wall_bias                       # ★★★ += (벽에서 멀어지게)
 
-    # 앞이 많이 트여있으면 직진 유도
-    front_clear = float(np.min(scan_data[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]))
+    # 앞이 트였을 때 직진 유도
+    front_clear = float(np.min(scan_data[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE+1) % 360]))
     if front_clear > FRONT_CLEAR_DIST:
-        target *= 0.35
+        target *= 0.38
 
+    # 변화량 제한 (짱구 춤 방지)
+    max_delta = 8.5 if is_narrow else 13.0
+    target = max(min(target, prev_angle + max_delta), prev_angle - max_delta)
+
+    # Smoothing
     target = prev_angle * smoothing + target * (1.0 - smoothing)
     prev_angle = target
 
@@ -299,34 +252,30 @@ def find_best_direction(smoothing, on_ramp=False):
 # =========================================
 # CONTROL
 # =========================================
-ALIGN_THRESHOLD = 20
-
 def compute_cmd(target_angle, on_ramp=False, is_narrow=False):
     w = math.radians(target_angle) * TURN_GAIN
     w = float(np.clip(w, -MAX_W, MAX_W))
 
-    if abs(target_angle) > ALIGN_THRESHOLD:
+    if abs(target_angle) > 22:
         return 0.0, w
 
-    front_min = float(np.min(scan_data[np.arange(-12, 13) % 360]))
+    front_min = float(np.min(scan_data[np.arange(-12,13)%360]))
 
     if on_ramp:
         return RAMP_SPEED, w
 
     obstacle_scale = min(front_min / 45.0, 1.0)
-    turn_scale = max(0.45, 1.0 - abs(w) / MAX_W)
+    turn_scale = max(0.48, 1.0 - abs(w) / MAX_W)
     
     speed = MAX_SPEED * obstacle_scale * turn_scale
     speed = max(speed, MIN_SPEED)
-    
-    # 좁은 길에서는 속도 조금 더 낮춤
     if is_narrow:
         speed = min(speed, 0.13)
-        
+    
     return speed, w
 
 # =========================================
-# MOTOR
+# MOTOR & AVOID
 # =========================================
 def send_cmd(v, w):
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
@@ -334,57 +283,43 @@ def send_cmd(v, w):
 def stop_robot():
     send_cmd(0.0, 0.0)
 
-# =========================================
-# AVOID
-# =========================================
 def choose_avoid_direction():
     left_avg = float(np.mean(scan_data[1:90]))
     right_avg = float(np.mean(scan_data[271:359]))
-    if left_avg >= right_avg:
-        return 1
-    else:
-        return -1
+    return 1 if left_avg >= right_avg else -1
 
 # =========================================
 # MAIN LOOP
 # =========================================
-print("NAVIGATION START - Narrow Passage Enhanced")
+print("NAVIGATION START - Wall Centering Fixed")
 try:
     while True:
         raw = lidar_ser.read(5)
-        if len(raw) != 5:
-            continue
+        if len(raw) != 5: continue
 
         s_flag = raw[0] & 0x01
         s_inv_flag = (raw[0] & 0x02) >> 1
-        if s_inv_flag != (1 - s_flag):
-            continue
-        if (raw[1] & 0x01) != 1:
-            continue
+        if s_inv_flag != (1 - s_flag): continue
+        if (raw[1] & 0x01) != 1: continue
 
         quality = raw[0] >> 2
-        if quality < 3:
-            continue
+        if quality < 3: continue
 
         angle_raw = (raw[1] >> 1) | (raw[2] << 7)
         angle = int(angle_raw / 64.0) % 360
         dist_raw = raw[3] | (raw[4] << 8)
         dist_cm = (dist_raw / 4.0) / 10.0
 
-        if dist_cm < 3 or dist_cm > SCAN_LIMIT:
-            continue
+        if dist_cm < 3 or dist_cm > SCAN_LIMIT: continue
 
         apply_ema(angle, dist_cm)
-
-        if s_flag != 1:
-            continue
-
+        if s_flag != 1: continue
         apply_median_filter()
 
         now = time.time()
-        front_min = float(np.min(scan_data[np.arange(-12, 13) % 360]))
+        front_min = float(np.min(scan_data[np.arange(-12,13)%360]))
 
-        # ==================== STATE MACHINE ====================
+        # STATE MACHINE
         if state == STATE_ROTATE:
             if now < maneuver_end_time:
                 send_cmd(0.0, ROTATE_W * rotate_dir)
@@ -398,14 +333,13 @@ try:
                 state = STATE_NORMAL
                 print("[RAMP EXIT]")
             else:
-                result = find_best_direction(SMOOTHING_NORMAL, on_ramp=True)
+                result = find_best_direction(SMOOTHING_NORMAL, True)
                 if result:
-                    target_angle, _, _, _ = result
-                    v_cmd, w_cmd = compute_cmd(target_angle, on_ramp=True)
-                    send_cmd(v_cmd, w_cmd)
+                    ta, _, _, _ = result
+                    v, w = compute_cmd(ta, True)
+                    send_cmd(v, w)
             continue
 
-        # ==================== NORMAL ====================
         if front_min < EMERGENCY_DIST:
             rotate_dir = choose_avoid_direction()
             state = STATE_ROTATE
@@ -426,16 +360,31 @@ try:
             maneuver_end_time = now + ROTATE_DURATION
             continue
 
-        target_angle, dynamic_radius, front_clear, is_narrow = result
-        v_cmd, w_cmd = compute_cmd(target_angle, is_narrow=is_narrow)
+        target_angle, dynR, fclear, is_narrow = result
+        v_cmd, w_cmd = compute_cmd(target_angle, False, is_narrow)
 
         send_cmd(v_cmd, w_cmd)
 
         print(f"T:{target_angle:6.1f} | v:{v_cmd:.2f} | w:{w_cmd:.2f} | "
-              f"front:{front_min:.1f} | narrow:{is_narrow} | dynR:{dynamic_radius:.1f}")
+              f"front:{front_min:.1f} | narrow:{is_narrow} | bias:{(np.mean(scan_data[250:310])-np.mean(scan_data[50:110])):.1f}")
 
 except KeyboardInterrupt:
     print("STOP")
 finally:
     stop_robot()
     lidar_ser.write(bytes([0xA5, 0x25]))
+
+# ramp_exited 함수 추가 (위에 빠졌을 수 있음)
+def detect_ramp(front_avg):
+    global prev_front_avg
+    pitch = read_imu_pitch()
+    drop = front_avg - prev_front_avg
+    prev_front_avg = front_avg
+    if USE_IMU:
+        return pitch >= RAMP_PITCH_THRESH
+    return drop >= 30.0
+
+def ramp_exited():
+    if USE_IMU:
+        return read_imu_pitch() < RAMP_EXIT_PITCH
+    return (time.time() - ramp_start_time) > RAMP_LIDAR_TIMEOUT
