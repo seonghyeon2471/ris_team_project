@@ -30,8 +30,8 @@ WHEEL_BASE   = 17.0
 # =========================================
 # DRIVE PARAMETER
 # =========================================
-MAX_SPEED    = 0.14
-MIN_SPEED    = 0.11
+MAX_SPEED    = 0.16
+MIN_SPEED    = 0.12
 MAX_W        = 1.5
 TURN_GAIN    = 1.8
 
@@ -47,7 +47,7 @@ MEDIAN_K     = 2
 # =========================================
 # SMOOTHING PARAMETER
 # =========================================
-SMOOTHING_NORMAL = 0.55
+SMOOTHING_NORMAL = 0.6
 SMOOTHING_DANGER = 0.20
 DANGER_DIST      = 18
 
@@ -71,7 +71,7 @@ state             = STATE_NORMAL
 maneuver_end_time = 0.0
 rotate_dir        = 1
 
-EMERGENCY_DIST    = 6
+EMERGENCY_DIST    = 7
 REVERSE_DURATION  = 0.18
 ROTATE_DURATION   = 1.00
 REVERSE_SPEED     = -0.10
