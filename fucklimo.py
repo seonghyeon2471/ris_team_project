@@ -30,8 +30,8 @@ WHEEL_BASE   = 17.0
 # =========================================
 # DRIVE PARAMETER
 # =========================================
-MAX_SPEED    = 0.16
-MIN_SPEED    = 0.12
+MAX_SPEED    = 0.17
+MIN_SPEED    = 0.13
 MAX_W        = 1.5
 TURN_GAIN    = 1.8
 
@@ -73,9 +73,9 @@ rotate_dir        = 1
 
 EMERGENCY_DIST    = 7
 REVERSE_DURATION  = 0.18
-ROTATE_DURATION   = 1.00
+ROTATE_DURATION   = 0.8
 REVERSE_SPEED     = -0.10
-ROTATE_W          = 0.9
+ROTATE_W          = 1.2
 
 # =========================================
 # [NEW] EMERGENCY 연속 확인 카운터
