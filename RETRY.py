@@ -84,7 +84,7 @@ EMERGENCY_DIST    = 6
 REVERSE_DURATION  = 0.20
 ROTATE_DURATION   = 1.00
 REVERSE_SPEED     = -0.10
-ROTATE_W          = 0.7
+ROTATE_W          = 0.6
 
 # =========================================
 # STATE DATA
