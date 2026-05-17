@@ -54,7 +54,7 @@ DANGER_DIST      = 12
 # =========================================
 # GAP & INFLATION PARAMETER
 # =========================================
-SAFE_DIST          = 14
+SAFE_DIST          = 10
 INFLATION_MAX_DIST = 25
 
 FRONT_CLEAR_DIST   = 23   # ★ 수정: 12 → 23 (CRITICAL_DIST=12와 달라야 3단계 정상 작동)
