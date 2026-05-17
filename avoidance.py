@@ -1,98 +1,124 @@
 import asyncio
-from rplidarc1 import RPLidarC1
+from rplidarc1 import RPLidar          # ←←← 이 부분이 핵심 수정!
 import serial
 import time
+import math
 
 # ====================== 설정 ======================
 LIDAR_PORT = '/dev/ttyUSB0'
-ARDUINO_PORT = '/dev/serial0'      # ← Raspberry Pi GPIO UART 포트 (확인 완료!)
+ARDUINO_PORT = '/dev/serial0'
 
 BAUD_LIDAR = 460800
 BAUD_ARDUINO = 115200
 
-# 속도 설정 (현장에서 테스트하면서 조정하세요)
-V_FORWARD = 0.35      # 직진 속도 (m/s) - 너무 빠르면 0.30으로 낮추기
-W_TURN    = 1.8       # 회전 각속도 (rad/s) - 좌/우 회전 강도
-V_SLOW    = 0.25      # 장애물 가까울 때 느린 속도
+# FGM / GRP 파라미터 (현장 튜닝용)
+V_MAX = 0.38          # 직진 최대 속도 (m/s)
+V_MIN = 0.22          # 회전 시 느린 속도
+W_MAX = 2.2           # 최대 회전 각속도 (rad/s)
 
-TIME_LIMIT = 58.0     # 60초 제한 (안전 마진)
+GAP_THRESHOLD = 400   # mm (gap 판단 기준 거리)
+SAFETY_DIST = 350     # mm (정면 안전거리)
+
+TIME_LIMIT = 58.0
 # ================================================
 
 ser = None
 
 def send_command(v: float, w: float):
-    """Arduino로 v, w 명령 전송"""
     global ser
     cmd = f"{v:.2f},{w:.2f}\n"
     try:
         ser.write(cmd.encode('utf-8'))
         ser.flush()
-        # print(f"→ sent: {cmd.strip()}")   # 디버그 필요하면 주석 해제
     except Exception as e:
         print("Serial 전송 에러:", e)
 
+def find_best_gap(scan):
+    """FGM + GRP 스타일 widest gap + reference bias"""
+    valid = [p for p in scan if 200 < p["d_mm"] < 2500 and p["q"] > 8]
+    if not valid:
+        return 0.0
+
+    valid.sort(key=lambda p: p["a_deg"])
+
+    best_gap_center = 0.0
+    max_score = -9999
+    current_start = None
+    current_start_angle = 0.0
+
+    for i in range(len(valid)):
+        if current_start is None:
+            current_start = i
+            current_start_angle = valid[i]["a_deg"]
+            continue
+
+        if valid[i]["d_mm"] < GAP_THRESHOLD:
+            # gap 계산
+            gap_width = valid[i-1]["a_deg"] - current_start_angle
+            gap_center = current_start_angle + gap_width / 2.0
+            
+            # GRP reference bias (0도 방향 선호)
+            ref_bias = abs(gap_center) * 0.35
+            score = gap_width - ref_bias
+
+            if score > max_score:
+                max_score = score
+                best_gap_center = gap_center
+
+            current_start = None
+
+    # 마지막 gap 처리
+    if current_start is not None:
+        gap_width = valid[-1]["a_deg"] - current_start_angle
+        gap_center = current_start_angle + gap_width / 2.0
+        ref_bias = abs(gap_center) * 0.35
+        score = gap_width - ref_bias
+        if score > max_score:
+            best_gap_center = gap_center
+
+    # 정면에 매우 가까운 장애물 → 강제 회전
+    front_min = min((p["d_mm"] for p in valid if -35 < p["a_deg"] < 35), default=9999)
+    if front_min < SAFETY_DIST:
+        best_gap_center *= 1.6
+
+    return best_gap_center
+
 async def main():
     global ser
-    # Arduino 연결
     ser = serial.Serial(ARDUINO_PORT, BAUD_ARDUINO, timeout=0.1)
-    print(f"🔌 Arduino 연결 성공: {ARDUINO_PORT}")
+    print(f"🔌 Arduino 연결: {ARDUINO_PORT}")
 
-    # LiDAR 연결
-    lidar = RPLidarC1(LIDAR_PORT, baudrate=BAUD_LIDAR)
+    lidar = RPLidar(LIDAR_PORT, baudrate=BAUD_LIDAR)   # ← 수정된 클래스
     await lidar.connect()
     health = await lidar.healthcheck()
     print("🩺 LiDAR Health:", health)
-    print("🚀 장애물 회피 주행 시작! (Ctrl+C 또는 58초 후 자동 정지)")
+    print("🚀 FGM-GRP 기반 장애물 회피 시작!")
 
     start_time = time.time()
 
     try:
         async for scan in lidar.simple_scan():
-            elapsed = time.time() - start_time
-            if elapsed > TIME_LIMIT:
-                print("⏰ 시간 제한 도달 → 정지")
+            if time.time() - start_time > TIME_LIMIT:
+                print("⏰ 시간 제한 → 종료")
                 break
 
-            # 유효한 데이터만 필터링
-            valid = [p for p in scan if 200 < p["d_mm"] < 2000 and p["q"] > 10]
+            gap_angle = find_best_gap(scan)
 
-            # 3구역으로 나누기
-            left  = [p["d_mm"] for p in valid if  40 < p["a_deg"] < 150]
-            front = [p["d_mm"] for p in valid if -35 < p["a_deg"] <  35]
-            right = [p["d_mm"] for p in valid if-150 < p["a_deg"] < -40]
+            # steering angle → angular velocity
+            w = math.radians(gap_angle) * 2.8
+            w = max(min(w, W_MAX), -W_MAX)
 
-            l_min = min(left)  if left  else 9999
-            f_min = min(front) if front else 9999
-            r_min = min(right) if right else 9999
+            # 속도 결정
+            v = V_MIN if abs(gap_angle) > 40 else V_MAX
 
-            # ==================== 회피 로직 ====================
-            if f_min < 400:                     # 정면 40cm 이내 → 강한 회전
-                if l_min > r_min:               # 왼쪽이 더 넓으면
-                    send_command(0.0, W_TURN)   # 왼쪽 회전
-                else:
-                    send_command(0.0, -W_TURN)  # 오른쪽 회전
-                await asyncio.sleep(0.45)
+            send_command(v, w)
 
-            elif f_min < 700:                   # 40~70cm → 살짝 회전하면서 전진
-                if l_min > r_min:
-                    send_command(V_SLOW, W_TURN * 0.7)
-                else:
-                    send_command(V_SLOW, -W_TURN * 0.7)
-                await asyncio.sleep(0.25)
+            await asyncio.sleep(0.07)
 
-            else:                               # 앞이 깨끗 → 직진
-                send_command(V_FORWARD, 0.0)
-
-            await asyncio.sleep(0.08)           # 제어 주기
-
-    except asyncio.CancelledError:
-        print("🛑 사용자에 의해 중단됨")
     except Exception as e:
-        print("❌ 에러 발생:", e)
+        print("❌ 에러:", e)
     finally:
-        # 안전 정지
         send_command(0.0, 0.0)
-        time.sleep(0.2)
         if ser:
             ser.close()
         await lidar.shutdown()
