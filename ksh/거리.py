@@ -20,17 +20,17 @@ lidar_ser.read(7)
 print("LIDAR START")
 
 # =========================================
-# PARAMETERS
+# PARAMETERS (당신이 수정한 값 유지 + 약간 정리)
 # =========================================
-MAX_SPEED = 0.40
+MAX_SPEED = 0.40          # ← 빠르게 가고 싶으면 그대로, 불안하면 0.28~0.32로 낮추세요
 MIN_SPEED = 0.09
-MAX_W = 1.65               # ← 필요하면 1.7~1.8로 올려보세요
+MAX_W = 1.6
 
-THRESH_30 = 25.0
+THRESH_30 = 25.0          # 25cm부터 중간 조향
 THRESH_20 = 20.0
 THRESH_10 = 10.0
 
-FRONT_CHECK_RANGE = 45
+FRONT_CHECK_RANGE = 45    # 전방 체크 범위
 
 # FILTER
 EMA_ALPHA = 0.35
@@ -58,27 +58,11 @@ def get_front_min():
     indices = np.arange(-FRONT_CHECK_RANGE, FRONT_CHECK_RANGE + 1) % 360
     return float(np.min(scan_data[indices]))
 
-# =========================================
-# ★★★ 핵심 개선: 실시간 좌/우 clearance 비교 ★★★
-# =========================================
-def get_avoid_direction():
-    # 좌측 측면 (35° ~ 125°): 전방과 너무 겹치지 않게
-    left_sector = scan_data[35:126]
-    # 우측 측면 (235° ~ 325°)
-    right_sector = scan_data[235:326]
-    
-    left_min = float(np.min(left_sector))
-    right_min = float(np.min(right_sector))
-    
-    # 양쪽 거리가 비슷하면 직진 (약간의 hysteresis)
-    if abs(left_min - right_min) < 8.0:      # ← 8cm 이내 차이면 직진
-        return 0.0
-    
-    # 한쪽이 더 가까우면 반대쪽으로 꺾기
-    if left_min < right_min:
-        return 1.0      # 왼쪽이 가까움 → 오른쪽으로 꺾기
-    else:
-        return -1.0     # 오른쪽이 가까움 → 왼쪽으로 꺾기
+def choose_avoid_direction():
+    """좌/우 평균 비교해서 장애물 반대 방향 선택"""
+    left_avg = float(np.mean(scan_data[1:90]))
+    right_avg = float(np.mean(scan_data[271:360]))
+    return 1 if left_avg >= right_avg else -1   # 1: 오른쪽 회전, -1: 왼쪽 회전
 
 # =========================================
 # MOTOR
@@ -92,7 +76,7 @@ def stop_robot():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("IMPROVED SIDE-CLEARANCE OBSTACLE AVOIDANCE START")
+print("PURE FORWARD OBSTACLE AVOIDANCE START (후진 없음)")
 
 try:
     while True:
@@ -100,6 +84,7 @@ try:
         if len(raw) != 5:
             continue
 
+        # LiDAR packet parsing
         s_flag = raw[0] & 0x01
         if ((raw[0] & 0x02) >> 1) != (1 - s_flag) or (raw[1] & 0x01) != 1 or (raw[0] >> 2) < 3:
             continue
@@ -115,24 +100,24 @@ try:
 
         apply_median_filter()
 
-        # =============== 개선된 회피 로직 ===============
+        # =============== 회피 로직 ===============
         front_min = get_front_min()
-        
-        # 실시간 좌/우 방향 결정
-        direction = get_avoid_direction()
 
         if front_min < THRESH_10:
+            direction = choose_avoid_direction()
             v = MIN_SPEED
             w = direction * MAX_W
-            print(f"🚨 VERY CLOSE! front={front_min:.1f}cm | dir={direction:+.1f}")
+            print(f"🚨 VERY CLOSE! front={front_min:.1f}cm → STRONG TURN (dir={direction})")
         elif front_min < THRESH_20:
+            direction = choose_avoid_direction()
             v = 0.12
-            w = direction * 1.45
-            print(f"⚠️ CRITICAL front={front_min:.1f}cm | dir={direction:+.1f}")
+            w = direction * 1.4
+            print(f"⚠️ CRITICAL front={front_min:.1f}cm → STRONG TURN (dir={direction})")
         elif front_min < THRESH_30:
+            direction = choose_avoid_direction()
             v = 0.15
-            w = direction * 1.15
-            print(f"⚡ WARNING front={front_min:.1f}cm | dir={direction:+.1f}")
+            w = direction * 1.2
+            print(f"⚡ WARNING front={front_min:.1f}cm → MEDIUM TURN (dir={direction})")
         else:
             v = MAX_SPEED
             w = 0.0
