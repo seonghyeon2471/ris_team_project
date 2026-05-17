@@ -20,17 +20,17 @@ lidar_ser.read(7)
 print("LIDAR START")
 
 # =========================================
-# PARAMETERS (당신이 수정한 값 유지 + 약간 정리)
+# PARAMETERS
 # =========================================
-MAX_SPEED = 0.40          # ← 빠르게 가고 싶으면 그대로, 불안하면 0.28~0.32로 낮추세요
+MAX_SPEED = 0.40
 MIN_SPEED = 0.09
 MAX_W = 1.6
 
-THRESH_30 = 25.0          # 25cm부터 중간 조향
+THRESH_30 = 25.0
 THRESH_20 = 20.0
 THRESH_10 = 10.0
 
-FRONT_CHECK_RANGE = 45    # 전방 체크 범위
+FRONT_CHECK_RANGE = 65        # ← 여기 크게 늘림 (기존 45 → 65)
 
 # FILTER
 EMA_ALPHA = 0.35
@@ -59,10 +59,18 @@ def get_front_min():
     return float(np.min(scan_data[indices]))
 
 def choose_avoid_direction():
-    """좌/우 평균 비교해서 장애물 반대 방향 선택"""
-    left_avg = float(np.mean(scan_data[1:90]))
-    right_avg = float(np.mean(scan_data[271:360]))
-    return 1 if left_avg >= right_avg else -1   # 1: 오른쪽 회전, -1: 왼쪽 회전
+    """좌우 판단 범위 확대 + 회전하려는 쪽이 너무 가까우면 반대 방향 강제"""
+    # 더 넓은 범위로 좌우 평균 계산
+    left_avg  = float(np.mean(scan_data[0:120]))      # 왼쪽 더 넓게
+    right_avg = float(np.mean(scan_data[240:360]))    # 오른쪽 더 넓게
+    
+    # 현재 회전하려는 쪽이 매우 가까우면 반대 방향으로 강제 전환
+    if left_avg < 15 and right_avg > 25:
+        return 1      # 왼쪽이 너무 가까우면 오른쪽으로
+    if right_avg < 15 and left_avg > 25:
+        return -1     # 오른쪽이 너무 가까우면 왼쪽으로
+    
+    return 1 if left_avg >= right_avg else -1
 
 # =========================================
 # MOTOR
@@ -76,7 +84,7 @@ def stop_robot():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("PURE FORWARD OBSTACLE AVOIDANCE START (후진 없음)")
+print("WIDE ANGLE OBSTACLE AVOIDANCE START (측면 감지 강화)")
 
 try:
     while True:
@@ -84,7 +92,6 @@ try:
         if len(raw) != 5:
             continue
 
-        # LiDAR packet parsing
         s_flag = raw[0] & 0x01
         if ((raw[0] & 0x02) >> 1) != (1 - s_flag) or (raw[1] & 0x01) != 1 or (raw[0] >> 2) < 3:
             continue
@@ -100,7 +107,6 @@ try:
 
         apply_median_filter()
 
-        # =============== 회피 로직 ===============
         front_min = get_front_min()
 
         if front_min < THRESH_10:
@@ -121,7 +127,6 @@ try:
         else:
             v = MAX_SPEED
             w = 0.0
-            # print("→ STRAIGHT")
 
         send_cmd(v, w)
 
