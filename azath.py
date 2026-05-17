@@ -32,7 +32,7 @@ WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 # DRIVE PARAMETER
 # =========================================
 MAX_SPEED    = 0.16   # 최대 선속도 (m/s)
-MIN_SPEED    = 0.06   # 최소 속도 (m/s)
+MIN_SPEED    = 0.08   # 최소 속도 (m/s)
 MAX_W        = 1.5    # 최대 각속도 (rad/s)
 TURN_GAIN    = 2.2    # 조향 게인
 
@@ -46,7 +46,7 @@ EMA_ALPHA        = 0.3
 MEDIAN_K         = 2
 SMOOTHING_NORMAL = 0.55
 SMOOTHING_DANGER = 0.10
-DANGER_DIST      = 14
+DANGER_DIST      = 10
 
 # [튜닝] 틈새 판단 플래그 및 범위 최적화
 SAFE_DIST          = 12.0   # 기존 17.0 -> ROBOT_RADIUS와 동기화 (이 정도 틈만 있어도 진입 시도)
