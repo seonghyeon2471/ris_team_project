@@ -28,7 +28,7 @@ WHEEL_BASE   = 17.0
 # =========================================
 # DRIVE PARAMETER
 # =========================================
-MAX_SPEED    = 0.14
+MAX_SPEED    = 0.16
 MIN_SPEED    = 0.11
 MAX_W        = 0.9
 TURN_GAIN    = 1.8
@@ -62,9 +62,9 @@ FRONT_CLEAR_RANGE  = 15
 # 정면에 가까울수록 더 멀리서부터 반응
 # =========================================
 ZONE_THRESHOLDS = [
-    (np.arange(-45, 45)  % 360, 6.0),   # 정면 ±60°: 8cm
-    (np.arange(-60, -45) % 360, 5.0),   # 좌측면: 6cm
-    (np.arange(45, 60)   % 360, 5.0),   # 우측면: 6cm
+    (np.arange(-35, 35)  % 360, 6.0),   # 정면 ±60°: 8cm
+    (np.arange(-60, -35) % 360, 5.0),   # 좌측면: 6cm
+    (np.arange(35, 60)   % 360, 5.0),   # 우측면: 6cm
 ]
 
 # =========================================
@@ -122,7 +122,7 @@ def check_emergency():
             break
 
     # front_min은 DANGER_DIST 판단 및 디버그용으로 ±60° 기준 유지
-    front_min = float(np.min(scan_data[np.arange(-60, 61) % 360]))
+    front_min = float(np.min(scan_data[np.arange(-70, 70) % 360]))
     return triggered, front_min
 
 # =========================================
