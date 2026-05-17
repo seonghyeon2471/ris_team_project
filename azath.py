@@ -54,7 +54,7 @@ DANGER_DIST      = 15
 # =========================================
 # GAP & INFLATION PARAMETER
 # =========================================
-SAFE_DIST          = 14
+SAFE_DIST          = 20
 INFLATION_MAX_DIST = 25
 
 FRONT_CLEAR_DIST   = 12
@@ -273,12 +273,12 @@ try:
 
         # --- STATE_NORMAL ---
         front_min = float(np.min(scan_data[np.arange(-10, 11) % 360]))
-        # if front_min < EMERGENCY_DIST:
-        #     rotate_dir        = choose_avoid_direction()
-        #     state             = STATE_REVERSE
-        #     maneuver_end_time = now + REVERSE_DURATION
-        #     send_cmd(REVERSE_SPEED, 0.0)
-        #     continue
+        if front_min < EMERGENCY_DIST:
+            rotate_dir        = choose_avoid_direction()
+            state             = STATE_REVERSE
+            maneuver_end_time = now + REVERSE_DURATION
+            send_cmd(REVERSE_SPEED, 0.0)
+            continue
 
         smoothing = SMOOTHING_DANGER if front_min < DANGER_DIST else SMOOTHING_NORMAL
         result    = find_best_direction(smoothing)
