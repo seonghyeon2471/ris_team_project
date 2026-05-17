@@ -119,23 +119,61 @@ def apply_median_filter():
 
 # =========================================
 # OBSTACLE INFLATION
-# ★ 수정: LIDAR_TO_AXLE 기반 등가 반경으로 뒷바퀴 스윕 반영
+# ★ 박스형 장애물 대응: 인접 포인트를 면(face)으로 군집화하여 팽창
+#   - 기존: LiDAR 각 포인트를 점(point)으로 가정 → 모서리만 감지 시 측면 누락
+#   - 개선: 연속된 포인트를 하나의 면으로 묶고 양 끝 + 내부 전체 팽창
+#           → 45° 다이아몬드 박스, 박스 측면 사각지대 모두 대응
 # =========================================
+
+# 인접 포인트를 같은 면으로 볼 거리 임계값 (cm)
+CLUSTER_DIST_THRESH = 10.0
+
 def inflate_obstacles(dists):
     proc = dists.copy()
 
     # 라이다↔바퀴축 오프셋을 반영한 등가 반경
     effective_radius = math.sqrt(ROBOT_RADIUS**2 + LIDAR_TO_AXLE**2)
 
-    for i in range(len(dists)):
-        d = dists[i]
-        if d < 5 or d >= INFLATION_MAX_DIST:
-            continue
-        # 등가 반경 기준 팽창각 (뒷바퀴 스윕 간섭 영역 포함)
-        alpha = math.degrees(math.asin(min(effective_radius / max(d, effective_radius), 1.0)))
-        start_idx = max(0, int(i - alpha))
-        end_idx   = min(len(dists) - 1, int(i + alpha))
+    def inflate_point(proc, k, dk):
+        """단일 포인트 k를 등가 반경으로 팽창"""
+        if dk < 5 or dk >= INFLATION_MAX_DIST:
+            return
+        alpha = math.degrees(math.asin(
+            min(effective_radius / max(dk, effective_radius), 1.0)
+        ))
+        start_idx = max(0, int(k - alpha))
+        end_idx   = min(len(proc) - 1, int(k + alpha))
         proc[start_idx : end_idx + 1] = 0.0
+
+    i = 0
+    n = len(dists)
+
+    while i < n:
+        d = dists[i]
+
+        # 유효 범위 밖이면 스킵
+        if d < 5 or d >= INFLATION_MAX_DIST:
+            i += 1
+            continue
+
+        # ── 군집 탐색: 거리 차이가 CLUSTER_DIST_THRESH 이내인 연속 포인트 묶기 ──
+        j = i + 1
+        while (j < n
+               and dists[j] >= 5
+               and dists[j] < INFLATION_MAX_DIST
+               and abs(dists[j] - dists[j - 1]) < CLUSTER_DIST_THRESH):
+            j += 1
+        # 군집 범위: [i, j-1]
+
+        # 1) 군집 내부 전체를 0으로 마킹 (면 자체 차단)
+        proc[i:j] = 0.0
+
+        # 2) 군집 양 끝 포인트에서 팽창 (면의 경계 → 로봇 반경 팽창)
+        inflate_point(proc, i,     dists[i])
+        inflate_point(proc, j - 1, dists[j - 1])
+
+        i = j
+
     return proc
 
 # =========================================
