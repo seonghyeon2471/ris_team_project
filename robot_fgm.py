@@ -14,11 +14,16 @@ lidar_ser = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)
 # =========================================
 ROBOT_WIDTH = 0.16
 LIDAR_OFFSET_FRONT = 0.025
-LOOKAHEAD_DISTANCE = 0.8   # Pure Pursuit lookahead (m)
 
-SAFETY_FACTOR = 1.22
-ALPHA = 2.6
-BETA = 0.7
+# =========================================
+# 튜닝 파라미터 (이번에 크게 수정)
+# =========================================
+MAX_SPEED = 0.45          # ← 속도 크게 낮춤 (0.45m/s)
+STEERING_GAIN = 3.2       # ← 조향 감도
+STEERING_REVERSE = True   # ← 조향 반전 (True로 설정)
+
+LOOKAHEAD = 0.75
+SMOOTH_FACTOR = 0.72
 
 # =========================================
 # LIDAR START
@@ -32,12 +37,11 @@ lidar_ser.read(7)
 print("✅ LIDAR SCAN START")
 
 # =========================================
-# Local Centerline Follower
+# Centerline Follower
 # =========================================
 class CenterlineFollower:
     def __init__(self):
-        self.prev_target_angle = 0.0
-        self.smooth_factor = 0.65   # 경로 부드럽게 (0~1)
+        self.prev_target = 0.0
 
     def correct_to_center(self, angles_deg, ranges):
         angles_rad = np.radians(angles_deg)
@@ -47,63 +51,35 @@ class CenterlineFollower:
         ang = np.degrees(np.arctan2(y, x))
         return ang, dist
 
-    def find_centerline_target(self, angles_deg, ranges):
-        """자유 공간의 중앙선 방향 찾기"""
+    def find_centerline(self, angles_deg, ranges):
         corr_angles, corr_ranges = self.correct_to_center(angles_deg, ranges)
 
-        # 앞쪽만 사용
         mask = (corr_angles > -70) & (corr_angles < 70)
         angles = corr_angles[mask]
         ranges = corr_ranges[mask]
 
-        # 좌우 벽 찾기 (간단한 centerline approximation)
-        left_mask = angles < 0
-        right_mask = angles > 0
+        if len(angles) < 20:
+            return 0.0, 1.0
 
-        if np.any(left_mask) and np.any(right_mask):
-            left_dist = np.min(ranges[left_mask])
-            right_dist = np.min(ranges[right_mask])
-            left_angle = np.mean(angles[left_mask][ranges[left_mask] == left_dist])
-            right_angle = np.mean(angles[right_mask][ranges[right_mask] == right_dist])
-            
-            # 중앙 각도
-            center_angle = (left_angle + right_angle) / 2
+        # 좌우 중앙 계산
+        left = angles < 0
+        right = angles > 0
+
+        if np.any(left) and np.any(right):
+            center_angle = (np.mean(angles[left]) + np.mean(angles[right])) / 2
         else:
-            # gap 중심
-            valid = ranges > 0.08
-            if np.any(valid):
-                center_angle = np.mean(angles[valid])
-            else:
-                center_angle = 0.0
+            center_angle = np.mean(angles)
 
-        # smoothing
-        target = self.smooth_factor * center_angle + (1 - self.smooth_factor) * self.prev_target_angle
-        self.prev_target_angle = target
+        # 부드럽게 smoothing
+        target = SMOOTH_FACTOR * center_angle + (1 - SMOOTH_FACTOR) * self.prev_target
+        self.prev_target = target
 
-        return target, np.max(ranges) if len(ranges) > 0 else 1.0
-
-    def process(self, angles_deg, ranges):
-        target_angle, forward_clear = self.find_centerline_target(angles_deg, ranges)
-
-        # Pure Pursuit + PID 스타일
-        error = target_angle
-        steering = np.clip(error * 2.8, -0.65, 0.65)   # rad
-
-        # 속도
-        v = np.clip(forward_clear * 0.45, 0.22, 0.72)
-
-        # 안전 마진
-        d_min = np.min(ranges) if len(ranges) > 0 else 1.0
-        if d_min < 0.25:
-            v = v * 0.6
-            steering = steering * 1.3
-
-        return steering, v
+        return target, np.max(ranges)
 
 
 follower = CenterlineFollower()
 
-print("🚀 Local Centerline Following 시작 (중앙선 따라가기)")
+print("🚀 중앙선 따라가기 모드 시작 (속도↓, 조향 반전 적용)")
 
 buffer = bytearray()
 
@@ -129,19 +105,35 @@ try:
                 pass
             i += 5
 
-        if len(points) >= 60:
+        if len(points) >= 50:
             angles = np.array([p[0] for p in points])
             ranges = np.array([p[1] for p in points])
 
             front_mask = (angles > -75) & (angles < 75)
             if np.any(front_mask):
-                steering, v = follower.process(angles[front_mask], ranges[front_mask])
+                target_angle, forward_clear = follower.find_centerline(angles[front_mask], ranges[front_mask])
+
+                # 조향 반전 적용
+                steering = target_angle * STEERING_GAIN
+                if STEERING_REVERSE:
+                    steering = -steering
+
+                steering = np.clip(steering, -0.65, 0.65)
+
+                # 속도 제한
+                v = np.clip(forward_clear * 0.42, 0.20, MAX_SPEED)
+
+                # 가까우면 더 느리게
+                d_min = np.min(ranges[front_mask]) if len(ranges[front_mask]) > 0 else 1.0
+                if d_min < 0.30:
+                    v *= 0.65
+
                 w = steering * 3.0   # angular velocity
 
                 cmd = f"{v:.3f},{w:.3f}\n"
                 arduino_ser.write(cmd.encode('utf-8'))
 
-                print(f"TargetAngle: {steering/np.pi*180:+6.1f}° | v:{v:.3f} | w:{w:+6.3f}")
+                print(f"Target: {target_angle:+6.1f}° | Steer: {steering:+6.1f}° | v:{v:.3f} | d_min:{d_min:.2f}m")
 
             buffer = buffer[i:]
 
