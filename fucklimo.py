@@ -7,7 +7,7 @@ import numpy as np
 # SERIAL
 # =========================================
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
-lidar_ser = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)
+lidar_ser   = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)
 
 # =========================================
 # LIDAR START
@@ -58,11 +58,10 @@ FRONT_CLEAR_DIST   = 23
 FRONT_CLEAR_RANGE  = 15
 
 # =========================================
-# [핵심] 사각형 Emergency 감지 박스
-# 로봇 정면 기준 앞 5cm x 좌우 ±20cm 직사각형
+# EMERGENCY 감지 박스
 # =========================================
-EMERGENCY_FRONT = 7.0    # 앞 방향 감지 거리 (cm)
-EMERGENCY_SIDE  = 9.0   # 좌우 방향 감지 거리 (cm)
+EMERGENCY_FRONT = 7.0
+EMERGENCY_SIDE  = 9.0
 
 # =========================================
 # STATE MACHINE
@@ -75,22 +74,33 @@ state             = STATE_NORMAL
 maneuver_end_time = 0.0
 rotate_dir        = 1
 
-REVERSE_DURATION  = 0.20
+REVERSE_DURATION  = 0.25
 ROTATE_DURATION   = 0.5
-REVERSE_SPEED     = -0.20
+REVERSE_SPEED     = -0.18
 ROTATE_W          = 1.1
+
+# =========================================
+# [추가] Post-Emergency 쿨다운
+# =========================================
+POST_EMERGENCY_DURATION = 0.6   # 회전 종료 후 저속 유지 시간 (초)
+POST_EMERGENCY_SPEED    = 0.12  # 쿨다운 중 최대 속도 (m/s)
+post_emergency_until    = 0.0   # 쿨다운 만료 시각
 
 # =========================================
 # STATE DATA
 # =========================================
-scan_data = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
+scan_data  = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
 prev_angle = 0.0
 
 # =========================================
 # UTIL & FILTER
 # =========================================
 def apply_ema(angle, new_dist_cm):
-    scan_data[angle] = (1.0 - EMA_ALPHA) * scan_data[angle] + EMA_ALPHA * new_dist_cm
+    """
+    쿨다운 중에는 alpha를 높여 새 장애물을 빠르게 반영.
+    """
+    alpha = 0.6 if time.time() < post_emergency_until else EMA_ALPHA
+    scan_data[angle] = (1.0 - alpha) * scan_data[angle] + alpha * new_dist_cm
 
 def apply_median_filter():
     k = MEDIAN_K
@@ -104,8 +114,6 @@ def apply_median_filter():
 
 # =========================================
 # EMERGENCY 감지 (사각형 박스 방식)
-# 각 스캔 포인트를 x/y 좌표로 변환 후
-# 앞 5cm x 좌우 ±20cm 직사각형 안에 있으면 발동
 # =========================================
 def check_emergency():
     """
@@ -122,8 +130,8 @@ def check_emergency():
         if d >= SCAN_LIMIT:
             continue
         rad = math.radians(i)
-        x = d * math.sin(rad)   # 좌우
-        y = d * math.cos(rad)   # 앞뒤
+        x = d * math.sin(rad)
+        y = d * math.cos(rad)
         if 0 < y < EMERGENCY_FRONT and abs(x) < EMERGENCY_SIDE:
             triggered = True
             break
@@ -154,20 +162,22 @@ def find_gaps(proc_dists, angles):
     gap_start = None
     for i, d in enumerate(proc_dists):
         if d > SAFE_DIST:
-            if gap_start is None: gap_start = i
+            if gap_start is None:
+                gap_start = i
         else:
             if gap_start is not None:
                 gaps.append((gap_start, i - 1))
                 gap_start = None
-    if gap_start is not None: gaps.append((gap_start, len(proc_dists) - 1))
+    if gap_start is not None:
+        gaps.append((gap_start, len(proc_dists) - 1))
     return gaps
 
 def score_gap(gap, proc_dists, angles):
-    start, end = gap
-    width = end - start
-    center_i = (start + end) / 2.0
+    start, end   = gap
+    width        = end - start
+    center_i     = (start + end) / 2.0
     center_angle = angles[int(center_i)]
-    avg_dist = np.mean(proc_dists[start : end + 1])
+    avg_dist     = np.mean(proc_dists[start : end + 1])
     return (width * 0.5 + avg_dist * 1.2 - abs(center_angle) * 0.4)
 
 def select_best_gap(gaps, proc_dists, angles):
@@ -183,32 +193,33 @@ def select_best_gap(gaps, proc_dists, angles):
 # =========================================
 def find_best_direction(smoothing):
     global prev_angle
-    angles = np.arange(-FRONT_RANGE, FRONT_RANGE + 1)
-    dists = np.array([scan_data[a % 360] for a in angles], dtype=np.float32)
+    angles     = np.arange(-FRONT_RANGE, FRONT_RANGE + 1)
+    dists      = np.array([scan_data[a % 360] for a in angles], dtype=np.float32)
     proc_dists = inflate_obstacles(dists)
-    gaps = find_gaps(proc_dists, angles)
+    gaps       = find_gaps(proc_dists, angles)
 
-    if not gaps: return None
+    if not gaps:
+        return None
 
-    best_gap = select_best_gap(gaps, proc_dists, angles)
+    best_gap  = select_best_gap(gaps, proc_dists, angles)
     start, end = best_gap
     gap_angle = float(angles[int((start + end) / 2.0)])
 
     front_clear = float(np.min(scan_data[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]))
 
     if front_clear > FRONT_CLEAR_DIST:
-        target = gap_angle * 0.2
+        target     = gap_angle * 0.2
         bias_label = "STRAIGHT"
     elif front_clear > 12:
-        target = gap_angle * 1.0
-        smoothing = SMOOTHING_DANGER
+        target     = gap_angle * 1.0
+        smoothing  = SMOOTHING_DANGER
         bias_label = "GAP"
     else:
-        target = gap_angle * 1.0
-        smoothing = 0.0
+        target     = gap_angle * 1.0
+        smoothing  = 0.0
         bias_label = "CRITICAL"
 
-    target = prev_angle * smoothing + target * (1.0 - smoothing)
+    target     = prev_angle * smoothing + target * (1.0 - smoothing)
     prev_angle = target
     return target, bias_label, front_clear
 
@@ -217,19 +228,27 @@ def find_best_direction(smoothing):
 # =========================================
 ALIGN_THRESHOLD = 10
 
-def compute_cmd(target_angle):
+def compute_cmd(target_angle, now):
+    """
+    now: time.time() 값을 받아 쿨다운 중 속도 상한 적용.
+    """
     w = math.radians(target_angle) * TURN_GAIN
     w = float(np.clip(w, -MAX_W, MAX_W))
 
     search_indices = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
-    relevant_min = float(np.min(scan_data[search_indices]))
+    relevant_min   = float(np.min(scan_data[search_indices]))
 
     if abs(target_angle) > ALIGN_THRESHOLD:
         v = 0.05 if relevant_min > 20.0 else 0.03
         return v, w
 
     obstacle_scale = min(relevant_min / 25.0, 1.0)
-    speed = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
+    speed          = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
+
+    # [핵심] 쿨다운 중 속도 상한 적용
+    if now < post_emergency_until:
+        speed = min(speed, POST_EMERGENCY_SPEED)
+
     return speed, w
 
 def send_cmd(v, w):
@@ -246,64 +265,88 @@ def choose_avoid_direction():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("NAVIGATION START (Rect-based Emergency Detection)")
-print(f"Emergency box: front={EMERGENCY_FRONT}cm x side=±{EMERGENCY_SIDE}cm")
+print("NAVIGATION START (Rect-based Emergency + Post-Emergency Cooldown)")
+print(f"Emergency box : front={EMERGENCY_FRONT}cm x side=±{EMERGENCY_SIDE}cm")
+print(f"Cooldown      : {POST_EMERGENCY_DURATION}s @ max {POST_EMERGENCY_SPEED} m/s")
+
 try:
     while True:
         raw = lidar_ser.read(5)
-        if len(raw) != 5: continue
+        if len(raw) != 5:
+            continue
 
         s_flag = raw[0] & 0x01
-        if (raw[0] & 0x02) >> 1 != (1 - s_flag): continue
-        if (raw[1] & 0x01) != 1: continue
-        if (raw[0] >> 2) < 3: continue
+        if (raw[0] & 0x02) >> 1 != (1 - s_flag):
+            continue
+        if (raw[1] & 0x01) != 1:
+            continue
+        if (raw[0] >> 2) < 3:
+            continue
 
-        angle = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0) % 360
+        angle   = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0) % 360
         dist_cm = (raw[3] | (raw[4] << 8)) / 40.0
         if 3 < dist_cm < SCAN_LIMIT:
             apply_ema(angle, dist_cm)
 
-        if s_flag != 1: continue
+        if s_flag != 1:
+            continue
         apply_median_filter()
         now = time.time()
 
-        # --- STATE MACHINE ---
+        # -----------------------------------------------
+        # STATE: REVERSE
+        # -----------------------------------------------
         if state == STATE_REVERSE:
-            if now < maneuver_end_time: send_cmd(REVERSE_SPEED, 0.0)
+            if now < maneuver_end_time:
+                send_cmd(REVERSE_SPEED, 0.0)
             else:
-                state, maneuver_end_time = STATE_ROTATE, now + ROTATE_DURATION
+                state             = STATE_ROTATE
+                maneuver_end_time = now + ROTATE_DURATION
             continue
 
+        # -----------------------------------------------
+        # STATE: ROTATE
+        # -----------------------------------------------
         if state == STATE_ROTATE:
-            if now < maneuver_end_time: send_cmd(0.0, ROTATE_W * rotate_dir)
+            if now < maneuver_end_time:
+                send_cmd(0.0, ROTATE_W * rotate_dir)
             else:
-                rotate_dir *= -1
-                state, prev_angle = STATE_NORMAL, 0.0
-                for a in range(-45, 46): scan_data[a % 360] = float(SCAN_LIMIT)
+                rotate_dir  *= -1
+                state        = STATE_NORMAL
+                prev_angle   = 0.0
+                # [핵심①] scan_data 리셋 제거 → 장애물 정보 유지
+                # [핵심②] 쿨다운 시작
+                post_emergency_until = now + POST_EMERGENCY_DURATION
             continue
 
-        # --- STATE_NORMAL ---
+        # -----------------------------------------------
+        # STATE: NORMAL
+        # -----------------------------------------------
         is_emergency, front_min = check_emergency()
 
         if is_emergency:
-            rotate_dir = choose_avoid_direction()
-            state, maneuver_end_time = STATE_REVERSE, now + REVERSE_DURATION
+            rotate_dir        = choose_avoid_direction()
+            state             = STATE_REVERSE
+            maneuver_end_time = now + REVERSE_DURATION
             send_cmd(REVERSE_SPEED, 0.0)
             continue
 
         smoothing = SMOOTHING_DANGER if front_min < DANGER_DIST else SMOOTHING_NORMAL
-        result = find_best_direction(smoothing)
+        result    = find_best_direction(smoothing)
 
         if result is None:
-            rotate_dir = choose_avoid_direction()
-            state, maneuver_end_time = STATE_REVERSE, now + REVERSE_DURATION
+            rotate_dir        = choose_avoid_direction()
+            state             = STATE_REVERSE
+            maneuver_end_time = now + REVERSE_DURATION
             continue
 
         target_angle, bias_label, front_clear = result
-        v, w = compute_cmd(target_angle)
+        v, w = compute_cmd(target_angle, now)
         send_cmd(v, w)
 
-        print(f"[{bias_label:8s}] TRG:{target_angle:5.1f}° | v:{v:.2f} | w:{w:.2f} | f_min:{front_min:.1f}")
+        cooldown_str = f" [COOL {post_emergency_until - now:.1f}s]" if now < post_emergency_until else ""
+        print(f"[{bias_label:8s}] TRG:{target_angle:5.1f}° | v:{v:.2f} | w:{w:.2f} | "
+              f"f_min:{front_min:.1f}{cooldown_str}")
 
 except KeyboardInterrupt:
     print("STOP")
