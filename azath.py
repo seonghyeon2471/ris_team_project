@@ -53,19 +53,16 @@ FRONT_CLEAR_DIST   = 23
 FRONT_CLEAR_RANGE  = 15
 
 # =========================================
-# GLOBAL GOAL & ODOMETRY PARAMETERS (단위: cm, rad, sec)
+# GLOBAL DIRECTION PARAMETERS (단위: rad)
 # =========================================
-# 로봇의 현재 추정 자세 (시작점 기반 데드 레코닝)
-pose_x = 0.0      # cm
-pose_y = 0.0      # cm
-pose_theta = 0.0  # rad (로봇의 현재 헤딩)
+# 위치(x, y) 대신 로봇의 현재 전역 헤딩 각도만 관리합니다.
+pose_theta = 0.0  # rad (시작할 때 정면 방향을 0으로 기준 잡음)
 
-# 목표 지점 세팅: 시작 지점 정면 방향(X축)으로 직선거리 3.2m (320cm)
-GOAL_X = 320.0    # cm
-GOAL_Y = 0.0      # cm
+# [수정] 로봇이 유지하고자 하는 절대적인 '전역 목표 방향' (0.0 = 처음 출발할 때의 정면 방향)
+GLOBAL_GOAL_THETA = 0.0  # rad
 
-# 가중치 튜닝 변수
-GOAL_WEIGHT = 2.5 # [핵심] 목적지 방향 틈새에 줄 가중치
+# 가중치 튜닝 변수 (보내주신 값 유지)
+GOAL_WEIGHT = 2.5 # 목적지 방향 틈새에 줄 가중치
 
 # =========================================
 # STATE MACHINE
@@ -73,7 +70,7 @@ GOAL_WEIGHT = 2.5 # [핵심] 목적지 방향 틈새에 줄 가중치
 STATE_NORMAL  = 0
 STATE_REVERSE = 1
 STATE_ROTATE  = 2
-STATE_ARRIVED = 3  # 목표 도착(통과) 상태
+# STATE_ARRIVED 상태 제거 (종료 없이 계속 주행)
 
 state             = STATE_NORMAL
 maneuver_end_time = 0.0
@@ -90,7 +87,7 @@ ROTATE_W          = 0.9
 # =========================================
 scan_data = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
 prev_angle = 0.0
-last_odom_time = time.time() # 오도메트리 적분용 시간 기록
+last_odom_time = time.time() # 각도 적분용 시간 기록
 
 # =========================================
 # UTIL & FILTER
@@ -109,33 +106,21 @@ def apply_median_filter():
     scan_data[:] = filtered
 
 # =========================================
-# ODOMETRY UPDATE (데드 레코닝)
+# HEADING UPDATE (각도 누적 적분)
 # =========================================
-def update_odometry(v_mps, w_radps):
-    """실제 나간 속도 제어 명령을 바탕으로 가상 오도메트리를 누적합니다."""
-    global pose_x, pose_y, pose_theta, last_odom_time
+def update_heading(w_radps):
+    """위치 좌표 대신 로봇의 '현재 회전 각도(헤딩)'만 실시간 누적합니다."""
+    global pose_theta, last_odom_time
     now = time.time()
     dt = now - last_odom_time
     last_odom_time = now
     
-    if dt <= 0 or dt > 0.5: # 루프가 너무 늘어졌을 때의 예외 처리
+    if dt <= 0 or dt > 0.5:
         return
 
-    # m/s -> cm/s 변환
-    v_cmps = v_mps * 100.0
-
-    # 차동 구동 로봇 Kinematics 기반 단순 적분
-    if abs(w_radps) < 1e-5:
-        pose_x += v_cmps * math.cos(pose_theta) * dt
-        pose_y += v_cmps * math.sin(pose_theta) * dt
-    else:
-        # 회전 반경 반영 모델
-        r = v_cmps / w_radps
-        pose_x += r * (math.sin(pose_theta + w_radps * dt) - math.sin(pose_theta))
-        pose_y += r * (math.cos(pose_theta) - math.cos(pose_theta + w_radps * dt))
-        pose_theta += w_radps * dt
-
-    # 각도 정규화 (-PI ~ PI)
+    # 각속도를 적분하여 현재 전역 헤딩 계산
+    pose_theta += w_radps * dt
+    # -PI ~ PI 범위로 정규화
     pose_theta = (pose_theta + math.pi) % (2 * math.pi) - math.pi
 
 # =========================================
@@ -154,7 +139,7 @@ def inflate_obstacles(dists):
     return proc
 
 # =========================================
-# GAP SEARCH & SCORED WITH GOAL BIAS
+# GAP SEARCH & SCORED WITH DIRECTION BIAS
 # =========================================
 def find_gaps(proc_dists, angles):
     gaps = []
@@ -176,17 +161,11 @@ def score_gap(gap, proc_dists, angles):
     center_angle = angles[int(center_i)] # 로봇 정면 기준 틈새의 상대 각도 (도)
     avg_dist = np.mean(proc_dists[start : end + 1])
 
-    # 1. 목적지 방향과 현재 로봇 좌표 사이의 전역 각도 계산
-    dx = GOAL_X - pose_x
-    dy = GOAL_Y - pose_y
-    global_goal_angle = math.atan2(dy, dx) # 시작 월드 좌표계 기준 목적지 각도
-
-    # 2. 로봇 기준 상대적 목적지 각도 구하기 (단위: 도)
-    relative_goal_angle = math.degrees(global_goal_angle - pose_theta)
-    # -180 ~ 180도 범위 정규화
+    # [수정] 전역 목표 방향과 현재 로봇 헤딩의 차이로 '상대적 목표 각도' 구하기
+    relative_goal_angle = math.degrees(GLOBAL_GOAL_THETA - pose_theta)
     relative_goal_angle = (relative_goal_angle + 180) % 360 - 180
 
-    # 3. 이 틈새의 중심 각도가 '목적지 각도'와 얼마나 일치하는지 차이 계산
+    # 이 틈새의 중심 각도가 '목표 방향 각도'와 얼마나 일치하는지 차이 계산
     angle_diff = abs(center_angle - relative_goal_angle)
     angle_diff = (angle_diff + 180) % 360 - 180
     angle_diff = abs(angle_diff)
@@ -194,7 +173,7 @@ def score_gap(gap, proc_dists, angles):
     # 기본 Gap 점수 (너비 + 깊이 - 정면편향)
     base_score = (width * 0.5 + avg_dist * 1.2 - abs(center_angle) * 0.4)
     
-    # 목적지와의 각도 오차가 작을수록 높은 보너스 점수 부여
+    # 목표 방향(출발지 기준 정면)과 일치할수록 높은 보너스 점수 부여
     goal_bonus = (180.0 - angle_diff) / 180.0 * GOAL_WEIGHT
 
     return base_score + goal_bonus
@@ -277,9 +256,8 @@ def choose_avoid_direction():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("NAVIGATION START (Global Goal Aware & High-Speed Drive Mode)")
+print("NAVIGATION START (Global Direction Aware & Continuous Drive Mode)")
 try:
-    # 최초 실행 시간 동기화
     last_odom_time = time.time()
     v_active, w_active = 0.0, 0.0
 
@@ -301,21 +279,8 @@ try:
         apply_median_filter()
         now = time.time()
 
-        # [필수] 루프 주기마다 로봇의 오도메트리 위치를 누적 추정
-        update_odometry(v_active, w_active)
-
-        # 현재 위치와 전역 목적지 사이의 남은 거리 계산 (출력용)
-        dist_to_goal = math.hypot(GOAL_X - pose_x, GOAL_Y - pose_y)
-
-        # --- GOAL DISTANCE CHECK [수정] ---
-        # 로봇의 현재 X 좌표가 목적지 X 라인(320cm)을 넘어섰을 때 확실하게 미션 성공 및 멈춤 처리
-        if pose_x >= GOAL_X or state == STATE_ARRIVED:
-            state = STATE_ARRIVED
-            stop_robot()
-            v_active, w_active = 0.0, 0.0
-            print(f"🎉 GOAL PASSED! Position: ({pose_x:.1f}, {pose_y:.1f})")
-            time.sleep(0.5)
-            continue
+        # [수정] 회전 각속도(w)를 바탕으로 현재 로봇의 헤딩 각도(pose_theta)만 실시간 적분 업데이트
+        update_heading(w_active)
 
         # --- STATE MACHINE ---
         if state == STATE_REVERSE:
@@ -357,8 +322,8 @@ try:
         v_active, w_active = compute_cmd(target_angle)
         send_cmd(v_active, w_active)
 
-        # 디버그 터미널 출력에 현재 위치와 목적지까지 남은 거리 표시
-        print(f"Pos:({pose_x:5.1f},{pose_y:5.1f})| Rem:{dist_to_goal:5.1f}cm | TRG:{target_angle:5.1f}° | v:{v_active:.2f} | w:{w_active:.2f} | bias:{bias_label}")
+        # 디버그 출력에 현재 로봇의 전역 각도(Heading) 상황 표시
+        print(f"Heading:{math.degrees(pose_theta):6.1f}° | TRG:{target_angle:5.1f}° | v:{v_active:.2f} | w:{w_active:.2f} | bias:{bias_label}")
 
 except KeyboardInterrupt:
     print("STOP")
