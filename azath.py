@@ -24,64 +24,74 @@ print("LIDAR START")
 # =========================================
 # ROBOT PHYSICAL PARAMETER
 # =========================================
-ROBOT_RADIUS = 16.5   # ★ 좁은 맵 통과를 위해 마진을 타이트하게 압축 (18.0 -> 16.5 cm)
+ROBOT_RADIUS = 17.0   # 물리 반지름 + 측면 안전 마진 (cm)
 WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 
 # =========================================
-# DRIVE PARAMETER (소형 맵 고속 타겟)
+# DRIVE PARAMETER
 # =========================================
-MAX_SPEED    = 0.25   # 선속도 고속 유지 (m/s)
-MIN_SPEED    = 0.12   # 최소 속도 하한선
-MAX_W        = 1.4    # ★ 좁은 공간에서 빠른 칼치기를 위한 각속도 (rad/s)
-TURN_GAIN    = 2.0    # 조향 게인 적정화 (오버슈트 방지)
+MAX_SPEED    = 0.14   # 최대 선속도 (m/s)
+MIN_SPEED    = 0.11   # 최소 속도
+MAX_W        = 1.2    # 최대 각속도 (rad/s)
+TURN_GAIN    = 1.8    # 조향 게인
 
-SCAN_LIMIT   = 120    # ★ 맵 크기에 맞춰 쓸데없는 원거리 벽 노이즈 제거 (180 -> 120 cm)
-FRONT_RANGE  = 65     # 탐색 반경 (±65°)
-
-# =========================================
-# FILTER PARAMETER
-# =========================================
-EMA_ALPHA    = 0.35   
-MEDIAN_K     = 2
+SCAN_LIMIT   = 150    # 유효 인식 거리 (cm)
+FRONT_RANGE  = 60     # 탐색 반경 (±60°)
 
 # =========================================
-# SMOOTHING PARAMETER
+# FILTER & SMOOTHING PARAMETER
 # =========================================
-SMOOTHING_NORMAL = 0.50   
-SMOOTHING_DANGER = 0.15   
-DANGER_DIST      = 15     # ★ 맵 크기에 비례하여 위험 감지 거리 최적화 (18 -> 15 cm)
+EMA_ALPHA        = 0.3
+MEDIAN_K         = 2
+SMOOTHING_NORMAL = 0.55
+SMOOTHING_DANGER = 0.20
+DANGER_DIST      = 18
 
-# =========================================
-# GAP & INFLATION PARAMETER
-# =========================================
-SAFE_DIST          = 12   # ★ 좁은 문 통과 가능하도록 하한선 완화 (15 -> 12 cm)
-INFLATION_MAX_DIST = 28   # ★ 맵이 작으므로 너무 먼 거리는 팽창에서 제외 (35 -> 28 cm)
-
-FRONT_CLEAR_DIST   = 18   # ★ 고속 주행 중 전방 클리어 판단 거리 컴팩트화 (22 -> 18 cm)
+SAFE_DIST          = 17
+INFLATION_MAX_DIST = 25
+FRONT_CLEAR_DIST   = 23
 FRONT_CLEAR_RANGE  = 15
 
 # =========================================
-# STATE MACHINE (좁은 공간 탈출 전용)
+# [추가] GLOBAL GOAL & ODOMETRY PARAMETERS (단위: cm, rad, sec)
+# =========================================
+# 로봇의 현재 추정 자세 (시작점 기반 데드 레코닝)
+pose_x = 0.0      # cm
+pose_y = 0.0      # cm
+pose_theta = 0.0  # rad (로봇의 현재 헤딩)
+
+# 목표 지점 세팅: 시작 지점 정면 방향(X축)으로 직선거리 3.2m (320cm)
+GOAL_X = 320.0    # cm
+GOAL_Y = 0.0      # cm
+GOAL_THRESHOLD = 15.0 # 목적지 주변 15cm 이내 진입 시 도달로 판단
+
+# 가중치 튜닝 변수
+GOAL_WEIGHT = 2.5 # [핵심] 목적지 방향 틈새에 줄 가중치 (높을수록 장애물보다 목적지를 향해 과감해짐)
+
+# =========================================
+# STATE MACHINE
 # =========================================
 STATE_NORMAL  = 0
 STATE_REVERSE = 1
 STATE_ROTATE  = 2
+STATE_ARRIVED = 3  # [추가] 목표 도착 상태
 
 state             = STATE_NORMAL
 maneuver_end_time = 0.0
 rotate_dir        = 1
 
-EMERGENCY_DIST    = 10    # ★ 벽면 충돌 방지와 주행 공간 확보의 밸런스 (12 -> 10 cm)
-REVERSE_DURATION  = 0.22  # ★ 뒤쪽 벽에 박지 않도록 후진 시간 소폭 단축 (0.25 -> 0.22 s)
-ROTATE_DURATION   = 0.65  # ★ 좁은 구역에서 빠르게 돌고 빠져나가기 위해 단축 (0.80 -> 0.65 s)
-REVERSE_SPEED     = -0.12 
-ROTATE_W          = 1.3   # ★ 제자리 회전 민첩성 극대화 (1.2 -> 1.3 rad/s)
+EMERGENCY_DIST    = 6
+REVERSE_DURATION  = 0.18
+ROTATE_DURATION   = 1.00
+REVERSE_SPEED     = -0.10
+ROTATE_W          = 0.9
 
 # =========================================
 # STATE DATA
 # =========================================
-scan_data  = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
+scan_data = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
 prev_angle = 0.0
+last_odom_time = time.time() # 오도메트리 적분용 시간 기록
 
 # =========================================
 # UTIL & FILTER
@@ -100,6 +110,36 @@ def apply_median_filter():
     scan_data[:] = filtered
 
 # =========================================
+# [추가] ODOMETRY UPDATE (데드 레코닝)
+# =========================================
+def update_odometry(v_mps, w_radps):
+    """실제 나간 속도 제어 명령을 바탕으로 가상 오도메트리를 누적합니다."""
+    global pose_x, pose_y, pose_theta, last_odom_time
+    now = time.time()
+    dt = now - last_odom_time
+    last_odom_time = now
+    
+    if dt <= 0 or dt > 0.5: # 루프가 너무 늘어졌을 때의 예외 처리
+        return
+
+    # m/s -> cm/s 변환
+    v_cmps = v_mps * 100.0
+
+    # 차동 구동 로봇 Kinematics 기반 단순 적분
+    if abs(w_radps) < 1e-5:
+        pose_x += v_cmps * math.cos(pose_theta) * dt
+        pose_y += v_cmps * math.sin(pose_theta) * dt
+    else:
+        # 회전 반경 반영 모델
+        r = v_cmps / w_radps
+        pose_x += r * (math.sin(pose_theta + w_radps * dt) - math.sin(pose_theta))
+        pose_y += r * (math.cos(pose_theta) - math.cos(pose_theta + w_radps * dt))
+        pose_theta += w_radps * dt
+
+    # 각도 정규화 (-PI ~ PI)
+    pose_theta = (pose_theta + math.pi) % (2 * math.pi) - math.pi
+
+# =========================================
 # OBSTACLE INFLATION
 # =========================================
 def inflate_obstacles(dists):
@@ -108,17 +148,14 @@ def inflate_obstacles(dists):
         d = dists[i]
         if d < 5 or d >= INFLATION_MAX_DIST:
             continue
-        try:
-            alpha = math.degrees(math.asin(min(ROBOT_RADIUS / d, 1.0)))
-        except ValueError:
-            alpha = 45.0
+        alpha = math.degrees(math.asin(min(ROBOT_RADIUS / d, 1.0)))
         start_idx = max(0, int(i - alpha))
         end_idx   = min(len(dists) - 1, int(i + alpha))
         proc[start_idx : end_idx + 1] = 0.0
     return proc
 
 # =========================================
-# GAP SEARCH
+# GAP SEARCH & SCORED WITH GOAL BIAS
 # =========================================
 def find_gaps(proc_dists, angles):
     gaps = []
@@ -134,12 +171,35 @@ def find_gaps(proc_dists, angles):
     return gaps
 
 def score_gap(gap, proc_dists, angles):
+    """[수정] 기존 Gap 점수 판정에 전역 목표지점 가중치를 결합합니다."""
     start, end = gap
     width = end - start
     center_i = (start + end) / 2.0
-    center_angle = angles[int(center_i)]
+    center_angle = angles[int(center_i)] # 로봇 정면 기준 틈새의 상대 각도 (도)
     avg_dist = np.mean(proc_dists[start : end + 1])
-    return (width * 0.5 + avg_dist * 1.2 - abs(center_angle) * 0.6)
+
+    # 1. 목적지 방향과 현재 로봇 좌표 사이의 전역 각도 계산
+    dx = GOAL_X - pose_x
+    dy = GOAL_Y - pose_y
+    global_goal_angle = math.atan2(dy, dx) # 시작 월드 좌표계 기준 목적지 각도
+
+    # 2. 로봇 기준 상대적 목적지 각도 구하기 (단위: 도)
+    relative_goal_angle = math.degrees(global_goal_angle - pose_theta)
+    # -180 ~ 180도 범위 정규화
+    relative_goal_angle = (relative_goal_angle + 180) % 360 - 180
+
+    # 3. 이 틈새의 중심 각도가 '목적지 각도'와 얼마나 일치하는지 차이 계산
+    angle_diff = abs(center_angle - relative_goal_angle)
+    angle_diff = (angle_diff + 180) % 360 - 180
+    angle_diff = abs(angle_diff)
+
+    # 기본 Gap 점수 (너비 + 깊이 - 정면편향)
+    base_score = (width * 0.5 + avg_dist * 1.2 - abs(center_angle) * 0.4)
+    
+    # [핵심] 목적지와의 각도 오차가 작을수록 높은 보너스 점수 부여 (최대 GOAL_WEIGHT 점 차감/가산)
+    goal_bonus = (180.0 - angle_diff) / 180.0 * GOAL_WEIGHT
+
+    return base_score + goal_bonus
 
 def select_best_gap(gaps, proc_dists, angles):
     best_gap, best_score = None, -1e9
@@ -149,81 +209,60 @@ def select_best_gap(gaps, proc_dists, angles):
             best_score, best_gap = s, gap
     return best_gap
 
-def find_best_index_in_gap(best_gap, proc_dists, angles):
-    start, end = best_gap
-    best_idx = int((start + end) / 2)
-    max_local_score = -1e9
-    for i in range(start, end + 1):
-        dist  = proc_dists[i]
-        angle = angles[i]
-        left_margin  = i - start
-        right_margin = end - i
-        margin = min(left_margin, right_margin)
-        
-        # 좁은 공간 중앙 정렬 가중치 유지
-        local_score = (dist * 1.0) + (margin * 1.5) - (abs(angle) * 1.5)
-        if local_score > max_local_score:
-            max_local_score = local_score
-            best_idx = i
-    return best_idx
-
 # =========================================
 # PLANNING
 # =========================================
 def find_best_direction(smoothing):
     global prev_angle
-    angles     = np.arange(-FRONT_RANGE, FRONT_RANGE + 1)
-    dists      = np.array([scan_data[a % 360] for a in angles], dtype=np.float32)
+    angles = np.arange(-FRONT_RANGE, FRONT_RANGE + 1)
+    dists = np.array([scan_data[a % 360] for a in angles], dtype=np.float32)
     proc_dists = inflate_obstacles(dists)
-    gaps       = find_gaps(proc_dists, angles)
+    gaps = find_gaps(proc_dists, angles)
 
     if not gaps: return None
 
     best_gap = select_best_gap(gaps, proc_dists, angles)
-    best_idx = find_best_index_in_gap(best_gap, proc_dists, angles)
-    gap_angle = float(angles[best_idx])
+    start, end = best_gap
+    gap_angle = float(angles[int((start + end) / 2.0)])
 
-    front_clear = float(np.min(
-        scan_data[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]
-    ))
-
-    CRITICAL_DIST = EMERGENCY_DIST * 2   # 20cm
-
+    front_clear = float(np.min(scan_data[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]))
+    
     if front_clear > FRONT_CLEAR_DIST:
-        target     = gap_angle * 0.2
+        target = gap_angle * 0.2
         bias_label = "STRAIGHT"
-    elif front_clear > CRITICAL_DIST:
-        target     = gap_angle * 1.0
-        smoothing  = SMOOTHING_DANGER
+    elif front_clear > EMERGENCY_DIST * 2:
+        target = gap_angle * 1.0               
+        smoothing = SMOOTHING_DANGER           
         bias_label = "GAP"
     else:
-        target     = gap_angle * 1.0
-        smoothing  = 0.0
+        target = gap_angle * 1.0
+        smoothing = 0.0                        
         bias_label = "CRITICAL"
 
-    target     = prev_angle * smoothing + target * (1.0 - smoothing)
+    target = prev_angle * smoothing + target * (1.0 - smoothing)
     prev_angle = target
+    
     return target, bias_label, front_clear
 
 # =========================================
 # CONTROL
 # =========================================
-ALIGN_THRESHOLD = 15   
+ALIGN_THRESHOLD = 10
 
 def compute_cmd(target_angle):
     w = math.radians(target_angle) * TURN_GAIN
     w = float(np.clip(w, -MAX_W, MAX_W))
 
     search_indices = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
-    relevant_min   = float(np.min(scan_data[search_indices]))
+    relevant_min = float(np.min(scan_data[search_indices]))
 
-    # 조향각이 클 때 급감속 메커니즘 고수
     if abs(target_angle) > ALIGN_THRESHOLD:
-        return 0.06, w   
+        v = 0.05 if relevant_min > 20.0 else 0.0
+        return v, w
 
-    # 장애물 감속 스케일링 분모 최적화 (35.0 -> 26.0)
-    obstacle_scale = min(relevant_min / 26.0, 1.0) 
-    speed          = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
+    obstacle_scale = min(relevant_min / 25.0, 1.0)
+    speed = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
+
     return speed, w
 
 def send_cmd(v, w):
@@ -240,8 +279,12 @@ def choose_avoid_direction():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("NAVIGATION START")
+print("NAVIGATION START (Global Goal Aware & High-Speed Drive Mode)")
 try:
+    # 최초 실행 시간 동기화
+    last_odom_time = time.time()
+    v_active, w_active = 0.0, 0.0
+
     while True:
         raw = lidar_ser.read(5)
         if len(raw) != 5: continue
@@ -251,7 +294,7 @@ try:
         if (raw[1] & 0x01) != 1: continue
         if (raw[0] >> 2) < 3: continue
 
-        angle   = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0) % 360
+        angle = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0) % 360
         dist_cm = (raw[3] | (raw[4] << 8)) / 40.0
         if 3 < dist_cm < SCAN_LIMIT:
             apply_ema(angle, dist_cm)
@@ -260,15 +303,32 @@ try:
         apply_median_filter()
         now = time.time()
 
+        # [필수] 루프 주기마다 로봇의 오도메트리 위치를 누적 추정
+        update_odometry(v_active, w_active)
+
+        # --- GOAL DISTANCE CHECK ---
+        dist_to_goal = math.hypot(GOAL_X - pose_x, GOAL_Y - pose_y)
+        if dist_to_goal < GOAL_THRESHOLD or state == STATE_ARRIVED:
+            state = STATE_ARRIVED
+            stop_robot()
+            v_active, w_active = 0.0, 0.0
+            print(f"🎉 GOAL ARRIVED! Position: ({pose_x:.1f}, {pose_y:.1f})")
+            time.sleep(0.5)
+            continue
+
         # --- STATE MACHINE ---
         if state == STATE_REVERSE:
-            if now < maneuver_end_time: send_cmd(REVERSE_SPEED, 0.0)
+            if now < maneuver_end_time: 
+                v_active, w_active = REVERSE_SPEED, 0.0
+                send_cmd(v_active, w_active)
             else:
                 state, maneuver_end_time = STATE_ROTATE, now + ROTATE_DURATION
             continue
 
         if state == STATE_ROTATE:
-            if now < maneuver_end_time: send_cmd(0.0, ROTATE_W * rotate_dir)
+            if now < maneuver_end_time: 
+                v_active, w_active = 0.0, ROTATE_W * rotate_dir
+                send_cmd(v_active, w_active)
             else:
                 rotate_dir *= -1
                 state, prev_angle = STATE_NORMAL, 0.0
@@ -278,26 +338,26 @@ try:
         # --- STATE_NORMAL ---
         front_min = float(np.min(scan_data[np.arange(-10, 11) % 360]))
         if front_min < EMERGENCY_DIST:
-            rotate_dir        = choose_avoid_direction()
-            state             = STATE_REVERSE
-            maneuver_end_time = now + REVERSE_DURATION
-            send_cmd(REVERSE_SPEED, 0.0)
+            rotate_dir = choose_avoid_direction()
+            state, maneuver_end_time = STATE_REVERSE, now + REVERSE_DURATION
+            v_active, w_active = REVERSE_SPEED, 0.0
+            send_cmd(v_active, w_active)
             continue
 
         smoothing = SMOOTHING_DANGER if front_min < DANGER_DIST else SMOOTHING_NORMAL
-        result    = find_best_direction(smoothing)
+        result = find_best_direction(smoothing)
 
         if result is None:
-            rotate_dir        = choose_avoid_direction()
-            state             = STATE_REVERSE
-            maneuver_end_time = now + REVERSE_DURATION
+            rotate_dir = choose_avoid_direction()
+            state, maneuver_end_time = STATE_REVERSE, now + REVERSE_DURATION
             continue
 
         target_angle, bias_label, front_clear = result
-        v, w = compute_cmd(target_angle)
-        send_cmd(v, w)
+        v_active, w_active = compute_cmd(target_angle)
+        send_cmd(v_active, w_active)
 
-        print(f"TRG:{target_angle:5.1f}° | v:{v:.2f} | w:{w:.2f} | f_min:{front_min:.1f} | bias:{bias_label}")
+        # 디버그 터미널 출력에 현재 위치와 목적지까지 남은 거리 표시 추가
+        print(f"Pos:({pose_x:5.1f},{pose_y:5.1f})| Rem:{dist_to_goal:5.1f}cm | TRG:{target_angle:5.1f}° | v:{v_active:.2f} | w:{w_active:.2f} | bias:{bias_label}")
 
 except KeyboardInterrupt:
     print("STOP")
