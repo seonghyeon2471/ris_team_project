@@ -19,14 +19,14 @@ SAFETY_WALL_DIST = 250
 MAX_OBSTACLE_DIST = 2200
 
 TIME_LIMIT = 58.0
-INITIAL_STRAIGHT_TIME = 2.0   # 출발 후 2초 동안 뒤쪽 벽 무시
+INITIAL_STRAIGHT_TIME = 2.0
 
-MEMORY_SCANS = 10             # ← 기억할 최근 스캔 개수 (8~12 추천)
+MEMORY_SCANS = 10
 # ================================================
 
 ser_lidar = None
 ser_arduino = None
-scan_memory = deque(maxlen=MEMORY_SCANS)   # 기억하는 메모리
+scan_memory = deque(maxlen=MEMORY_SCANS)
 
 def send_command(v: float, w: float):
     global ser_arduino
@@ -53,7 +53,6 @@ def parse_raw_scan(raw_bytes):
     return scan_data
 
 def merge_memory():
-    """최근 스캔들을 합쳐서 누적 맵 생성 (더 가까운 거리 우선)"""
     merged = {}
     for scan in scan_memory:
         for ang, info in scan.items():
@@ -63,14 +62,17 @@ def merge_memory():
 
 def wall_avoidance(scan_data, elapsed_time):
     if elapsed_time < INITIAL_STRAIGHT_TIME:
-        return 0.0   # 출발 초기 2초는 뒤쪽 벽 무시
+        return 0.0
 
     if not scan_data:
         return 0.0
 
-    left_wall = min((d for ang, d in scan_data.items() if -120 < ang < -40), default=9999)
-    right_wall = min((d for ang, d in scan_data.items() if 40 < ang < 120), default=9999)
-    rear_wall = min((d for ang, d in scan_data.items() if abs(ang) > 140), default=9999)
+    # 좌측 벽
+    left_wall = min((info["d_mm"] for ang, info in scan_data.items() if -120 < ang < -40), default=9999)
+    # 우측 벽
+    right_wall = min((info["d_mm"] for ang, info in scan_data.items() if 40 < ang < 120), default=9999)
+    # 후방 벽
+    rear_wall = min((info["d_mm"] for ang, info in scan_data.items() if abs(ang) > 140), default=9999)
 
     if left_wall < SAFETY_WALL_DIST:
         print(f"⚠️ 좌측 벽 가까움 ({left_wall:.0f}mm) → 우회전")
@@ -88,9 +90,8 @@ def find_best_gap_and_steering(scan_data, elapsed_time):
     if wall_steer is not None:
         return wall_steer, 0
 
-    # 누적 메모리 + 현재 스캔 합치기
     merged = merge_memory()
-    current_merged = {**merged, **scan_data}   # 현재 스캔이 더 우선
+    current_merged = {**merged, **scan_data}
 
     if not current_merged or len(current_merged) < 30:
         return 0.0, 9999
