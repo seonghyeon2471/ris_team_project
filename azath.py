@@ -24,7 +24,7 @@ print("LIDAR START")
 # =========================================
 # ROBOT PHYSICAL PARAMETER
 # =========================================
-ROBOT_RADIUS = 17.0   # 물리 반지름 + 측면 안전 마진 (cm)
+ROBOT_RADIUS = 17.0   # 일반 주행 시 안전 반지름 (cm)
 WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 
 # =========================================
@@ -32,7 +32,7 @@ WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 # =========================================
 MAX_SPEED    = 0.14   # 최대 선속도 (m/s)
 MIN_SPEED    = 0.11   # 최소 속도 하한선 유지
-MAX_W        = 0.8    # 최대 각속도 (rad/s)
+MAX_W        = 0.8    # 기본 최대 각속도 (rad/s)
 TURN_GAIN    = 1.8    # 조향 게인
 
 SCAN_LIMIT   = 150    # 유효 인식 거리 (cm)
@@ -118,22 +118,34 @@ def apply_median_filter():
     scan_data[:] = filtered
 
 # =========================================
-# OBSTACLE INFLATION
+# DYNAMIC OBSTACLE INFLATION (동적 부풀리기)
 # =========================================
-def inflate_obstacles(dists):
+def inflate_obstacles_dynamic(dists, angles):
+    """
+    [핵심 수정] 틈새가 목적지 방향과 일치하고 차체 통과가 가능해 보인다면
+    순간적으로 부풀리기 반지름 마진을 축소하여 숨은 통로(Gap)를 열어줍니다.
+    """
     proc = dists.copy()
     for i in range(len(dists)):
         d = dists[i]
         if d < 5 or d >= INFLATION_MAX_DIST:
             continue
-        alpha     = math.degrees(math.asin(min(ROBOT_RADIUS / d, 1.0)))
+            
+        angle = angles[i]
+        current_radius = ROBOT_RADIUS  # 기본 17.0cm
+        
+        # 조건: 1) 정면 목적지 방향(±20도 이내)이고 2) 실측 거리가 최소 한계치(13cm) 이상인 경우
+        if abs(angle - GOAL_ANGLE) <= 20 and d > 13.0:
+            current_radius = 11.5  # 로봇 순수 물리 크기에 가깝게 마진 축소
+            
+        alpha     = math.degrees(math.asin(min(current_radius / d, 1.0)))
         start_idx = max(0, int(i - alpha))
         end_idx   = min(len(dists) - 1, int(i + alpha))
         proc[start_idx : end_idx + 1] = 0.0
     return proc
 
 # =========================================
-# GAP SEARCH & SCORE (목적지 가중치 융합)
+# GAP SEARCH & SCORE
 # =========================================
 def find_gaps(proc_dists, angles):
     gaps      = []
@@ -172,11 +184,6 @@ def select_best_gap(gaps, proc_dists, angles):
     return best_gap
 
 def find_best_index_in_gap(best_gap, proc_dists, angles):
-    """
-    [핵심 수정] 선택된 Gap 내부 인덱스를 조사할 때 목적지 가중치(Goal Weight)를 결합합니다.
-    외통수 길이나 넓은 대각선 갭이 선택되었을 때, 무작정 통로 한가운데로 돌진하지 않고
-    통로 내부 범위 중 최대한 목적지(GOAL_ANGLE=0°)와 가까운 쪽의 안전한 길목을 타겟으로 잡습니다.
-    """
     start, end      = best_gap
     best_idx        = int((start + end) / 2)
     max_local_score = -1e9
@@ -189,11 +196,10 @@ def find_best_index_in_gap(best_gap, proc_dists, angles):
         right_margin = end - i
         margin       = min(left_margin, right_margin)
         
-        # 🎯 각 레이(Ray)의 각도가 목적지 방향(0도)과 일치할수록 보너스 점수 가산
+        # 목적지 가중치 결합: 정면(0도)과 가까울수록 가점 부여
         goal_diff_local = abs(angle - GOAL_ANGLE)
         goal_bonus_local = max(0.0, (FRONT_RANGE - goal_diff_local) / FRONT_RANGE) * 12.0
         
-        # 기존 스코어 수식에 목적지 보너스를 더해 융합
         local_score  = (dist * 1.0) + (margin * 0.8) - (abs(angle) * 1.5) + goal_bonus_local
         
         if local_score > max_local_score:
@@ -223,7 +229,9 @@ def find_best_direction(smoothing):
     global prev_angle
     angles     = np.arange(-FRONT_RANGE, FRONT_RANGE + 1)
     dists      = np.array([scan_data[a % 360] for a in angles], dtype=np.float32)
-    proc_dists = inflate_obstacles(dists)
+    
+    # [수정] 동적 팽창 함수 호출로 변경하여 틈새 데이터 활성화
+    proc_dists = inflate_obstacles_dynamic(dists, angles)
     gaps       = find_gaps(proc_dists, angles)
 
     if not gaps: return None
@@ -255,18 +263,21 @@ def find_best_direction(smoothing):
     return target, bias_label, front_clear
 
 # =========================================
-# CONTROL (조향각 정렬 상태에 따른 Pivot Turn 구조 강화)
+# CONTROL (좁은 틈새 진입용 순간 선회 제한 완화)
 # =========================================
 ALIGN_THRESHOLD = 10
 
 def compute_cmd(target_angle):
+    # 🎯 [수정] 좁은 틈새 진입 조향 시, 둔하게 도는 현상을 막기 위해 최대 각속도 한계를 일시적으로 완화 (0.8 -> 1.1)
+    dynamic_max_w = 1.1 if abs(target_angle) > ALIGN_THRESHOLD else MAX_W
+    
     w = math.radians(target_angle) * TURN_GAIN
-    w = float(np.clip(w, -MAX_W, MAX_W))
+    w = float(np.clip(w, -dynamic_max_w, dynamic_max_w))
 
     search_indices = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     relevant_min   = float(np.min(scan_data[search_indices]))
 
-    # 목표 조향각이 정렬 한계치보다 크다면, 선회 중 측면 벽을 긁지 않도록 제자리 회전(Pivot) 유도
+    # 조향 타겟이 틀어져 있다면 제자리 선회(Pivot Turn)로 전환하여 측면 긁힘 방지
     if abs(target_angle) > ALIGN_THRESHOLD:
         return 0.0, w
 
@@ -386,7 +397,7 @@ try:
             if stuck_counter >= STUCK_THRESHOLD:
                 rotate_dir        = choose_avoid_direction()
                 state             = STATE_ROTATE
-                maneuver_end_time = now + (ROTATE_DURATION * 2.0)  # 탈출 회전 시간 증폭
+                maneuver_end_time = now + (ROTATE_DURATION * 2.0)
                 stuck_counter     = 0
                 print("  🔥🔥 [CRITICAL STUCK] 사방 고립! 180도 회전 탈출 시도! 🔥🔥")
             else:
