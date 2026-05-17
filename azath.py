@@ -24,19 +24,19 @@ print("LIDAR START")
 # =========================================
 # ROBOT PHYSICAL PARAMETER
 # =========================================
-ROBOT_RADIUS = 17.0   # 물리 반지름 + 측면 안전 마진 (cm)
-WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
+ROBOT_RADIUS = 17.0
+WHEEL_BASE   = 17.0
 
 # =========================================
 # DRIVE PARAMETER
 # =========================================
-MAX_SPEED    = 0.14   # 최대 선속도 (m/s)
-MIN_SPEED    = 0.11   # 최소 속도 하한선
-MAX_W        = 1.0    # 최대 각속도 (rad/s)
-TURN_GAIN    = 1.8    # 조향 게인
+MAX_SPEED    = 0.14
+MIN_SPEED    = 0.11
+MAX_W        = 0.8
+TURN_GAIN    = 1.8
 
-SCAN_LIMIT   = 150    # 유효 인식 거리 (cm)
-FRONT_RANGE  = 65     # 탐색 반경 (±65°)
+SCAN_LIMIT   = 150
+FRONT_RANGE  = 65
 
 # =========================================
 # FILTER PARAMETER
@@ -49,44 +49,47 @@ MEDIAN_K     = 2
 # =========================================
 SMOOTHING_NORMAL = 0.55
 SMOOTHING_DANGER = 0.20
-DANGER_DIST      = 15
+DANGER_DIST      = 12
 
 # =========================================
 # GAP & INFLATION PARAMETER
 # =========================================
-SAFE_DIST          = 8
+SAFE_DIST          = 14
 INFLATION_MAX_DIST = 25
 
-FRONT_CLEAR_DIST   = 12   # ★ 수정: 12 → 23 (CRITICAL_DIST=12와 달라야 3단계 정상 작동)
-FRONT_CLEAR_RANGE  = 8
+FRONT_CLEAR_DIST   = 23
+FRONT_CLEAR_RANGE  = 15
 
 # =========================================
-# ★ GOAL PARAMETER
+# GOAL PARAMETER
 # =========================================
-GOAL_ANGLE  = 0      # 목적지 방향 (정면 = 0°, 맵 구조상 골은 항상 정면)
-GOAL_WEIGHT = 1.5    # 목적지 방향 가산점 가중치
-#
-# 효과:
-#   goal_bonus = (1 - gap방향과 골방향 차이 / FRONT_RANGE) * GOAL_WEIGHT
-#   → 골 방향에 가까운 Gap일수록 최대 1.5점 추가
-#   → 넓지만 측면인 Gap보다 좁아도 정면인 Gap을 우선 선택
+GOAL_ANGLE  = 0
+GOAL_WEIGHT = 1.5
 
 # =========================================
 # STATE MACHINE
 # =========================================
-STATE_NORMAL  = 0
-STATE_REVERSE = 1
-STATE_ROTATE  = 2
+STATE_NORMAL   = 0
+STATE_REVERSE  = 1
+STATE_ROTATE   = 2
+STATE_REORIENT = 3   # ★ 추가: 탈출 후 목적지 방향 재정렬
 
 state             = STATE_NORMAL
 maneuver_end_time = 0.0
 rotate_dir        = 1
 
 EMERGENCY_DIST    = 6
-REVERSE_DURATION  = 0.20
+REVERSE_DURATION  = 0.18
 ROTATE_DURATION   = 1.00
 REVERSE_SPEED     = -0.10
 ROTATE_W          = 0.9
+
+# ★ REORIENT 파라미터
+REORIENT_W          = 0.6    # 재정렬 중 각속도 (천천히 회전)
+REORIENT_CLEAR_DIST = 25     # 이 거리 이상 전방이 열리면 재정렬 완료
+REORIENT_TIMEOUT    = 4.0    # 최대 재정렬 시간 (초) — 무한 회전 방지
+reorient_dir        = 1      # 재정렬 회전 방향
+reorient_start_time = 0.0    # 재정렬 시작 시각
 
 # =========================================
 # STATE DATA
@@ -98,7 +101,9 @@ prev_angle = 0.0
 # UTIL & FILTER
 # =========================================
 def apply_ema(angle, new_dist_cm):
-    scan_data[angle] = ((1.0 - EMA_ALPHA) * scan_data[angle] + EMA_ALPHA * new_dist_cm)
+    scan_data[angle] = (
+        (1.0 - EMA_ALPHA) * scan_data[angle] + EMA_ALPHA * new_dist_cm
+    )
 
 def apply_median_filter():
     k      = MEDIAN_K
@@ -149,16 +154,13 @@ def score_gap(gap, proc_dists, angles):
     center_angle = angles[int(center_i)]
     avg_dist     = np.mean(proc_dists[start : end + 1])
 
-    # ★ 목적지 방향 가산점
-    #   gap 중심이 GOAL_ANGLE(0°)에 가까울수록 최대 GOAL_WEIGHT(1.5)점 추가
-    #   goal_diff=0° → bonus=1.5 / goal_diff=65° → bonus=0.0
     goal_diff  = abs(center_angle - GOAL_ANGLE)
     goal_bonus = max(0.0, (FRONT_RANGE - goal_diff) / FRONT_RANGE) * GOAL_WEIGHT
 
     return (width    * 0.5
             + avg_dist * 1.2
             - abs(center_angle) * 0.6
-            + goal_bonus)                  # ★ 가산점 추가
+            + goal_bonus)
 
 def select_best_gap(gaps, proc_dists, angles):
     best_gap, best_score = None, -1e9
@@ -185,6 +187,23 @@ def find_best_index_in_gap(best_gap, proc_dists, angles):
     return best_idx
 
 # =========================================
+# ★ REORIENT 방향 결정
+#   전방 반구(±90°)에서 어느 쪽이 더 열려있는지 판단하여
+#   목적지(0°) 방향이 빠르게 열리는 쪽으로 회전
+# =========================================
+def choose_reorient_direction():
+    # 왼쪽(1~90°) vs 오른쪽(270~359°) 전방 반구 평균 거리 비교
+    left_avg  = float(np.mean(scan_data[1:91]))
+    right_avg = float(np.mean(scan_data[270:360]))
+
+    if left_avg >= right_avg:
+        print(f"  [REORIENT DIR] LEFT  (L:{left_avg:.1f}cm R:{right_avg:.1f}cm)")
+        return 1    # 좌회전 → 열린 공간이 왼쪽에 있으므로 왼쪽으로 돌아서 정면 확보
+    else:
+        print(f"  [REORIENT DIR] RIGHT (L:{left_avg:.1f}cm R:{right_avg:.1f}cm)")
+        return -1   # 우회전
+
+# =========================================
 # PLANNING
 # =========================================
 def find_best_direction(smoothing):
@@ -204,9 +223,7 @@ def find_best_direction(smoothing):
         scan_data[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]
     ))
 
-    # ★ 수정: CRITICAL_DIST=12, FRONT_CLEAR_DIST=23 으로 분리
-    #         → 23~12cm 구간에서 GAP 단계 정상 작동
-    CRITICAL_DIST = EMERGENCY_DIST * 2   # 6×2 = 12cm
+    CRITICAL_DIST = EMERGENCY_DIST * 2   # 12cm
 
     if front_clear > FRONT_CLEAR_DIST:   # > 23cm : 직진 편향
         target     = gap_angle * 0.2
@@ -237,7 +254,6 @@ def compute_cmd(target_angle):
     relevant_min   = float(np.min(scan_data[search_indices]))
 
     if abs(target_angle) > ALIGN_THRESHOLD:
-        # 선회 중 항상 v=0.05 유지 (제자리 선회 시 뒷바퀴 충돌 방지)
         return 0.05, w
 
     obstacle_scale = min(relevant_min / 25.0, 1.0)
@@ -253,7 +269,12 @@ def stop_robot():
 def choose_avoid_direction():
     left_avg  = float(np.mean(scan_data[1:90]))
     right_avg = float(np.mean(scan_data[271:360]))
-    return 1 if left_avg >= right_avg else -1
+    if left_avg >= right_avg:
+        print(f"  [AVOID DIR] LEFT  (L:{left_avg:.1f}cm R:{right_avg:.1f}cm)")
+        return 1
+    else:
+        print(f"  [AVOID DIR] RIGHT (L:{left_avg:.1f}cm R:{right_avg:.1f}cm)")
+        return -1
 
 # =========================================
 # MAIN LOOP
@@ -278,28 +299,74 @@ try:
         apply_median_filter()
         now = time.time()
 
-        # --- STATE MACHINE ---
+        # =================================
+        # STATE MACHINE
+        # =================================
+
+        # ── STATE_REVERSE ──
         if state == STATE_REVERSE:
-            if now < maneuver_end_time: send_cmd(REVERSE_SPEED, 0.0)
+            if now < maneuver_end_time:
+                send_cmd(REVERSE_SPEED, 0.0)
+                print(f"  [REVERSE] remaining:{maneuver_end_time - now:.2f}s")
             else:
-                state, maneuver_end_time = STATE_ROTATE, now + ROTATE_DURATION
+                state             = STATE_ROTATE
+                maneuver_end_time = now + ROTATE_DURATION
+                print(f"  [ROTATE START] dir:{'+' if rotate_dir > 0 else '-'}")
             continue
 
+        # ── STATE_ROTATE ──
         if state == STATE_ROTATE:
-            if now < maneuver_end_time: send_cmd(0.0, ROTATE_W * rotate_dir)
+            if now < maneuver_end_time:
+                send_cmd(0.0, ROTATE_W * rotate_dir)
+                print(f"  [ROTATE] remaining:{maneuver_end_time - now:.2f}s")
             else:
-                rotate_dir *= -1
-                state, prev_angle = STATE_NORMAL, 0.0
-                for a in range(-45, 46): scan_data[a % 360] = float(SCAN_LIMIT)
+                # ★ ROTATE 완료 → REORIENT 진입 (기존: 바로 NORMAL)
+                rotate_dir         *= -1
+                reorient_dir        = choose_reorient_direction()
+                reorient_start_time = now
+                state               = STATE_REORIENT
+                prev_angle          = 0.0
+                for a in range(-45, 46):
+                    scan_data[a % 360] = float(SCAN_LIMIT)
+                print(f"  [REORIENT START] dir:{'+' if reorient_dir > 0 else '-'}")
             continue
 
-        # --- STATE_NORMAL ---
+        # ── ★ STATE_REORIENT : 목적지 방향 재정렬 ──
+        if state == STATE_REORIENT:
+            elapsed     = now - reorient_start_time
+            front_clear = float(np.min(
+                scan_data[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]
+            ))
+
+            # 종료 조건 ①: 전방이 충분히 열림
+            if front_clear > REORIENT_CLEAR_DIST:
+                state = STATE_NORMAL
+                print(f"  [REORIENT→NORMAL] 전방 개방 ({front_clear:.1f}cm) 재정렬 완료")
+                continue
+
+            # 종료 조건 ②: 타임아웃 (무한 회전 방지)
+            if elapsed > REORIENT_TIMEOUT:
+                state = STATE_NORMAL
+                print(f"  [REORIENT→NORMAL] 타임아웃 ({elapsed:.1f}s) 강제 복귀")
+                continue
+
+            # 재정렬 중: 목적지 방향 쪽으로 천천히 회전
+            send_cmd(0.0, REORIENT_W * reorient_dir)
+            print(
+                f"  [REORIENT] elapsed:{elapsed:.1f}s "
+                f"front:{front_clear:.1f}cm "
+                f"dir:{'+' if reorient_dir > 0 else '-'}"
+            )
+            continue
+
+        # ── STATE_NORMAL ──
         front_min = float(np.min(scan_data[np.arange(-10, 11) % 360]))
         if front_min < EMERGENCY_DIST:
             rotate_dir        = choose_avoid_direction()
             state             = STATE_REVERSE
             maneuver_end_time = now + REVERSE_DURATION
             send_cmd(REVERSE_SPEED, 0.0)
+            print(f"  EMERGENCY! front:{front_min:.1f}cm → REVERSE")
             continue
 
         smoothing = SMOOTHING_DANGER if front_min < DANGER_DIST else SMOOTHING_NORMAL
@@ -310,14 +377,17 @@ try:
             state             = STATE_REVERSE
             maneuver_end_time = now + REVERSE_DURATION
             send_cmd(REVERSE_SPEED, 0.0)
+            print("  NO GAP → REVERSE")
             continue
 
         target_angle, bias_label, front_clear = result
         v, w = compute_cmd(target_angle)
         send_cmd(v, w)
 
-        print(f"TRG:{target_angle:5.1f}° | v:{v:.2f} | w:{w:.2f} | "
-              f"f_min:{front_min:.1f} | clear:{front_clear:.1f} | bias:{bias_label}")
+        print(
+            f"TRG:{target_angle:5.1f}° | v:{v:.2f} | w:{w:.2f} | "
+            f"f_min:{front_min:.1f} | clear:{front_clear:.1f} | bias:{bias_label}"
+        )
 
 except KeyboardInterrupt:
     print("STOP")
