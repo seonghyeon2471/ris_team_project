@@ -13,14 +13,12 @@ lidar_ser = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)
 # =========================================
 # 로봇 스펙
 # =========================================
-ROBOT_LENGTH = 0.21
 ROBOT_WIDTH = 0.20
 LIDAR_OFFSET_FRONT = 0.025
 
 MAX_SPEED = 0.16
-STEERING_GAIN = 4.0
-INFLATION_MARGIN = 0.05      # 5cm
-LOOKAHEAD = 1.0
+STEERING_GAIN = 5.5        # ← 조향 감도 증가
+INFLATION_MARGIN = 0.05
 
 print("LIDAR 시작 중...")
 lidar_ser.write(bytes([0xA5, 0x40]))
@@ -36,24 +34,19 @@ class SplineNavigator:
         self.prev_steering = 0.0
 
     def safe_asin(self, x):
-        """Domain Error 방지"""
         return math.asin(np.clip(x, -0.999, 0.999))
 
     def inflate_obstacles(self, angles_deg, ranges):
-        """5cm inflation + 안전 처리"""
         proc = ranges.copy()
         half_width = ROBOT_WIDTH / 2 + INFLATION_MARGIN
-        
         for i in range(1, len(ranges)-1):
             if ranges[i] < 1.5 or abs(ranges[i] - ranges[i-1]) > 0.15:
-                d_near = max(min(ranges[i], ranges[i-1]), 0.08)   # 최소 8cm 보장
-                arg = half_width / d_near
-                delta = self.safe_asin(arg)
+                d_near = max(min(ranges[i], ranges[i-1]), 0.08)
+                delta = self.safe_asin(half_width / d_near)
                 mask = int(math.ceil(delta / math.radians(1.0)))
                 for k in range(-mask, mask + 1):
-                    idx = i + k
-                    if 0 <= idx < len(proc):
-                        proc[idx] = 0.0
+                    if 0 <= i + k < len(proc):
+                        proc[i + k] = 0.0
         return proc
 
     def generate_spline_target(self, angles_deg, ranges):
@@ -64,7 +57,7 @@ class SplineNavigator:
         proc_ranges = self.inflate_obstacles(angles, ranges)
         free_mask = proc_ranges > 0.08
 
-        if np.sum(free_mask) < 25:
+        if np.sum(free_mask) < 20:
             return 0.0
 
         free_angles = angles[free_mask]
@@ -73,18 +66,35 @@ class SplineNavigator:
         x = free_ranges * np.cos(np.radians(free_angles))
         y = free_ranges * np.sin(np.radians(free_angles))
 
-        if len(x) > 20:
-            sort_idx = np.argsort(x)[-25:]
+        # ==================== 조향 강화 ====================
+        if len(x) > 15:
+            sort_idx = np.argsort(x)[-30:]   # 앞쪽 점들
             x_s = x[sort_idx]
             y_s = y[sort_idx]
 
             try:
                 spline = CubicSpline(x_s, y_s, bc_type='natural')
-                target_y = spline(LOOKAHEAD)
-                target_angle = math.degrees(math.atan2(target_y, LOOKAHEAD))
+                target_y = spline(1.0)                    # 1m 앞
+                target_angle = math.degrees(math.atan2(target_y, 1.0))
+
+                # 좌우 bias를 더 강하게 반영
+                left_bias = np.mean(y_s[x_s < 0.3]) if np.any(x_s < 0.3) else 0
+                right_bias = np.mean(y_s[x_s > 0.3]) if np.any(x_s > 0.3) else 0
+                bias = (left_bias - right_bias) * 25
+
+                target_angle += bias
                 return target_angle
+
             except:
                 pass
+
+        # fallback (좌우 gap 차이)
+        left = free_angles < 0
+        right = free_angles > 0
+        if np.any(left) and np.any(right):
+            left_mean = np.mean(free_angles[left])
+            right_mean = np.mean(free_angles[right])
+            return (left_mean + right_mean) / 2 * 1.8   # 더 민감하게
 
         return np.mean(free_angles)
 
@@ -92,7 +102,7 @@ class SplineNavigator:
         target_angle = self.generate_spline_target(angles_deg, ranges)
 
         steering = STEERING_GAIN * target_angle
-        steering = np.clip(steering, -0.68, 0.68)
+        steering = np.clip(steering, -0.70, 0.70)
 
         front_clear = np.max(ranges) if len(ranges) > 0 else 1.0
         v = np.clip(front_clear * 0.45, 0.18, MAX_SPEED)
@@ -106,7 +116,7 @@ class SplineNavigator:
 
 navigator = SplineNavigator()
 
-print("🚀 스플라인 + 180도 + 5cm inflation (Domain Error 해결)")
+print("🚀 조향 강화 + 스플라인 버전 시작")
 
 buffer = bytearray()
 
@@ -139,7 +149,7 @@ try:
             front_mask = (angles > -90) & (angles < 90)
             if np.any(front_mask):
                 steering, v = navigator.process(angles[front_mask], ranges[front_mask])
-                w = steering * 4.2
+                w = steering * 4.5
 
                 cmd = f"{v:.3f},{w:.3f}\n"
                 arduino_ser.write(cmd.encode('utf-8'))
