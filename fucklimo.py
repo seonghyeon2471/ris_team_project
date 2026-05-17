@@ -58,14 +58,11 @@ FRONT_CLEAR_DIST   = 23
 FRONT_CLEAR_RANGE  = 15
 
 # =========================================
-# [핵심] 각도 구간별 Emergency 임계값
-# 정면에 가까울수록 더 멀리서부터 반응
+# [핵심] 사각형 Emergency 감지 박스
+# 로봇 정면 기준 앞 5cm x 좌우 ±20cm 직사각형
 # =========================================
-ZONE_THRESHOLDS = [
-    (np.arange(-35, 35)  % 360, 5.0),   # 정면 ±60°: 8cm
-    (np.arange(-60, -35) % 360, 3),   # 좌측면: 6cm
-    (np.arange(35, 60)   % 360, 3),   # 우측면: 6cm
-]
+EMERGENCY_FRONT = 5.0    # 앞 방향 감지 거리 (cm)
+EMERGENCY_SIDE  = 10.0   # 좌우 방향 감지 거리 (cm)
 
 # =========================================
 # STATE MACHINE
@@ -106,23 +103,32 @@ def apply_median_filter():
     scan_data[:] = filtered
 
 # =========================================
-# EMERGENCY 감지 (구간별 임계값 적용)
+# EMERGENCY 감지 (사각형 박스 방식)
+# 각 스캔 포인트를 x/y 좌표로 변환 후
+# 앞 5cm x 좌우 ±20cm 직사각형 안에 있으면 발동
 # =========================================
 def check_emergency():
     """
-    구간별로 다른 임계값을 적용해 emergency 여부 판단.
-    정면(±60°)은 8cm, 측면(60~90°)은 6cm 이내일 때 emergency.
+    라이다 포인트를 x/y 좌표로 변환해 사각형 박스 안에
+    장애물이 있으면 emergency 발동.
+      y: 정면 방향 (0 ~ EMERGENCY_FRONT)
+      x: 좌우 방향 (-EMERGENCY_SIDE ~ +EMERGENCY_SIDE)
     반환: (emergency 여부, 전방 최소거리)
     """
     triggered = False
-    for indices, threshold in ZONE_THRESHOLDS:
-        zone_min = float(np.min(scan_data[indices]))
-        if zone_min < threshold:
+    for i in range(-90, 91):
+        angle = i % 360
+        d = scan_data[angle]
+        if d >= SCAN_LIMIT:
+            continue
+        rad = math.radians(i)
+        x = d * math.sin(rad)   # 좌우
+        y = d * math.cos(rad)   # 앞뒤
+        if 0 < y < EMERGENCY_FRONT and abs(x) < EMERGENCY_SIDE:
             triggered = True
             break
 
-    # front_min은 DANGER_DIST 판단 및 디버그용으로 ±60° 기준 유지
-    front_min = float(np.min(scan_data[np.arange(-60, 60) % 360]))
+    front_min = float(np.min(scan_data[np.arange(-60, 61) % 360]))
     return triggered, front_min
 
 # =========================================
@@ -240,7 +246,8 @@ def choose_avoid_direction():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("NAVIGATION START (Zone-based Emergency Detection)")
+print("NAVIGATION START (Rect-based Emergency Detection)")
+print(f"Emergency box: front={EMERGENCY_FRONT}cm x side=±{EMERGENCY_SIDE}cm")
 try:
     while True:
         raw = lidar_ser.read(5)
