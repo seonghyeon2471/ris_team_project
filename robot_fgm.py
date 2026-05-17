@@ -16,14 +16,13 @@ ROBOT_WIDTH = 0.24
 LIDAR_OFFSET_FRONT = 0.025
 
 # =========================================
-# 튜닝 파라미터 (조향 속도 대폭 증가)
+# 튜닝 파라미터 (조향 부드럽게 수정)
 # =========================================
 MAX_SPEED = 0.15          
-STEERING_GAIN = 4.5       # ← 조향 감도 크게 증가
-STEERING_REVERSE = True   
+STEERING_GAIN = 2.8       # ← 조향 감도 크게 낮춤 (부드럽게)
+STEERING_REVERSE = False  # ← 방향 반전 (False로 변경)
 
-LOOKAHEAD = 0.75
-SMOOTH_FACTOR = 0.72
+SMOOTH_FACTOR = 0.78      # ← smoothing 더 강하게
 
 # =========================================
 # LIDAR START
@@ -68,7 +67,7 @@ class CenterlineFollower:
         else:
             center_angle = np.mean(angles)
 
-        # smoothing
+        # 더 부드러운 smoothing
         target = SMOOTH_FACTOR * center_angle + (1 - SMOOTH_FACTOR) * self.prev_target
         self.prev_target = target
 
@@ -77,7 +76,7 @@ class CenterlineFollower:
 
 follower = CenterlineFollower()
 
-print("🚀 중앙선 따라가기 모드 (조향 속도 ↑)")
+print("🚀 조향 부드럽게 + 방향 반전 적용 버전")
 
 buffer = bytearray()
 
@@ -111,21 +110,19 @@ try:
             if np.any(front_mask):
                 target_angle, forward_clear = follower.find_centerline(angles[front_mask], ranges[front_mask])
 
-                # 조향 계산 + 반전
                 steering = target_angle * STEERING_GAIN
                 if STEERING_REVERSE:
                     steering = -steering
 
-                steering = np.clip(steering, -0.70, 0.70)   # 최대 조향각 확대
+                steering = np.clip(steering, -0.55, 0.55)   # 최대 조향각도 제한
 
-                # 속도
-                v = np.clip(forward_clear * 0.42, 0.20, MAX_SPEED)
+                v = np.clip(forward_clear * 0.42, 0.18, MAX_SPEED)
 
                 d_min = np.min(ranges[front_mask]) if len(ranges[front_mask]) > 0 else 1.0
-                if d_min < 0.30:
-                    v *= 0.65
+                if d_min < 0.35:
+                    v *= 0.7
 
-                w = steering * 4.5          # ← 여기서도 조향 속도 크게 증가
+                w = steering * 3.5                     # angular velocity도 부드럽게
 
                 cmd = f"{v:.3f},{w:.3f}\n"
                 arduino_ser.write(cmd.encode('utf-8'))
