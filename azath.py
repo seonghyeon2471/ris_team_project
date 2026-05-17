@@ -32,11 +32,11 @@ WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 # =========================================
 MAX_SPEED    = 0.14   # 최대 선속도 (m/s)
 MIN_SPEED    = 0.11   # 최소 속도 하한선 유지 (감속 거의 안 함)
-MAX_W        = 1.2    # 최대 각속도 (rad/s)
+MAX_W        = 0.8    # 최대 각속도 (rad/s)
 TURN_GAIN    = 1.8    # 조향 게인
 
 SCAN_LIMIT   = 150    # 유효 인식 거리 (cm)
-FRONT_RANGE  = 60     # 탐색 반경 (±60°) - 이 범위 내 측면 충돌 감시
+FRONT_RANGE  = 65     # 탐색 반경 (±60°) - 이 범위 내 측면 충돌 감시
 
 # =========================================
 # FILTER PARAMETER
@@ -49,15 +49,15 @@ MEDIAN_K     = 2      # 중앙값 필터 범위
 # =========================================
 SMOOTHING_NORMAL = 0.55
 SMOOTHING_DANGER = 0.20
-DANGER_DIST      = 18     # 위험 감지 거리 (cm)
+DANGER_DIST      = 15     # 위험 감지 거리 (cm)
 
 # =========================================
 # GAP & INFLATION PARAMETER
 # =========================================
-SAFE_DIST          = 17   # Gap 유효 최소 거리 (cm)
+SAFE_DIST          = 14   # Gap 유효 최소 거리 (cm)
 INFLATION_MAX_DIST = 25   # 팽창 적용 최대 거리 (cm)
 
-FRONT_CLEAR_DIST   = 23   # 직진 편향 판단 거리 (cm)
+FRONT_CLEAR_DIST   = 12   # 직진 편향 판단 거리 (cm)
 FRONT_CLEAR_RANGE  = 15   # 직진 편향 범위 (±15°)
 
 # =========================================
