@@ -15,17 +15,18 @@ ALPHA = 45.0
 BETA = 1.3
 GAP_THRESHOLD = 380
 SAFETY_DIST = 320
+SAFETY_WALL_DIST = 250
 MAX_OBSTACLE_DIST = 2200
 
 TIME_LIMIT = 58.0
+INITIAL_STRAIGHT_TIME = 2.0   # 출발 후 2초 동안 뒤쪽 벽 무시
 
-# SLAM 관련 설정
-MEMORY_SCANS = 8          # 최근 몇 번 스캔을 기억할지 (8~12 추천)
+MEMORY_SCANS = 10             # ← 기억할 최근 스캔 개수 (8~12 추천)
 # ================================================
 
 ser_lidar = None
 ser_arduino = None
-scan_memory = deque(maxlen=MEMORY_SCANS)   # 최근 스캔 누적
+scan_memory = deque(maxlen=MEMORY_SCANS)   # 기억하는 메모리
 
 def send_command(v: float, w: float):
     global ser_arduino
@@ -52,7 +53,7 @@ def parse_raw_scan(raw_bytes):
     return scan_data
 
 def merge_memory():
-    """최근 스캔들을 합쳐서 누적 맵 생성"""
+    """최근 스캔들을 합쳐서 누적 맵 생성 (더 가까운 거리 우선)"""
     merged = {}
     for scan in scan_memory:
         for ang, info in scan.items():
@@ -60,8 +61,37 @@ def merge_memory():
                 merged[ang] = info
     return merged
 
-def find_best_gap_and_steering(scan_data):
-    current_merged = merge_memory() if scan_memory else scan_data
+def wall_avoidance(scan_data, elapsed_time):
+    if elapsed_time < INITIAL_STRAIGHT_TIME:
+        return 0.0   # 출발 초기 2초는 뒤쪽 벽 무시
+
+    if not scan_data:
+        return 0.0
+
+    left_wall = min((d for ang, d in scan_data.items() if -120 < ang < -40), default=9999)
+    right_wall = min((d for ang, d in scan_data.items() if 40 < ang < 120), default=9999)
+    rear_wall = min((d for ang, d in scan_data.items() if abs(ang) > 140), default=9999)
+
+    if left_wall < SAFETY_WALL_DIST:
+        print(f"⚠️ 좌측 벽 가까움 ({left_wall:.0f}mm) → 우회전")
+        return -1.8
+    elif right_wall < SAFETY_WALL_DIST:
+        print(f"⚠️ 우측 벽 가까움 ({right_wall:.0f}mm) → 좌회전")
+        return 1.8
+    elif rear_wall < SAFETY_WALL_DIST:
+        return 0.0
+
+    return None
+
+def find_best_gap_and_steering(scan_data, elapsed_time):
+    wall_steer = wall_avoidance(scan_data, elapsed_time)
+    if wall_steer is not None:
+        return wall_steer, 0
+
+    # 누적 메모리 + 현재 스캔 합치기
+    merged = merge_memory()
+    current_merged = {**merged, **scan_data}   # 현재 스캔이 더 우선
+
     if not current_merged or len(current_merged) < 30:
         return 0.0, 9999
 
@@ -108,7 +138,7 @@ def main():
     print(f"🔌 Arduino 연결: {ARDUINO_PORT}")
 
     ser_lidar = serial.Serial(LIDAR_PORT, 460800, timeout=0.1)
-    print("🚀 RPLIDAR C1 + 간단 SLAM (Local Memory) 시작")
+    print("🚀 RPLIDAR C1 + 기억하면서 주행 (Local Memory Mapping) 시작")
 
     ser_lidar.write(b'\xA5\x20')
     time.sleep(1.5)
@@ -117,7 +147,8 @@ def main():
 
     try:
         while True:
-            if time.time() - start_time > TIME_LIMIT:
+            elapsed = time.time() - start_time
+            if elapsed > TIME_LIMIT:
                 print("\n⏰ 시간 제한 → 종료")
                 break
 
@@ -127,9 +158,9 @@ def main():
             if current_scan:
                 scan_memory.append(current_scan)
 
-            gap_angle, d_min = find_best_gap_and_steering(current_scan)
+            gap_angle, d_min = find_best_gap_and_steering(current_scan, elapsed)
 
-            w = math.radians(gap_angle) * 2.2
+            w = math.radians(gap_angle) * 2.3
             w = max(min(w, W_MAX), -W_MAX)
             v = V_MIN if abs(gap_angle) > 40 else V_MAX
 
