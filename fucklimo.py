@@ -52,7 +52,7 @@ DANGER_DIST      = 18
 # =========================================
 # GAP & INFLATION PARAMETER
 # =========================================
-SAFE_DIST          = 12
+SAFE_DIST          = 14
 INFLATION_MAX_DIST = 25
 FRONT_CLEAR_DIST   = 23
 FRONT_CLEAR_RANGE  = 15
