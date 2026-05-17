@@ -46,11 +46,11 @@ WHEEL_BASE = 0.17
 # =========================================
 # DETECTION PARAMETER
 # =========================================
-SCAN_LIMIT      = 150
+SCAN_LIMIT = 150
 
-SIDE_DIST       = 40
-FRONT_DIST      = 45
-EMERGENCY_DIST  = 10
+SIDE_DIST      = 45
+FRONT_DIST     = 60
+EMERGENCY_DIST = 10
 
 # =========================================
 # FILTER PARAMETER
@@ -61,12 +61,12 @@ MEDIAN_K  = 2
 # =========================================
 # HEADING HOLD
 # =========================================
-STEERING_DECAY = 0.92
+STEERING_DECAY = 0.75
 
 prev_w = 0.0
 
 # =========================================
-# STATE
+# DATA
 # =========================================
 scan_data = np.full(
     360,
@@ -151,20 +151,37 @@ def get_region_min(start_deg, end_deg):
 # =========================================
 def analyze_obstacle():
 
-    # =========================
+    # =====================================
     # 정면 최소거리
-    # =========================
+    # =====================================
     front = min(
         get_region_min(350, 359),
         get_region_min(0, 10)
     )
 
-    # =========================
-    # 좌우 평균거리
-    # =========================
-    left = get_region_mean(15, 60)
+    # =====================================
+    # 좌측
+    # 평균 + 최소 혼합
+    # =====================================
+    left_mean = get_region_mean(15, 60)
+    left_min  = get_region_min(15, 60)
 
-    right = get_region_mean(300, 345)
+    left = (
+        left_mean * 0.7
+        + left_min * 0.3
+    )
+
+    # =====================================
+    # 우측
+    # 평균 + 최소 혼합
+    # =====================================
+    right_mean = get_region_mean(300, 345)
+    right_min  = get_region_min(300, 345)
+
+    right = (
+        right_mean * 0.7
+        + right_min * 0.3
+    )
 
     return front, left, right
 
@@ -213,32 +230,18 @@ def compute_control():
 
             target_w += (
                 (FRONT_DIST - front)
-                * TURN_GAIN * 2.5
+                * TURN_GAIN * 2.8
             )
 
         else:
 
             target_w -= (
                 (FRONT_DIST - front)
-                * TURN_GAIN * 2.5
+                * TURN_GAIN * 2.8
             )
 
     # =====================================
-    # 전방 충분히 비면
-    # 회전 성분 자동 감소
-    # =====================================
-    front_weight = (
-        1.0
-        - min(front / 100.0, 1.0)
-    )
-
-    target_w *= (
-        0.25 + front_weight
-    )
-
-    # =====================================
-    # Heading Hold
-    # 갑작스러운 방향 변화 방지
+    # HEADING HOLD
     # =====================================
     target_w = (
         prev_w * STEERING_DECAY
@@ -259,21 +262,25 @@ def compute_control():
     # =====================================
     # 속도 계산
     # =====================================
-    if front > 80:
+    if front > 90:
 
         v = BASE_SPEED
 
-    elif front > 50:
+    elif front > 60:
 
         v = 0.15
 
-    elif front > 30:
+    elif front > 35:
 
         v = 0.11
 
+    elif front > 20:
+
+        v = 0.08
+
     elif front > EMERGENCY_DIST:
 
-        v = 0.07
+        v = 0.05
 
     else:
 
@@ -283,16 +290,19 @@ def compute_control():
     # 회전 클수록 감속
     # =====================================
     turn_scale = max(
-        0.45,
-        1.0 - abs(target_w)
+        0.5,
+        1.0 - abs(target_w) * 0.6
     )
 
     v *= turn_scale
 
+    # =====================================
+    # 최소 속도 유지
+    # =====================================
     v = max(v, MIN_SPEED)
 
     # =====================================
-    # Differential Drive
+    # DIFFERENTIAL DRIVE
     # =====================================
     left_wheel = (
         v - (WHEEL_BASE / 2.0) * target_w
@@ -377,7 +387,9 @@ try:
 
             apply_ema(angle, dist)
 
+        # =================================
         # 한 바퀴 완료
+        # =================================
         if s_flag != 1:
             continue
 
