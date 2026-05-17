@@ -144,6 +144,7 @@ RAMP_LIDAR_TIMEOUT =  3.0
 RAMP_SPEED         =  0.12
 RAMP_INFLATION_MAX = 10
 RAMP_SAFE_DIST     =  8
+RAMP_NOGAP_TIMEOUT =  1.5   # 경사로 중 갭 없을 때 서행 직진 최대 허용 시간 (초)
 
 # 측면 벽 추종 파라미터
 WALL_FOLLOW_TARGET = 16    # 목표 측면 거리 (cm)
@@ -162,8 +163,9 @@ RAMP_MODE_WALL_RIGHT = 2   # 오른쪽에 벽 → 오른쪽 벽 기준 추종
 scan_data      = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
 prev_angle     = 0.0
 prev_front_avg = float(SCAN_LIMIT)
-ramp_start_time = 0.0
-ramp_mode      = RAMP_MODE_NORMAL   # [FIX-1] 전역변수로 정상 선언
+ramp_start_time    = 0.0
+ramp_mode          = RAMP_MODE_NORMAL   # [FIX-1] 전역변수로 정상 선언
+ramp_nogap_start   = 0.0               # 경사로 갭 없음 서행 시작 시간
 
 # =========================================
 # IMU
@@ -576,6 +578,7 @@ try:
             else:
                 result = find_best_direction(SMOOTHING_NORMAL, on_ramp=True)
                 if result is not None:
+                    ramp_nogap_start = 0.0   # 갭 발견 시 타이머 리셋
                     target_angle, bias_label, front_clear, gap_width = result
                     v, w = compute_cmd(target_angle, on_ramp=True)
                     send_cmd(v, w)
@@ -586,8 +589,24 @@ try:
                         f"front:{front_min:.1f}cm gap_w:{gap_width:.1f}cm"
                     )
                 else:
-                    send_cmd(RAMP_SPEED, 0.0)
-                    print("  [RAMP] NO GAP → 서행 직진 유지")
+                    # 갭 없음: 최초 진입 시 타이머 시작
+                    if ramp_nogap_start == 0.0:
+                        ramp_nogap_start = now
+                    elapsed = now - ramp_nogap_start
+                    if elapsed < RAMP_NOGAP_TIMEOUT:
+                        # 타임아웃 전: 서행 직진 유지
+                        send_cmd(RAMP_SPEED, 0.0)
+                        print(f"  [RAMP] NO GAP → 서행 직진 ({elapsed:.1f}s / {RAMP_NOGAP_TIMEOUT}s)")
+                    else:
+                        # 타임아웃: 경사로 강제 종료 후 REVERSE
+                        ramp_nogap_start = 0.0
+                        state            = STATE_NORMAL
+                        ramp_mode        = RAMP_MODE_NORMAL
+                        rotate_dir       = choose_avoid_direction()
+                        state            = STATE_REVERSE
+                        maneuver_end_time = now + REVERSE_DURATION
+                        print(f"  [RAMP] NO GAP 타임아웃 {RAMP_NOGAP_TIMEOUT}s 초과 → REVERSE")
+                        send_cmd(REVERSE_SPEED, 0.0)
             continue
 
         # ══════════════════════════════════
@@ -615,11 +634,23 @@ try:
         result    = find_best_direction(smoothing)
 
         if result is None:
-            # [FIX-8] 즉시 REVERSE 대신 CREEP 먼저
-            state          = STATE_CREEP
-            creep_end_time = now + NO_GAP_CREEP_TIME
-            print("NO GAP → CREEP 시도")
-            send_cmd(NO_GAP_CREEP_SPEED, 0.0)
+            if front_min > SAFE_DIST * 2:
+                # 장애물 멀다(40cm↑) → 저속 직진하며 접근, 갭 재탐색
+                send_cmd(MIN_SPEED, 0.0)
+                print(f"NO GAP BUT FAR ({front_min:.1f}cm) → 저속 직진 접근")
+            elif front_min > SAFE_DIST:
+                # 중간 거리(20~40cm) → CREEP으로 시야 확보 후 재탐색
+                state          = STATE_CREEP
+                creep_end_time = now + NO_GAP_CREEP_TIME
+                print(f"NO GAP MEDIUM ({front_min:.1f}cm) → CREEP 시도")
+                send_cmd(NO_GAP_CREEP_SPEED, 0.0)
+            else:
+                # 장애물 가깝다(20cm↓) → REVERSE
+                rotate_dir        = choose_avoid_direction()
+                state             = STATE_REVERSE
+                maneuver_end_time = now + REVERSE_DURATION
+                print(f"NO GAP CLOSE ({front_min:.1f}cm) → REVERSE")
+                send_cmd(REVERSE_SPEED, 0.0)
             continue
 
         target_angle, bias_label, front_clear, gap_width = result
