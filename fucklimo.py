@@ -28,7 +28,7 @@ WHEEL_BASE   = 17.0
 # =========================================
 # DRIVE PARAMETER
 # =========================================
-MAX_SPEED    = 0.16
+MAX_SPEED    = 0.17
 MIN_SPEED    = 0.11
 MAX_W        = 0.9
 TURN_GAIN    = 1.8
