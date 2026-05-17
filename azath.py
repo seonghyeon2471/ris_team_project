@@ -28,15 +28,15 @@ ROBOT_RADIUS = 17.0   # 물리 반지름 + 측면 안전 마진 (cm)
 WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 
 # =========================================
-# DRIVE PARAMETER (상한선 0.18 m/s 상향 및 하한선 조정)
+# DRIVE PARAMETER (선속도 고정 / 각속도 하향)
 # =========================================
-MAX_SPEED    = 0.18   # [수정] 최대 선속도 상향 (0.14 -> 0.18 m/s)
-MIN_SPEED    = 0.12   # [수정] 최고 속도에 맞춰 최소 속도 하한선도 0.12 m/s로 밸런싱
-MAX_W        = 1.6    # [수정] 속도 증가에 따라 민첩한 회전을 위해 최대 각속도 살짝 상향 (1.5 -> 1.6)
-TURN_GAIN    = 1.8    # 조향 게인
+MAX_SPEED    = 0.18   # 최대 선속도 0.18 m/s (초당 18cm 고정)
+MIN_SPEED    = 0.14   # [수정] 속도가 뚝 떨어지는 걸 방지하기 위해 하한선을 0.14 m/s로 상향
+MAX_W        = 0.8    # [수정] 최대 각속도를 1.6 -> 0.8 rad/s로 낮춰 급격한 털림 방지
+TURN_GAIN    = 1.0    # [수정] 조향 민감도를 1.8 -> 1.0으로 낮춰 부드러운 조향 유도
 
 SCAN_LIMIT   = 150    # 유효 인식 거리 (cm)
-FRONT_RANGE  = 60     # 탐색 반경 (±60°) - 이 범위 내 측면 충돌 감시
+FRONT_RANGE  = 60     # 탐색 반경 (±60°)
 
 # =========================================
 # FILTER PARAMETER
@@ -45,23 +45,23 @@ EMA_ALPHA    = 0.3    # EMA 필터 계수
 MEDIAN_K     = 2      # 중앙값 필터 범위
 
 # =========================================
-# SMOOTHING PARAMETER (안전 마진 상향)
+# SMOOTHING PARAMETER
 # =========================================
 SMOOTHING_NORMAL = 0.55
 SMOOTHING_DANGER = 0.20
-DANGER_DIST      = 24     # [수정] 속도가 빨라진 만큼 위험 감지 거리를 늘림 (18cm -> 24cm)
+DANGER_DIST      = 24     # 위험 감지 거리 (cm)
 
 # =========================================
-# GAP & INFLATION PARAMETER (고속 대비 확장)
+# GAP & INFLATION PARAMETER (부드러운 큰 선회를 위한 마진 확장)
 # =========================================
-SAFE_DIST          = 18   # [수정] 진입 안전 마진 확장 (17cm -> 18cm)
-INFLATION_MAX_DIST = 28   # [수정] 더 멀리서부터 장애물을 불려 우회 궤적을 크게 그림 (25cm -> 28cm)
+SAFE_DIST          = 18   # Gap 유효 최소 거리 (cm)
+INFLATION_MAX_DIST = 30   # [수정] 회전 반경이 커졌으므로, 더 멀리서(30cm) 장애물을 부풀려 크게 돌게 함
 
-FRONT_CLEAR_DIST   = 28   # [수정] 직진 편향 판단 거리 상향 (23cm -> 28cm)
+FRONT_CLEAR_DIST   = 28   # 직진 편향 판단 거리 (cm)
 FRONT_CLEAR_RANGE  = 15   # 직진 편향 범위 (±15°)
 
 # =========================================
-# STATE MACHINE (탈출 머누버 마진 확보)
+# STATE MACHINE
 # =========================================
 STATE_NORMAL  = 0
 STATE_REVERSE = 1
@@ -69,19 +69,19 @@ STATE_ROTATE  = 2
 
 state             = STATE_NORMAL
 maneuver_end_time = 0.0
-rotate_dir        = 1      # +1: 좌회전, -1: 우회전
+rotate_dir        = 1      
 
-EMERGENCY_DIST    = 8      # [수정] 고속 급제동 거리를 고려해 긴급회피 거리 상향 (6cm -> 8cm)
-REVERSE_DURATION  = 0.22   # [수정] 후진 시간 소폭 확대
-ROTATE_DURATION   = 1.00
-REVERSE_SPEED     = -0.12  # [수정] 후진 속도 가속 (-0.10 -> -0.12)
-ROTATE_W          = 1.0    # [수정] 제자리 회전 속도 보강 (0.9 -> 1.0)
+EMERGENCY_DIST    = 8      # 고속 주행 기준 긴급회피 거리
+REVERSE_DURATION  = 0.25   # 회전 반경 보상을 위해 후진 시간 탈출 마진 소폭 확대
+ROTATE_DURATION   = 1.10   # 각속도가 낮아졌으므로 제자리 회전 시간을 조금 늘려 각도 확보
+REVERSE_SPEED     = -0.12  
+ROTATE_W          = 0.8    # 제자리 회전 시에도 부드럽게 돌도록 하향 조정
 
 # =========================================
 # LOOP TRAP MEMORY (원형 교차로 뺑뺑이 방지)
 # =========================================
 loop_counter      = 0.0    
-LOOP_THRESHOLD    = 18.0   # [수정] 고속 선회 시 일시적 오작동 방지를 위해 임계값 상향 (15.0 -> 18.0)
+LOOP_THRESHOLD    = 18.0   
 VIRTUAL_WALL_DIST = 15.0   
 
 # =========================================
@@ -145,6 +145,14 @@ def score_gap(gap, proc_dists, angles):
     avg_dist = np.mean(proc_dists[start : end + 1])
     return (width * 0.5 + avg_dist * 1.2 - abs(center_angle) * 0.4)
 
+def select_best_gap(gaps, proc_dists, angles):
+    best_gap, best_score = None, -1e9
+    for gap in gaps:
+        s = score_gap(gap, proc_dists, angles)
+        if s > best_score:
+            best_score, best_gap = s, gap
+    return best_gap
+
 # =========================================
 # PLANNING
 # =========================================
@@ -154,7 +162,6 @@ def find_best_direction(smoothing):
     angles = np.arange(-FRONT_RANGE, FRONT_RANGE + 1)
     local_scan = scan_data.copy()
     
-    # 원형 교차로 뺑뺑이 탈출 로직 (가상 벽)
     if abs(loop_counter) > LOOP_THRESHOLD:
         if loop_counter > 0:
             for a in range(15, FRONT_RANGE + 1):
@@ -192,41 +199,31 @@ def find_best_direction(smoothing):
     
     return target, bias_label, front_clear
 
-def select_best_gap(gaps, proc_dists, angles):
-    best_gap, best_score = None, -1e9
-    for gap in gaps:
-        s = score_gap(gap, proc_dists, angles)
-        if s > best_score:
-            best_score, best_gap = s, gap
-    return best_gap
-
 # =========================================
-# CONTROL (0.18 m/s 맞춤형 감속 스케일)
+# CONTROL (곡선 주행 최적화 밸런싱)
 # =========================================
-ALIGN_THRESHOLD = 10
+ALIGN_THRESHOLD = 15  # [수정] 각속도가 느려졌으므로 조향 중 직진 판정 마진을 15도로 완화
 
 def compute_cmd(target_angle):
     global loop_counter
     
-    # 1. 조향 계산
+    # 1. 조향 계산 (제한된 MAX_W와 둔감해진 TURN_GAIN 반영)
     w = math.radians(target_angle) * TURN_GAIN
     w = float(np.clip(w, -MAX_W, MAX_W))
 
-    # 조향 누적 필터 업데이트
     loop_counter = loop_counter * 0.98 + target_angle * 0.02
 
     # 2. 측면 감시 범위
     search_indices = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     relevant_min = float(np.min(scan_data[search_indices]))
 
-    # 3. 정렬 상태 판단
+    # 3. 조향 중심 상태 판단 (회전 각도가 클 때)
     if abs(target_angle) > ALIGN_THRESHOLD:
-        # 고속 주행 중 회전 시 구동력 확보를 위해 최소 전진 동력도 약간 보강
-        v = 0.06 if relevant_min > 20.0 else 0.0
+        # [수정] 제자리에서 멈춰 도는 대신, v=0.08을 주어 둥글고 부드러운 호를 그리며 전진 회전하도록 유도
+        v = 0.08 if relevant_min > 20.0 else 0.0
         return v, w
 
-    # 4. 직진 속도 계산
-    # 속도가 빨라졌으므로 30cm 거리에서부터 부드럽게 감속 수식이 개입하도록 설정
+    # 4. 직진 속도 계산 (하한선이 0.14로 잡혀 웬만하면 속도가 유지됨)
     obstacle_scale = min(relevant_min / 30.0, 1.0)
     speed = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
 
@@ -246,7 +243,7 @@ def choose_avoid_direction():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("NAVIGATION START (0.18 m/s High-Velocity Tuned Mode)")
+print("NAVIGATION START (0.18 m/s Smooth & Cruise Dynamic Mode)")
 try:
     while True:
         raw = lidar_ser.read(5)
