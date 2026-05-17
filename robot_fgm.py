@@ -4,10 +4,10 @@ import numpy as np
 import math
 
 # =========================================
-# SERIAL & LIDAR
+# SERIAL 설정 (지연 최소화)
 # =========================================
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.05)
-lidar_ser = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.0)
+lidar_ser = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.0)   # Non-blocking
 
 # =========================================
 # 로봇 스펙
@@ -18,19 +18,17 @@ LIDAR_OFFSET_FRONT = 0.025
 MAX_SPEED = 0.16
 STEERING_GAIN = 6.5
 
-print("LIDAR 시작 중...")
+print("LIDAR 시작 중 (Low Latency Mode)...")
 lidar_ser.write(bytes([0xA5, 0x40]))
-time.sleep(1.5)
+time.sleep(1)
 lidar_ser.reset_input_buffer()
 lidar_ser.write(bytes([0xA5, 0x20]))
 lidar_ser.read(7)
-print("✅ LIDAR SCAN START - 데이터 수집 강화 모드")
+print("✅ Low Latency Mode 시작")
 
-
-class Navigator:
+class LowLatencyNavigator:
     def process(self, angles_deg, ranges):
-        if len(angles_deg) < 30:
-            print(f"⚠️ 데이터 부족: {len(angles_deg)}개")
+        if len(angles_deg) < 35:
             return 0.0, 0.15
 
         mask = (angles_deg > -90) & (angles_deg < 90)
@@ -44,22 +42,22 @@ class Navigator:
         target_angle = diff * 55.0
 
         steering = STEERING_GAIN * target_angle
-        steering = np.clip(steering, -0.75, 0.75)
+        steering = np.clip(steering, -0.78, 0.78)
 
-        v = np.clip(np.max(ranges) * 0.45, 0.18, MAX_SPEED)
+        v = np.clip(np.max(ranges) * 0.48, 0.18, MAX_SPEED)
         if np.min(ranges) < 0.40:
             v *= 0.6
 
         return steering, v
 
 
-navigator = Navigator()
-
+navigator = LowLatencyNavigator()
 buffer = bytearray()
 
 try:
     while True:
-        data = lidar_ser.read(1024)      # 한 번에 많이 읽기
+        # ==================== 지연 최소화 핵심 ====================
+        data = lidar_ser.read(2048)      # 큰 크기로 한 번에 읽기
         if data:
             buffer.extend(data)
 
@@ -73,33 +71,34 @@ try:
                 angle_deg = (angle_q6 / 64.0) - 180.0
                 dist_mm = ((buffer[i+3] << 8) | buffer[i+2]) * 4
 
-                # quality 기준 완화 + 거리 제한
-                if quality >= 3 and 50 < dist_mm < 15000:
+                # quality 기준 완화 + 속도 최적화
+                if quality >= 3 and 50 < dist_mm < 12000:
                     points.append((angle_deg, dist_mm / 1000.0))
             except:
                 pass
             i += 5
 
-        # ==================== 데이터 충분하면 처리 ====================
-        if len(points) >= 45:                     # 기준 낮춤
+        # 데이터 충분하면 처리
+        if len(points) >= 40:
             angles = np.array([p[0] for p in points])
             ranges = np.array([p[1] for p in points])
 
             steering, v = navigator.process(angles, ranges)
-            w = steering * 5.0
+            w = steering * 5.2
 
             cmd = f"{v:.3f},{w:.3f}\n"
             arduino_ser.write(cmd.encode('utf-8'))
 
-            print(f"Steer: {steering:+6.1f}° | v:{v:.3f} | Points:{len(points)} | L/R: {np.min(ranges[angles<-15]):.2f}/{np.min(ranges[angles>15]):.2f}")
+            print(f"Steer: {steering:+6.1f}° | v:{v:.3f} | Points:{len(points)}")
 
-            buffer = buffer[i:]   # 사용한 데이터 정리
+            buffer = buffer[i:]          # 사용한 데이터 정리
         else:
-            # 데이터가 부족할 때도 buffer 정리
-            if len(buffer) > 2048:
-                buffer = buffer[-1024:]
+            # buffer가 너무 커지면 정리
+            if len(buffer) > 4096:
+                buffer = buffer[-2048:]
 
-        time.sleep(0.002)   # 매우 짧게
+        # sleep 최소 (지연 핵심)
+        time.sleep(0.0005)   # 0.5ms
 
 except KeyboardInterrupt:
     print("\n🛑 종료")
