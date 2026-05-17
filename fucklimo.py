@@ -175,7 +175,7 @@ def score_gap(gap, proc_dists, angles, now):
     start, end   = gap
     width        = end - start
     center_i     = (start + end) / 2.0
-    center_angle = float(angles[int(center_i)])
+    center_angle = float(angles[round(center_i)])
     avg_dist     = np.mean(proc_dists[start : end + 1])
 
     score = width * 0.5 + avg_dist * 1.2 - abs(center_angle) * 0.4
@@ -210,7 +210,7 @@ def find_best_direction(smoothing, now):
 
     best_gap     = select_best_gap(gaps, proc_dists, angles, now)
     start, end   = best_gap
-    gap_angle    = float(angles[int((start + end) / 2.0)])
+    gap_angle    = float(angles[round((start + end) / 2.0)])
     front_clear  = float(np.min(scan_data[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]))
 
     if front_clear > FRONT_CLEAR_DIST:
@@ -323,6 +323,7 @@ try:
         if result is None:
             rotate_dir = choose_avoid_direction()
             state, maneuver_end_time = STATE_REVERSE, now + REVERSE_DURATION
+            send_cmd(REVERSE_SPEED, 0.0)
             continue
 
         target_angle, bias_label, front_clear, gap_angle = result
