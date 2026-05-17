@@ -1,5 +1,5 @@
 import asyncio
-from rplidarc1.scanner import RPLidar     # ←←←←← 이 import가 핵심!!
+from rplidarc1.scanner import RPLidar
 import serial
 import time
 import math
@@ -11,7 +11,7 @@ ARDUINO_PORT = '/dev/serial0'
 BAUD_LIDAR = 460800
 BAUD_ARDUINO = 115200
 
-V_MAX = 0.38          # 직진 최대 속도
+V_MAX = 0.38          # 직진 속도
 V_MIN = 0.22          # 회전할 때 속도
 W_MAX = 2.2           # 최대 회전 각속도
 
@@ -33,7 +33,7 @@ def send_command(v: float, w: float):
         print("Serial 에러:", e)
 
 def find_best_gap(scan_data):
-    """FGM + GRP 스타일: widest gap + reference bias"""
+    """FGM + GRP 스타일 widest gap + reference bias"""
     if not scan_data:
         return 0.0
 
@@ -84,9 +84,11 @@ async def main():
     print(f"🔌 Arduino 연결: {ARDUINO_PORT}")
 
     lidar = RPLidar(LIDAR_PORT, baudrate=BAUD_LIDAR)
-    health = await lidar.healthcheck()
+    
+    # healthcheck는 await 없이 호출 (동기 함수)
+    health = lidar.healthcheck()
     print("🩺 LiDAR Health:", health)
-    print("🚀 FGM-GRP 기반 장애물 회피 시작! (논문 기반)")
+    print("🚀 FGM-GRP 기반 장애물 회피 시작!")
 
     start_time = time.time()
 
