@@ -22,7 +22,7 @@ print("LIDAR START")
 # =========================================
 # ROBOT PHYSICAL PARAMETER
 # =========================================
-ROBOT_RADIUS = 17.0
+ROBOT_RADIUS = 19.0
 WHEEL_BASE   = 17.0
 
 # =========================================
@@ -63,8 +63,8 @@ FRONT_CLEAR_RANGE  = 15
 # =========================================
 ZONE_THRESHOLDS = [
     (np.arange(-35, 35)  % 360, 6.0),   # 정면 ±60°: 8cm
-    (np.arange(-60, -35) % 360, 5.0),   # 좌측면: 6cm
-    (np.arange(35, 60)   % 360, 5.0),   # 우측면: 6cm
+    (np.arange(-60, -35) % 360, 4),   # 좌측면: 6cm
+    (np.arange(35, 60)   % 360, 4),   # 우측면: 6cm
 ]
 
 # =========================================
@@ -122,7 +122,7 @@ def check_emergency():
             break
 
     # front_min은 DANGER_DIST 판단 및 디버그용으로 ±60° 기준 유지
-    front_min = float(np.min(scan_data[np.arange(-70, 70) % 360]))
+    front_min = float(np.min(scan_data[np.arange(-60, 60) % 360]))
     return triggered, front_min
 
 # =========================================
