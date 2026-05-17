@@ -120,7 +120,7 @@ try:
             v = MAX_SPEED
             w = 0.0
 
-        send_cmd(v*10, w)
+        send_cmd(v*5, w)
 
 except KeyboardInterrupt:
     print("STOP")
