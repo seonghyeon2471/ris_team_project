@@ -61,7 +61,7 @@ FRONT_CLEAR_RANGE  = 15
 # 사각형 Emergency 감지 박스
 # =========================================
 EMERGENCY_FRONT = 9.0
-EMERGENCY_SIDE  = 8.0
+EMERGENCY_SIDE  = 10.0
 
 # =========================================
 # 막다른 길 판단 기준
@@ -82,9 +82,9 @@ maneuver_end_time = 0.0
 rotate_dir        = 1
 
 REVERSE_DURATION  = 0.20
-ROTATE_DURATION   = 1.00
+ROTATE_DURATION   = 0.8
 REVERSE_SPEED     = -0.10
-ROTATE_W          = 0.9
+ROTATE_W          = 1.1
 
 # =========================================
 # STATE DATA
