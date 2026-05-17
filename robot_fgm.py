@@ -9,28 +9,16 @@ import math
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
 lidar_ser = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)
 
-# IMU
-USE_IMU = True
-try:
-    import smbus2
-    imu_bus = smbus2.SMBus(1)
-    IMU_ADDR = 0x68
-    imu_bus.write_byte_data(IMU_ADDR, 0x6B, 0)
-    print("✅ IMU ON")
-except:
-    USE_IMU = False
-    print("[WARN] IMU OFF")
-
 # =========================================
 # 로봇 스펙
 # =========================================
-ROBOT_LENGTH = 0.21
 ROBOT_WIDTH = 0.16
 LIDAR_OFFSET_FRONT = 0.025
+LOOKAHEAD_DISTANCE = 0.8   # Pure Pursuit lookahead (m)
 
 SAFETY_FACTOR = 1.22
-ALPHA = 2.85
-BETA = 0.68
+ALPHA = 2.6
+BETA = 0.7
 
 # =========================================
 # LIDAR START
@@ -44,94 +32,78 @@ lidar_ser.read(7)
 print("✅ LIDAR SCAN START")
 
 # =========================================
-# NarrowPathFollower (Domain Error 방지 버전)
+# Local Centerline Follower
 # =========================================
-class NarrowPathFollower:
+class CenterlineFollower:
     def __init__(self):
-        self.alpha = ALPHA
-        self.beta = BETA
-        self.max_steering = 0.63
+        self.prev_target_angle = 0.0
+        self.smooth_factor = 0.65   # 경로 부드럽게 (0~1)
 
-    def safe_asin(self, x):
-        """Domain Error 방지"""
-        return math.asin(np.clip(x, -1.0, 1.0))
-
-    def correct_lidar_to_robot_center(self, angles_deg, ranges):
+    def correct_to_center(self, angles_deg, ranges):
         angles_rad = np.radians(angles_deg)
         x = ranges * np.cos(angles_rad) - LIDAR_OFFSET_FRONT
         y = ranges * np.sin(angles_rad)
-        corrected_dist = np.sqrt(x**2 + y**2 + 1e-8)   # 0 방지
-        corrected_angle = np.degrees(np.arctan2(y, x))
-        return corrected_angle, corrected_dist
+        dist = np.sqrt(x**2 + y**2 + 1e-8)
+        ang = np.degrees(np.arctan2(y, x))
+        return ang, dist
+
+    def find_centerline_target(self, angles_deg, ranges):
+        """자유 공간의 중앙선 방향 찾기"""
+        corr_angles, corr_ranges = self.correct_to_center(angles_deg, ranges)
+
+        # 앞쪽만 사용
+        mask = (corr_angles > -70) & (corr_angles < 70)
+        angles = corr_angles[mask]
+        ranges = corr_ranges[mask]
+
+        # 좌우 벽 찾기 (간단한 centerline approximation)
+        left_mask = angles < 0
+        right_mask = angles > 0
+
+        if np.any(left_mask) and np.any(right_mask):
+            left_dist = np.min(ranges[left_mask])
+            right_dist = np.min(ranges[right_mask])
+            left_angle = np.mean(angles[left_mask][ranges[left_mask] == left_dist])
+            right_angle = np.mean(angles[right_mask][ranges[right_mask] == right_dist])
+            
+            # 중앙 각도
+            center_angle = (left_angle + right_angle) / 2
+        else:
+            # gap 중심
+            valid = ranges > 0.08
+            if np.any(valid):
+                center_angle = np.mean(angles[valid])
+            else:
+                center_angle = 0.0
+
+        # smoothing
+        target = self.smooth_factor * center_angle + (1 - self.smooth_factor) * self.prev_target_angle
+        self.prev_target_angle = target
+
+        return target, np.max(ranges) if len(ranges) > 0 else 1.0
 
     def process(self, angles_deg, ranges):
-        corr_angles, corr_ranges = self.correct_lidar_to_robot_center(angles_deg, ranges)
+        target_angle, forward_clear = self.find_centerline_target(angles_deg, ranges)
 
-        front_mask = (corr_angles > -35) & (corr_angles < 35)
-        front_clear = np.min(corr_ranges[front_mask]) if np.any(front_mask) else 2.0
+        # Pure Pursuit + PID 스타일
+        error = target_angle
+        steering = np.clip(error * 2.8, -0.65, 0.65)   # rad
 
-        print(f"Front: {front_clear*100:5.1f}cm | Min: {np.min(corr_ranges):.2f}m")
+        # 속도
+        v = np.clip(forward_clear * 0.45, 0.22, 0.72)
 
-        # ==================== 정면 10cm 이내 ====================
-        if front_clear < 0.10:
-            print("⚠️ 정면 10cm 이내! 강제 회피")
-            left_clear = np.min(corr_ranges[(corr_angles > -70) & (corr_angles < -15)])
-            right_clear = np.min(corr_ranges[(corr_angles > 15) & (corr_angles < 70)])
-            
-            steering = 0.60 if left_clear > right_clear else -0.60
-            v = -0.25 if front_clear < 0.08 else 0.15
-            return steering, v
-
-        # ==================== 정상 처리 ====================
-        proc = corr_ranges.copy()
-
-        # Disparity Extender (Domain Error 방지)
-        for i in range(1, len(proc)-1):
-            if abs(proc[i] - proc[i-1]) > 0.18:
-                d_near = max(min(proc[i], proc[i-1]), 0.08)
-                arg = (ROBOT_WIDTH/2 * SAFETY_FACTOR) / d_near
-                delta = self.safe_asin(arg)          # ← 여기서 에러 방지
-                
-                mask = int(math.ceil(delta / math.radians(0.6)))
-                for k in range(-mask, mask+1):
-                    if 0 <= i+k < len(proc):
-                        proc[i+k] = 0.0
-
-        # Bubble
-        if len(proc) > 0:
-            closest_idx = np.argmin(proc)
-            closest_d = max(proc[closest_idx], 0.08)
-            bubble = math.atan2(ROBOT_WIDTH/2 + 0.045, closest_d)
-            angles_rad = np.radians(corr_angles)
-            for i, a in enumerate(angles_rad):
-                if abs(a - angles_rad[closest_idx]) < bubble:
-                    proc[i] = 0.0
-
-        # Gap
-        valid = proc > 0.055
-        if not np.any(valid):
-            return 0.0, -0.20
-
-        valid_idx = np.where(valid)[0]
-        weights = proc[valid_idx] ** 1.7
-        best_idx = valid_idx[np.argmax(weights)]
-        phi_gap = np.radians(corr_angles[best_idx])
-
-        d_min = np.min(corr_ranges)
-        phi_final = (self.alpha * d_min * phi_gap) / (self.alpha * d_min + 1.0)
-
-        v_max = np.max(corr_ranges)
-        v = np.clip(v_max * 0.46, 0.20, 0.70)
-
-        safety = math.exp(-self.beta * v / max(d_min, 0.1))
-        steering = np.clip(phi_final * safety, -self.max_steering, self.max_steering)
+        # 안전 마진
+        d_min = np.min(ranges) if len(ranges) > 0 else 1.0
+        if d_min < 0.25:
+            v = v * 0.6
+            steering = steering * 1.3
 
         return steering, v
 
 
-follower = NarrowPathFollower()
+follower = CenterlineFollower()
 
-print("🚀 Math Domain Error 수정 + 정면 10cm 버전 시작!")
+print("🚀 Local Centerline Following 시작 (중앙선 따라가기)")
 
 buffer = bytearray()
 
@@ -151,27 +123,29 @@ try:
                 angle_deg = (angle_q6 / 64.0) - 180.0
                 dist_mm = ((buffer[i+3] << 8) | buffer[i+2]) * 4
 
-                if quality > 0 and 100 < dist_mm < 12000:
-                    points.append((angle_deg, dist_mm))
+                if quality >= 5 and 60 < dist_mm < 12000:
+                    points.append((angle_deg, dist_mm / 1000.0))
             except:
                 pass
             i += 5
 
         if len(points) >= 60:
             angles = np.array([p[0] for p in points])
-            ranges = np.array([p[1]/1000.0 for p in points])
+            ranges = np.array([p[1] for p in points])
 
-            front_mask = (angles > -70) & (angles < 70)
+            front_mask = (angles > -75) & (angles < 75)
             if np.any(front_mask):
                 steering, v = follower.process(angles[front_mask], ranges[front_mask])
-                w = steering * 3.2
+                w = steering * 3.0   # angular velocity
 
                 cmd = f"{v:.3f},{w:.3f}\n"
                 arduino_ser.write(cmd.encode('utf-8'))
 
+                print(f"TargetAngle: {steering/np.pi*180:+6.1f}° | v:{v:.3f} | w:{w:+6.3f}")
+
             buffer = buffer[i:]
 
-        time.sleep(0.006)
+        time.sleep(0.007)
 
 except KeyboardInterrupt:
     print("\n🛑 종료")
