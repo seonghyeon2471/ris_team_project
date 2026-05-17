@@ -108,7 +108,6 @@ def inflate_obstacles(dists):
         d = dists[i]
         if d < 5 or d >= INFLATION_MAX_DIST:
             continue
-        # ROBOT_RADIUS가 커짐에 따라 alpha(마스킹 각도)가 더 넓어짐
         alpha = math.degrees(math.asin(min(ROBOT_RADIUS / d, 1.0)))
         start_idx = max(0, int(i - alpha))
         end_idx   = min(len(dists) - 1, int(i + alpha))
@@ -148,7 +147,7 @@ def select_best_gap(gaps, proc_dists, angles):
     return best_gap
 
 # =========================================
-# PLANNING
+# PLANNING (개선된 Gap 및 스무딩 제어 적용)
 # =========================================
 def find_best_direction(smoothing):
     global prev_angle
@@ -163,14 +162,31 @@ def find_best_direction(smoothing):
     start, end = best_gap
     gap_angle = float(angles[int((start + end) / 2.0)])
 
+    # 정면 정밀 탐색 거리 확인
     front_clear = float(np.min(scan_data[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]))
-    if front_clear > FRONT_CLEAR_DIST:
-        target, bias_label = gap_angle * 0.3, "STRAIGHT"
-    else:
-        target, bias_label = gap_angle * 0.7, "GAP"
+    
+    # -----------------------------------------
+    # 요청하신 개선 조향 및 스무딩 동적 변경 로직
+    # -----------------------------------------
+    if front_clear > FRONT_CLEAR_DIST:         # 23cm 초과: 직진 편향
+        target = gap_angle * 0.2
+        bias_label = "STRAIGHT"
+        
+    elif front_clear > EMERGENCY_DIST * 2:     # 12~23cm: 완전 Gap 추종
+        target = gap_angle * 1.0               # 0.7 -> 1.0 강화
+        smoothing = SMOOTHING_DANGER           # 스무딩 강제 완화 (반응성 up)
+        bias_label = "GAP"
+        
+    else:                                      # 12cm 미만: 즉시 최대 선회
+        target = gap_angle * 1.0
+        smoothing = 0.0                        # 스무딩 제거 (즉각 반응)
+        bias_label = "CRITICAL"
+    # -----------------------------------------
 
+    # 동적으로 결정된 smoothing 값으로 최종 타겟 갱신
     target = prev_angle * smoothing + target * (1.0 - smoothing)
     prev_angle = target
+    
     return target, bias_label, front_clear
 
 # =========================================
