@@ -31,7 +31,7 @@ WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 # DRIVE PARAMETER
 # =========================================
 MAX_SPEED    = 0.14   # 최대 선속도 (m/s)
-MIN_SPEED    = 0.09   # [수정] 최소 속도 정상화 (0.9 -> 0.09)
+MIN_SPEED    = 0.05   # [수정] 최소 속도를 0.05로 하향 조정
 MAX_W        = 1.5    # 최대 각속도 (rad/s)
 TURN_GAIN    = 2.2    # 조향 게인
 
@@ -157,8 +157,7 @@ def score_gap(gap, proc_dists, angles, is_critical=False):
 
     base_score = (width * 0.5 + avg_dist * 1.2 - abs(center_angle) * 0.4)
     
-    # [버그 수정 1] 박기 직전(is_critical)일 때는 방향 가중치를 배제하여
-    # 목표 방향보다 '눈앞의 장애물 회피'를 무조건 최우선으로 잡도록 만듭니다.
+    # 박기 직전(is_critical)일 때는 목적지 가중치를 끄고 회피에 집중
     if is_critical:
         return base_score
 
@@ -212,7 +211,6 @@ def find_best_direction(smoothing):
         smoothing = 0.0                        
         bias_label = "CRITICAL"
 
-    # 회전 제어 복귀 직후 루프에서 급격히 핸들을 꺾는 현상 방지
     if is_recovering:
         smoothing = 0.8
         is_recovering = False
@@ -234,12 +232,13 @@ def compute_cmd(target_angle):
     search_indices = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     relevant_min = float(np.min(scan_data[search_indices]))
 
+    # [수정] 조향각이 클 때 v가 0으로 변해 멈추는 버그 원천 차단 로직
     if abs(target_angle) > ALIGN_THRESHOLD:
-        v = 0.05 if relevant_min > 20.0 else 0.0
+        # 근처에 장애물이 있더라도 완전히 멈추지 않고 최소 0.05m/s ~ 극도로 좁을 때 0.03m/s로 야금야금 탈출
+        v = MIN_SPEED if relevant_min > 15.0 else 0.03
         return v, w
 
-    # [버그 수정 2] MIN_SPEED 수식 교정
-    # 장애물이 다가올 때 MAX_SPEED를 줄이되, 수정된 MIN_SPEED(0.09) 미만으로 내려가지 않게 제한합니다.
+    # 정면 주행 시 거리 비례 속도 감속 로직
     obstacle_scale = min(relevant_min / 25.0, 1.0)
     speed = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
 
@@ -259,7 +258,7 @@ def choose_avoid_direction():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("NAVIGATION START (Global Direction Aware & Bug Fixed Mode)")
+print("NAVIGATION START (Global Direction Aware & No-Lock Continuous Drive Mode)")
 try:
     last_odom_time = time.time()
     v_active, w_active = 0.0, 0.0
@@ -302,9 +301,7 @@ try:
                 state, prev_angle = STATE_NORMAL, 0.0
                 is_recovering = True  
                 
-                # [버그 수정 3] 150cm 가짜 벽 착시현상 해결
-                # 회전 직후 라이다 값이 다 채워지기 전에 뻥 뚫렸다고 판단해 돌진하는 문제를 막기 위해,
-                # 임시로 안전 거리 경계값(SAFE_DIST)으로 채워 센서가 갱신될 때까지 보수적으로 움직이게 유도합니다.
+                # 회전 직후 라이다 값이 다 채워질 때까지 보수적으로 움직이도록 세팅
                 for a in range(-45, 46): 
                     scan_data[a % 360] = float(SAFE_DIST)
             continue
