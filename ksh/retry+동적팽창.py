@@ -80,7 +80,7 @@ MEDIAN_K  = 2
 SMOOTHING_NORMAL = 0.55
 SMOOTHING_DANGER = 0.20
 
-DANGER_DIST = 10
+DANGER_DIST = 7
 
 # =========================================
 # GAP PARAMETER
