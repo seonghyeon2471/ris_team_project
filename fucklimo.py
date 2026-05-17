@@ -12,13 +12,11 @@ lidar_ser = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)
 # =========================================
 # LIDAR START
 # =========================================
-lidar_ser.write(bytes([0xA5, 0x40]))   # Reset
+lidar_ser.write(bytes([0xA5, 0x40]))
 time.sleep(2)
 lidar_ser.reset_input_buffer()
-
-lidar_ser.write(bytes([0xA5, 0x20]))   # Scan Start
-lidar_ser.read(7)                       # 응답 헤더 소비
-
+lidar_ser.write(bytes([0xA5, 0x20]))
+lidar_ser.read(7)
 print("LIDAR START")
 
 # =========================================
@@ -30,9 +28,9 @@ WHEEL_BASE   = 17.0
 # =========================================
 # DRIVE PARAMETER
 # =========================================
-MAX_SPEED    = 0.17
-MIN_SPEED    = 0.13
-MAX_W        = 1.5
+MAX_SPEED    = 0.14
+MIN_SPEED    = 0.11
+MAX_W        = 1.2
 TURN_GAIN    = 1.8
 
 SCAN_LIMIT   = 150
@@ -47,7 +45,7 @@ MEDIAN_K     = 2
 # =========================================
 # SMOOTHING PARAMETER
 # =========================================
-SMOOTHING_NORMAL = 0.6
+SMOOTHING_NORMAL = 0.55
 SMOOTHING_DANGER = 0.20
 DANGER_DIST      = 18
 
@@ -56,9 +54,18 @@ DANGER_DIST      = 18
 # =========================================
 SAFE_DIST          = 17
 INFLATION_MAX_DIST = 25
-
 FRONT_CLEAR_DIST   = 23
 FRONT_CLEAR_RANGE  = 15
+
+# =========================================
+# [핵심] 각도 구간별 Emergency 임계값
+# 정면에 가까울수록 더 멀리서부터 반응
+# =========================================
+ZONE_THRESHOLDS = [
+    (np.arange(-45, 45)  % 360, 8.0),   # 정면 ±60°: 8cm
+    (np.arange(-60, -45) % 360, 6.0),   # 좌측면: 6cm
+    (np.arange(45, 60)   % 360, 6.0),   # 우측면: 6cm
+]
 
 # =========================================
 # STATE MACHINE
@@ -71,26 +78,10 @@ state             = STATE_NORMAL
 maneuver_end_time = 0.0
 rotate_dir        = 1
 
-EMERGENCY_DIST    = 7
 REVERSE_DURATION  = 0.18
-ROTATE_DURATION   = 0.8
+ROTATE_DURATION   = 1.00
 REVERSE_SPEED     = -0.10
-ROTATE_W          = 1.2
-
-# =========================================
-# [NEW] EMERGENCY 연속 확인 카운터
-# 순간 노이즈(경사면 등)에 의한 과민 반응 방지
-# EMERGENCY_CONFIRM 프레임 연속으로 감지될 때만 실제 emergency 진입
-# =========================================
-emergency_counter   = 0
-EMERGENCY_CONFIRM   = 3   # 연속 3프레임 이상 감지 시에만 진입
-
-# =========================================
-# LOOP TRAP MEMORY
-# =========================================
-loop_counter      = 0.0
-LOOP_THRESHOLD    = 15.0
-VIRTUAL_WALL_DIST = 15.0
+ROTATE_W          = 0.9
 
 # =========================================
 # STATE DATA
@@ -102,7 +93,7 @@ prev_angle = 0.0
 # UTIL & FILTER
 # =========================================
 def apply_ema(angle, new_dist_cm):
-    scan_data[angle] = ((1.0 - EMA_ALPHA) * scan_data[angle] + EMA_ALPHA * new_dist_cm)
+    scan_data[angle] = (1.0 - EMA_ALPHA) * scan_data[angle] + EMA_ALPHA * new_dist_cm
 
 def apply_median_filter():
     k = MEDIAN_K
@@ -113,6 +104,26 @@ def apply_median_filter():
         values  = np.sort(scan_data[indices])
         filtered[i] = values[window // 2]
     scan_data[:] = filtered
+
+# =========================================
+# EMERGENCY 감지 (구간별 임계값 적용)
+# =========================================
+def check_emergency():
+    """
+    구간별로 다른 임계값을 적용해 emergency 여부 판단.
+    정면(±60°)은 8cm, 측면(60~90°)은 6cm 이내일 때 emergency.
+    반환: (emergency 여부, 전방 최소거리)
+    """
+    triggered = False
+    for indices, threshold in ZONE_THRESHOLDS:
+        zone_min = float(np.min(scan_data[indices]))
+        if zone_min < threshold:
+            triggered = True
+            break
+
+    # front_min은 DANGER_DIST 판단 및 디버그용으로 ±60° 기준 유지
+    front_min = float(np.min(scan_data[np.arange(-60, 61) % 360]))
+    return triggered, front_min
 
 # =========================================
 # OBSTACLE INFLATION
@@ -165,20 +176,9 @@ def select_best_gap(gaps, proc_dists, angles):
 # PLANNING
 # =========================================
 def find_best_direction(smoothing):
-    global prev_angle, loop_counter
-    
+    global prev_angle
     angles = np.arange(-FRONT_RANGE, FRONT_RANGE + 1)
-    local_scan = scan_data.copy()
-    
-    if abs(loop_counter) > LOOP_THRESHOLD:
-        if loop_counter > 0:
-            for a in range(15, FRONT_RANGE + 1):
-                local_scan[a % 360] = min(local_scan[a % 360], VIRTUAL_WALL_DIST)
-        else:
-            for a in range(-FRONT_RANGE, -14):
-                local_scan[a % 360] = min(local_scan[a % 360], VIRTUAL_WALL_DIST)
-
-    dists = np.array([local_scan[a % 360] for a in angles], dtype=np.float32)
+    dists = np.array([scan_data[a % 360] for a in angles], dtype=np.float32)
     proc_dists = inflate_obstacles(dists)
     gaps = find_gaps(proc_dists, angles)
 
@@ -188,23 +188,22 @@ def find_best_direction(smoothing):
     start, end = best_gap
     gap_angle = float(angles[int((start + end) / 2.0)])
 
-    front_clear = float(np.min(local_scan[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]))
-    
+    front_clear = float(np.min(scan_data[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]))
+
     if front_clear > FRONT_CLEAR_DIST:
         target = gap_angle * 0.2
         bias_label = "STRAIGHT"
-    elif front_clear > EMERGENCY_DIST * 2:
-        target = gap_angle * 1.0               
-        smoothing = SMOOTHING_DANGER           
+    elif front_clear > 12:
+        target = gap_angle * 1.0
+        smoothing = SMOOTHING_DANGER
         bias_label = "GAP"
     else:
         target = gap_angle * 1.0
-        smoothing = 0.0                        
+        smoothing = 0.0
         bias_label = "CRITICAL"
 
     target = prev_angle * smoothing + target * (1.0 - smoothing)
     prev_angle = target
-    
     return target, bias_label, front_clear
 
 # =========================================
@@ -213,12 +212,8 @@ def find_best_direction(smoothing):
 ALIGN_THRESHOLD = 10
 
 def compute_cmd(target_angle):
-    global loop_counter
-    
     w = math.radians(target_angle) * TURN_GAIN
     w = float(np.clip(w, -MAX_W, MAX_W))
-
-    loop_counter = loop_counter * 0.98 + target_angle * 0.02
 
     search_indices = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     relevant_min = float(np.min(scan_data[search_indices]))
@@ -229,7 +224,6 @@ def compute_cmd(target_angle):
 
     obstacle_scale = min(relevant_min / 25.0, 1.0)
     speed = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
-
     return speed, w
 
 def send_cmd(v, w):
@@ -238,30 +232,15 @@ def send_cmd(v, w):
 def stop_robot():
     send_cmd(0.0, 0.0)
 
-# =========================================
-# [개선] choose_avoid_direction()
-# 단순 평균 대신 역수 가중합(위험도 점수)으로
-# 실제로 더 막힌 쪽을 정확히 판단해 반대로 회전
-# =========================================
 def choose_avoid_direction():
-    def danger_score(indices):
-        dists = scan_data[np.array(indices) % 360]
-        valid = dists[dists > 0.5]
-        if len(valid) == 0:
-            return 999.0   # 아무것도 없으면 극도로 위험(=막힌 것으로 간주)
-        return float(np.sum(1.0 / valid))  # 가까울수록 위험도 높음
-
-    # 좌측(1~90°)과 우측(270~359°)의 위험도 비교
-    left_danger  = danger_score(np.arange(1, 91))
-    right_danger = danger_score(np.arange(270, 360))
-
-    # 위험도가 낮은(더 열린) 쪽으로 회전
-    return 1 if left_danger <= right_danger else -1
+    left_avg  = float(np.mean(scan_data[1:90]))
+    right_avg = float(np.mean(scan_data[271:360]))
+    return 1 if left_avg >= right_avg else -1
 
 # =========================================
 # MAIN LOOP
 # =========================================
-print("NAVIGATION START (Smooth + Improved Avoid Direction)")
+print("NAVIGATION START (Zone-based Emergency Detection)")
 try:
     while True:
         raw = lidar_ser.read(5)
@@ -292,21 +271,14 @@ try:
             if now < maneuver_end_time: send_cmd(0.0, ROTATE_W * rotate_dir)
             else:
                 rotate_dir *= -1
-                state, prev_angle, loop_counter = STATE_NORMAL, 0.0, 0.0
+                state, prev_angle = STATE_NORMAL, 0.0
                 for a in range(-45, 46): scan_data[a % 360] = float(SCAN_LIMIT)
             continue
 
         # --- STATE_NORMAL ---
-        front_min = float(np.min(scan_data[np.arange(-10, 11) % 360]))
+        is_emergency, front_min = check_emergency()
 
-        # [개선] emergency 연속 확인: 순간 노이즈는 무시, 진짜 막힌 경우만 반응
-        if front_min < EMERGENCY_DIST:
-            emergency_counter += 1
-        else:
-            emergency_counter = 0   # 한 번이라도 정상이면 카운터 리셋
-
-        if emergency_counter >= EMERGENCY_CONFIRM:
-            emergency_counter = 0
+        if is_emergency:
             rotate_dir = choose_avoid_direction()
             state, maneuver_end_time = STATE_REVERSE, now + REVERSE_DURATION
             send_cmd(REVERSE_SPEED, 0.0)
@@ -324,7 +296,7 @@ try:
         v, w = compute_cmd(target_angle)
         send_cmd(v, w)
 
-        print(f"[{bias_label:8s}] TRG:{target_angle:5.1f}° | v:{v:.2f} | w:{w:.2f} | f_min:{front_min:.1f} | EMG_CNT:{emergency_counter} | LOOP:{loop_counter:+.1f}")
+        print(f"[{bias_label:8s}] TRG:{target_angle:5.1f}° | v:{v:.2f} | w:{w:.2f} | f_min:{front_min:.1f}")
 
 except KeyboardInterrupt:
     print("STOP")
