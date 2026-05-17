@@ -38,7 +38,7 @@ print("LIDAR START")
 SCAN_LIMIT = 150
 
 BASE_SPEED = 0.20
-MIN_SPEED  = 0.06
+MIN_SPEED  = 0.07
 
 MAX_W      = 0.85
 TURN_GAIN  = 0.020
@@ -48,7 +48,7 @@ WHEEL_BASE = 0.17
 # =========================================
 # OBSTACLE PARAMETER
 # =========================================
-SAFE_DIST  = 45
+SAFE_DIST  = 30
 FRONT_DIST = 55
 
 # =========================================
@@ -60,7 +60,7 @@ MEDIAN_K  = 2
 # =========================================
 # SMOOTHING
 # =========================================
-STEERING_ALPHA = 0.18
+STEERING_ALPHA = 0.20
 
 current_w = 0.0
 
@@ -148,9 +148,9 @@ def get_region_min(start_deg, end_deg):
 # =========================================
 def analyze_obstacle():
 
-    # =========================
-    # 정면
-    # =========================
+    # =====================================
+    # FRONT
+    # =====================================
     front_region = scan_data[
         np.arange(-8, 9) % 360
     ]
@@ -168,9 +168,9 @@ def analyze_obstacle():
         + front_min * 0.3
     )
 
-    # =========================
-    # 좌측
-    # =========================
+    # =====================================
+    # LEFT
+    # =====================================
     left_mean = get_region_mean(15, 70)
     left_min  = get_region_min(15, 70)
 
@@ -179,9 +179,9 @@ def analyze_obstacle():
         + left_min * 0.3
     )
 
-    # =========================
-    # 우측
-    # =========================
+    # =====================================
+    # RIGHT
+    # =====================================
     right_mean = get_region_mean(290, 345)
     right_min  = get_region_min(290, 345)
 
@@ -193,7 +193,7 @@ def analyze_obstacle():
     return front, left, right
 
 # =========================================
-# CURVATURE AVOIDANCE
+# CURVATURE CONTROL
 # =========================================
 def compute_control():
 
@@ -202,7 +202,7 @@ def compute_control():
     front, left, right = analyze_obstacle()
 
     # =====================================
-    # 좌우 obstacle force
+    # obstacle force
     # =====================================
     left_force = max(
         0.0,
@@ -215,15 +215,16 @@ def compute_control():
     )
 
     # =====================================
-    # steering 생성
+    # steering
+    # 수정된 핵심 부분
     # =====================================
     target_w = (
-        right_force
-        - left_force
+        left_force
+        - right_force
     ) * TURN_GAIN
 
     # =====================================
-    # 정면 가까우면 회전 강화
+    # front obstacle boost
     # =====================================
     if front < FRONT_DIST:
 
@@ -233,7 +234,7 @@ def compute_control():
         )
 
         target_w *= (
-            1.0 + boost * 2.2
+            1.0 + boost * 2.5
         )
 
     # =====================================
@@ -245,7 +246,7 @@ def compute_control():
     )
 
     # =====================================
-    # 회전 제한
+    # steering limit
     # =====================================
     current_w = np.clip(
         current_w,
@@ -254,7 +255,7 @@ def compute_control():
     )
 
     # =====================================
-    # 속도 계산
+    # speed control
     # =====================================
     front_scale = np.clip(
         front / 80.0,
@@ -265,7 +266,7 @@ def compute_control():
     v = BASE_SPEED * front_scale
 
     # =====================================
-    # 회전 클수록 감속
+    # turn slowdown
     # =====================================
     turn_scale = max(
         0.55,
@@ -277,7 +278,7 @@ def compute_control():
     v = max(v, MIN_SPEED)
 
     # =====================================
-    # Differential Drive
+    # DIFFERENTIAL DRIVE
     # =====================================
     left_wheel = (
         v - (WHEEL_BASE / 2.0) * current_w
@@ -294,7 +295,9 @@ def compute_control():
         current_w,
         front,
         left,
-        right
+        right,
+        left_force,
+        right_force
     )
 
 # =========================================
@@ -359,7 +362,9 @@ try:
 
             apply_ema(angle, dist)
 
-        # 한 바퀴 완료
+        # =================================
+        # one scan complete
+        # =================================
         if s_flag != 1:
             continue
 
@@ -372,7 +377,9 @@ try:
             w,
             front,
             left,
-            right
+            right,
+            left_force,
+            right_force
         ) = compute_control()
 
         send_motor(
@@ -383,11 +390,11 @@ try:
         print(
             f"v:{v:.2f} | "
             f"w:{w:.2f} | "
-            f"LW:{left_wheel:.2f} | "
-            f"RW:{right_wheel:.2f} | "
             f"F:{front:.1f} | "
             f"L:{left:.1f} | "
-            f"R:{right:.1f}"
+            f"R:{right:.1f} | "
+            f"LF:{left_force:.1f} | "
+            f"RF:{right_force:.1f}"
         )
 
 except KeyboardInterrupt:
@@ -398,4 +405,6 @@ finally:
 
     stop_robot()
 
-    lidar_ser.write(bytes([0xA5, 0x25]))
+    lidar_ser.write(
+        bytes([0xA5, 0x25])
+    )
