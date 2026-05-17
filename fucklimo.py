@@ -239,7 +239,7 @@ def compute_cmd(target_angle, now):
     relevant_min   = float(np.min(scan_data[search_indices]))
 
     if abs(target_angle) > ALIGN_THRESHOLD:
-        v = 0.05 if relevant_min > 20.0 else 0.03
+        v = 0.05 if relevant_min > 20.0 else 0.1
         return v, w
 
     obstacle_scale = min(relevant_min / 25.0, 1.0)
