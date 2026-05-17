@@ -16,11 +16,11 @@ ROBOT_WIDTH = 0.24
 LIDAR_OFFSET_FRONT = 0.025
 
 # =========================================
-# 튜닝 파라미터 (이번에 크게 수정)
+# 튜닝 파라미터 (조향 속도 대폭 증가)
 # =========================================
-MAX_SPEED = 0.15        # ← 속도 크게 낮춤 (0.15m/s)
-STEERING_GAIN = 3.2       # ← 조향 감도
-STEERING_REVERSE = True   # ← 조향 반전 (True로 설정)
+MAX_SPEED = 0.15          
+STEERING_GAIN = 4.5       # ← 조향 감도 크게 증가
+STEERING_REVERSE = True   
 
 LOOKAHEAD = 0.75
 SMOOTH_FACTOR = 0.72
@@ -53,7 +53,6 @@ class CenterlineFollower:
 
     def find_centerline(self, angles_deg, ranges):
         corr_angles, corr_ranges = self.correct_to_center(angles_deg, ranges)
-
         mask = (corr_angles > -70) & (corr_angles < 70)
         angles = corr_angles[mask]
         ranges = corr_ranges[mask]
@@ -61,7 +60,6 @@ class CenterlineFollower:
         if len(angles) < 20:
             return 0.0, 1.0
 
-        # 좌우 중앙 계산
         left = angles < 0
         right = angles > 0
 
@@ -70,7 +68,7 @@ class CenterlineFollower:
         else:
             center_angle = np.mean(angles)
 
-        # 부드럽게 smoothing
+        # smoothing
         target = SMOOTH_FACTOR * center_angle + (1 - SMOOTH_FACTOR) * self.prev_target
         self.prev_target = target
 
@@ -79,7 +77,7 @@ class CenterlineFollower:
 
 follower = CenterlineFollower()
 
-print("🚀 중앙선 따라가기 모드 시작 (속도↓, 조향 반전 적용)")
+print("🚀 중앙선 따라가기 모드 (조향 속도 ↑)")
 
 buffer = bytearray()
 
@@ -113,22 +111,21 @@ try:
             if np.any(front_mask):
                 target_angle, forward_clear = follower.find_centerline(angles[front_mask], ranges[front_mask])
 
-                # 조향 반전 적용
+                # 조향 계산 + 반전
                 steering = target_angle * STEERING_GAIN
                 if STEERING_REVERSE:
                     steering = -steering
 
-                steering = np.clip(steering, -0.65, 0.65)
+                steering = np.clip(steering, -0.70, 0.70)   # 최대 조향각 확대
 
-                # 속도 제한
+                # 속도
                 v = np.clip(forward_clear * 0.42, 0.20, MAX_SPEED)
 
-                # 가까우면 더 느리게
                 d_min = np.min(ranges[front_mask]) if len(ranges[front_mask]) > 0 else 1.0
                 if d_min < 0.30:
                     v *= 0.65
 
-                w = steering * 3.0   # angular velocity
+                w = steering * 4.5          # ← 여기서도 조향 속도 크게 증가
 
                 cmd = f"{v:.3f},{w:.3f}\n"
                 arduino_ser.write(cmd.encode('utf-8'))
