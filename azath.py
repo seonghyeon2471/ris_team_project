@@ -49,15 +49,15 @@ MEDIAN_K     = 2
 # =========================================
 SMOOTHING_NORMAL = 0.55
 SMOOTHING_DANGER = 0.20
-DANGER_DIST      = 12
+DANGER_DIST      = 15
 
 # =========================================
 # GAP & INFLATION PARAMETER
 # =========================================
-SAFE_DIST          = 10
+SAFE_DIST          = 8
 INFLATION_MAX_DIST = 25
 
-FRONT_CLEAR_DIST   = 23   # ★ 수정: 12 → 23 (CRITICAL_DIST=12와 달라야 3단계 정상 작동)
+FRONT_CLEAR_DIST   = 12   # ★ 수정: 12 → 23 (CRITICAL_DIST=12와 달라야 3단계 정상 작동)
 FRONT_CLEAR_RANGE  = 8
 
 # =========================================
