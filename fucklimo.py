@@ -62,7 +62,7 @@ FRONT_CLEAR_RANGE  = 15
 # 로봇 정면 기준 앞 5cm x 좌우 ±20cm 직사각형
 # =========================================
 EMERGENCY_FRONT = 5.0    # 앞 방향 감지 거리 (cm)
-EMERGENCY_SIDE  = 10.0   # 좌우 방향 감지 거리 (cm)
+EMERGENCY_SIDE  = 9.0   # 좌우 방향 감지 거리 (cm)
 
 # =========================================
 # STATE MACHINE
