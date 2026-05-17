@@ -31,9 +31,9 @@ WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 # DRIVE PARAMETER
 # =========================================
 MAX_SPEED    = 0.14   # 최대 선속도 (m/s)
-MIN_SPEED    = 0.11   # 최소 속도
+MIN_SPEED    = 0.9   # 최소 속도
 MAX_W        = 1.2    # 최대 각속도 (rad/s)
-TURN_GAIN    = 1.8    # 조향 게인
+TURN_GAIN    = 2.2    # 조향 게인
 
 SCAN_LIMIT   = 150    # 유효 인식 거리 (cm)
 FRONT_RANGE  = 60     # 탐색 반경 (±60°)
@@ -44,7 +44,7 @@ FRONT_RANGE  = 60     # 탐색 반경 (±60°)
 EMA_ALPHA        = 0.3
 MEDIAN_K         = 2
 SMOOTHING_NORMAL = 0.55
-SMOOTHING_DANGER = 0.20
+SMOOTHING_DANGER = 0.10
 DANGER_DIST      = 18
 
 SAFE_DIST          = 17
@@ -247,7 +247,7 @@ def find_best_direction(smoothing):
 # =========================================
 # CONTROL
 # =========================================
-ALIGN_THRESHOLD = 10
+ALIGN_THRESHOLD = 7
 
 def compute_cmd(target_angle):
     w = math.radians(target_angle) * TURN_GAIN
