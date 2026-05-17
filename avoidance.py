@@ -2,7 +2,7 @@ import time
 import math
 import serial
 
-# ====================== 설정 ======================
+# ====================== 설정 (여유거리 강화 버전) ======================
 LIDAR_PORT = '/dev/ttyUSB0'
 ARDUINO_PORT = '/dev/serial0'
 
@@ -10,11 +10,11 @@ V_MAX = 0.15
 V_MIN = 0.07
 W_MAX = 2.0
 
-ALPHA = 40.0
-BETA = 1.2                    # ← 직진 더 선호하게 조금 올림
-GAP_THRESHOLD = 350           # ← 핵심! 작은 gap 무시 (350mm 이상만 gap으로 인정)
-SAFETY_DIST = 200             # ← 정면 안전거리 (너무 늦지 않게)
-MAX_OBSTACLE_DIST = 2200      # 먼 벽은 인식하되 너무 멀면 제한
+ALPHA = 45.0                  # gap 가중치 조금 올림
+BETA = 1.3                    # 직진 방향 더 선호
+GAP_THRESHOLD = 420           # ← 더 큰 gap만 선택 (여유 ↑)
+SAFETY_DIST = 350             # ← 정면 35cm부터 미리 회피 (여유 ↑)
+MAX_OBSTACLE_DIST = 2200
 
 TIME_LIMIT = 58.0
 # ================================================
@@ -69,7 +69,7 @@ def find_best_gap_and_steering(scan_data):
             gap_end = points[i-1][0]
             gap_width = gap_end - gap_start
             gap_center = gap_start + gap_width / 2.0
-            ref_bias = abs(gap_center) * 0.45          # ← 직진 선호 강화
+            ref_bias = abs(gap_center) * 0.5          # ← 직진 선호 강화
             score = gap_width - ref_bias
             if score > max_score:
                 max_score = score
@@ -95,9 +95,9 @@ def main():
     print(f"🔌 Arduino 연결: {ARDUINO_PORT}")
 
     ser_lidar = serial.Serial(LIDAR_PORT, 460800, timeout=0.1)
-    print("🚀 RPLIDAR C1 raw 연결 완료")
+    print("🚀 RPLIDAR C1 raw 연결 완료 (여유거리 강화 버전)")
 
-    ser_lidar.write(b'\xA5\x20')   # Start Scan
+    ser_lidar.write(b'\xA5\x20')
     time.sleep(1.5)
 
     start_time = time.time()
@@ -113,7 +113,7 @@ def main():
 
             gap_angle, d_min = find_best_gap_and_steering(scan_data)
 
-            w = math.radians(gap_angle) * 2.0          # ← 회전 강도 낮춤 (일찍 꺾는 현상 완화)
+            w = math.radians(gap_angle) * 2.2          # 회전 강도 적당히
             w = max(min(w, W_MAX), -W_MAX)
             v = V_MIN if abs(gap_angle) > 40 else V_MAX
 
