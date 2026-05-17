@@ -1,89 +1,672 @@
-import time
 import serial
-from rplidar import RPLidar
+import math
+import time
+import numpy as np
 
-# ================== 설정 (사용자 요청 반영) ==================
-SERIAL_PORT = '/dev/ttyUSB0'   # Arduino 연결 포트 (ls /dev/tty* 로 확인)
-BAUDRATE = 115200
-LIDAR_PORT = '/dev/ttyUSB1'    # RPLIDAR 포트
+# =========================================
+# SERIAL
+# =========================================
+arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
+lidar_ser   = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)
 
-# 튜닝 파라미터
-MIN_DIST = 0.10        # 10cm (사용자 요청)
-MAX_TURN = 85          # 최대 steering 강도 (0~100)
-BASE_SPEED = 62        # 기본 직진 속도 (튜닝 포인트)
-FRONT_ANGLE_MAX = 120  # 120도까지 전방으로 고려
-
-ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1)
+# =========================================
+# LIDAR START
+# =========================================
+lidar_ser.write(bytes([0xA5, 0x40]))
 time.sleep(2)
+lidar_ser.reset_input_buffer()
 
-lidar = RPLidar(LIDAR_PORT)
-print("LiDAR 및 Arduino 연결 완료! (60/90/120도 + 10cm 모드)")
+lidar_ser.write(bytes([0xA5, 0x20]))
+lidar_ser.read(7)
 
-def send_motor(left, right):
-    cmd = f"L:{int(left)} R:{int(right)}\n"
-    ser.write(cmd.encode())
+print("LIDAR START")
 
-def get_steering(scan):
-    min_dist = float('inf')
-    min_angle = 0.0
+# =========================================
+# ROBOT PARAMETER
+# =========================================
+ROBOT_RADIUS = 8.5
+WHEEL_BASE   = 17.0
 
-    for meas in scan:
-        dist = meas[2] / 1000.0      # mm → m
-        angle = meas[1]              # 0~360
-        
-        # 전방만 고려 (±120도)
-        if (360 - FRONT_ANGLE_MAX <= angle or angle <= FRONT_ANGLE_MAX):
-            if 0.08 < dist < min_dist:   # 8cm 이하는 노이즈 무시
-                min_dist = dist
-                min_angle = angle if angle <= 180 else angle - 360   # -180~180
+# =========================================
+# DRIVE PARAMETER
+# =========================================
+MAX_SPEED = 0.18
+MIN_SPEED = 0.10
 
-    if min_dist == float('inf'):
-        return 0  # 장애물 없음 → 직진
+MAX_W     = 1.5
+TURN_GAIN = 2.2
 
-    theta = min_angle                     # 장애물 각도 (-120 ~ 120)
-    abs_theta = abs(theta)
+SCAN_LIMIT  = 150
+FRONT_RANGE = 55
 
-    # ================== 60/90/120도 tiered steering ==================
-    if abs_theta <= 60:           # 좁은 각도 → 강하게
-        strength = 1.0
-    elif abs_theta <= 90:         # 중간
-        strength = 0.65
-    elif abs_theta <= 120:        # 넓은 각도 → 약하게
-        strength = 0.35
+# =========================================
+# FILTER
+# =========================================
+EMA_ALPHA        = 0.3
+MEDIAN_K         = 2
+
+SMOOTHING_NORMAL = 0.55
+SMOOTHING_DANGER = 0.10
+
+DANGER_DIST = 10
+
+SAFE_DIST          = 8.5
+INFLATION_MAX_DIST = 60.0
+
+FRONT_CLEAR_DIST   = 20.0
+FRONT_CLEAR_RANGE  = 12
+
+# =========================================
+# GLOBAL GOAL
+# =========================================
+pose_theta = 0.0
+GLOBAL_GOAL_THETA = 0.0
+GOAL_WEIGHT = 2.5
+
+# =========================================
+# STATE MACHINE
+# =========================================
+STATE_NORMAL  = 0
+STATE_REVERSE = 1
+STATE_ROTATE  = 2
+
+state = STATE_NORMAL
+
+maneuver_end_time = 0.0
+rotate_dir = 1
+
+# ↓ 기존 6 → 4.5로 완화
+EMERGENCY_DIST = 4.5
+
+REVERSE_DURATION = 0.12
+ROTATE_DURATION  = 0.75
+
+REVERSE_SPEED = -0.08
+ROTATE_W      = 1.0
+
+# =========================================
+# RECOVERY SYSTEM
+# =========================================
+recovery_until = 0.0
+
+# =========================================
+# STATE DATA
+# =========================================
+scan_data = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
+
+prev_angle = 0.0
+
+last_odom_time = time.time()
+
+is_recovering = False
+
+# =========================================
+# UTIL
+# =========================================
+def apply_ema(angle, new_dist_cm):
+    scan_data[angle] = (
+        (1.0 - EMA_ALPHA) * scan_data[angle]
+        + EMA_ALPHA * new_dist_cm
+    )
+
+def apply_median_filter():
+    k = MEDIAN_K
+    window = 2 * k + 1
+
+    filtered = np.empty(360, dtype=np.float32)
+
+    for i in range(360):
+
+        indices = [
+            (i + d) % 360
+            for d in range(-k, k + 1)
+        ]
+
+        values = np.sort(scan_data[indices])
+
+        filtered[i] = values[window // 2]
+
+    scan_data[:] = filtered
+
+# =========================================
+# HEADING UPDATE
+# =========================================
+def update_heading(w_radps):
+
+    global pose_theta
+    global last_odom_time
+
+    now = time.time()
+
+    dt = now - last_odom_time
+
+    last_odom_time = now
+
+    if dt <= 0 or dt > 0.5:
+        return
+
+    pose_theta += w_radps * dt
+
+    pose_theta = (
+        (pose_theta + math.pi)
+        % (2 * math.pi)
+        - math.pi
+    )
+
+# =========================================
+# OBSTACLE INFLATION
+# =========================================
+def inflate_obstacles(dists):
+
+    proc = dists.copy()
+
+    for i in range(len(dists)):
+
+        d = dists[i]
+
+        if d < 5 or d >= INFLATION_MAX_DIST:
+            continue
+
+        ratio = min(ROBOT_RADIUS / d, 0.9)
+
+        alpha = math.degrees(math.asin(ratio))
+
+        start_idx = max(0, int(i - alpha))
+        end_idx   = min(len(dists) - 1, int(i + alpha))
+
+        proc[start_idx:end_idx + 1] = 0.0
+
+    return proc
+
+# =========================================
+# GAP SEARCH
+# =========================================
+def find_gaps(proc_dists):
+
+    gaps = []
+
+    gap_start = None
+
+    for i, d in enumerate(proc_dists):
+
+        if d > SAFE_DIST:
+
+            if gap_start is None:
+                gap_start = i
+
+        else:
+
+            if gap_start is not None:
+
+                gaps.append((gap_start, i - 1))
+
+                gap_start = None
+
+    if gap_start is not None:
+        gaps.append((gap_start, len(proc_dists) - 1))
+
+    return gaps
+
+# =========================================
+# GAP SCORE
+# =========================================
+def score_gap(gap, proc_dists, angles, is_critical=False):
+
+    start, end = gap
+
+    width = end - start
+
+    center_i = int((start + end) / 2)
+
+    center_angle = angles[center_i]
+
+    avg_dist = np.mean(proc_dists[start:end + 1])
+
+    base_score = (
+        width * 0.5
+        + avg_dist * 1.2
+        - abs(center_angle) * 0.35
+    )
+
+    if is_critical:
+        return base_score
+
+    relative_goal_angle = math.degrees(
+        GLOBAL_GOAL_THETA - pose_theta
+    )
+
+    relative_goal_angle = (
+        (relative_goal_angle + 180)
+        % 360
+        - 180
+    )
+
+    angle_diff = abs(center_angle - relative_goal_angle)
+
+    angle_diff = (
+        (angle_diff + 180)
+        % 360
+        - 180
+    )
+
+    angle_diff = abs(angle_diff)
+
+    goal_bonus = (
+        (180.0 - angle_diff)
+        / 180.0
+        * GOAL_WEIGHT
+    )
+
+    return base_score + goal_bonus
+
+# =========================================
+# GAP SELECT
+# =========================================
+def select_best_gap(gaps, proc_dists, angles, is_critical=False):
+
+    best_gap = None
+    best_score = -1e9
+
+    for gap in gaps:
+
+        s = score_gap(
+            gap,
+            proc_dists,
+            angles,
+            is_critical
+        )
+
+        if s > best_score:
+            best_score = s
+            best_gap = gap
+
+    return best_gap
+
+# =========================================
+# PLANNING
+# =========================================
+def find_best_direction(smoothing):
+
+    global prev_angle
+    global is_recovering
+
+    angles = np.arange(
+        -FRONT_RANGE,
+        FRONT_RANGE + 1
+    )
+
+    dists = np.array(
+        [scan_data[a % 360] for a in angles],
+        dtype=np.float32
+    )
+
+    proc_dists = inflate_obstacles(dists)
+
+    gaps = find_gaps(proc_dists)
+
+    if not gaps:
+        return None
+
+    front_clear = float(
+        np.min(
+            scan_data[
+                np.arange(
+                    -FRONT_CLEAR_RANGE,
+                    FRONT_CLEAR_RANGE + 1
+                ) % 360
+            ]
+        )
+    )
+
+    # =====================================
+    # STRAIGHT DRIVE
+    # =====================================
+    if front_clear > FRONT_CLEAR_DIST:
+
+        is_critical = False
+
+        best_gap = select_best_gap(
+            gaps,
+            proc_dists,
+            angles,
+            is_critical
+        )
+
+        target = (
+            float(
+                angles[
+                    int((best_gap[0] + best_gap[1]) / 2)
+                ]
+            )
+            * 0.2
+        )
+
+        bias_label = "STRAIGHT"
+
+    # =====================================
+    # NORMAL GAP
+    # =====================================
+    elif front_clear > EMERGENCY_DIST * 2:
+
+        is_critical = False
+
+        best_gap = select_best_gap(
+            gaps,
+            proc_dists,
+            angles,
+            is_critical
+        )
+
+        target = float(
+            angles[
+                int((best_gap[0] + best_gap[1]) / 2)
+            ]
+        )
+
+        smoothing = SMOOTHING_DANGER
+
+        bias_label = "GAP"
+
+    # =====================================
+    # CRITICAL
+    # =====================================
     else:
-        return 0
 
-    # 방향: 장애물 쪽으로 theta가 양수면 왼쪽으로 회전 (steering 음수)
-    steering = - (theta / abs_theta) * MAX_TURN * strength
-    # 거리 가까울수록 더 강하게 (10cm 기준)
-    dist_factor = MIN_DIST / max(min_dist, MIN_DIST * 0.5)
-    steering *= dist_factor
+        is_critical = True
 
-    # steering 범위 제한
-    steering = max(-MAX_TURN, min(MAX_TURN, steering))
+        best_gap = select_best_gap(
+            gaps,
+            proc_dists,
+            angles,
+            is_critical
+        )
 
-    # 모터 속도 계산
-    left_speed = BASE_SPEED + steering
-    right_speed = BASE_SPEED - steering
+        target = float(
+            angles[
+                int((best_gap[0] + best_gap[1]) / 2)
+            ]
+        )
 
-    left_speed = max(20, min(100, left_speed))   # 최소 20은 직진 유지
-    right_speed = max(20, min(100, right_speed))
+        smoothing = 0.0
 
-    return left_speed, right_speed
+        bias_label = "CRITICAL"
 
-# ================== 메인 루프 ==================
+    # =====================================
+    # RECOVERY
+    # =====================================
+    if is_recovering:
+
+        smoothing = 0.85
+
+        is_recovering = False
+
+    target = (
+        prev_angle * smoothing
+        + target * (1.0 - smoothing)
+    )
+
+    prev_angle = target
+
+    return target, bias_label, front_clear
+
+# =========================================
+# CONTROL
+# =========================================
+ALIGN_THRESHOLD = 10
+
+def compute_cmd(target_angle):
+
+    w = math.radians(target_angle) * TURN_GAIN
+
+    w = float(
+        np.clip(
+            w,
+            -MAX_W,
+            MAX_W
+        )
+    )
+
+    search_indices = (
+        np.arange(
+            -FRONT_RANGE,
+            FRONT_RANGE + 1
+        ) % 360
+    )
+
+    relevant_min = float(
+        np.min(scan_data[search_indices])
+    )
+
+    # 급회전 시 속도 유지
+    if abs(target_angle) > ALIGN_THRESHOLD:
+        return MIN_SPEED, w
+
+    obstacle_scale = min(relevant_min / 25.0, 1.0)
+
+    speed = max(
+        MAX_SPEED * obstacle_scale,
+        MIN_SPEED
+    )
+
+    return speed, w
+
+# =========================================
+# MOTOR
+# =========================================
+def send_cmd(v, w):
+
+    arduino_ser.write(
+        f"{v:.3f},{-w:.3f}\n".encode()
+    )
+
+def stop_robot():
+    send_cmd(0.0, 0.0)
+
+# =========================================
+# ESCAPE DIRECTION
+# =========================================
+def choose_avoid_direction():
+
+    left_avg = float(
+        np.mean(scan_data[1:90])
+    )
+
+    right_avg = float(
+        np.mean(scan_data[271:360])
+    )
+
+    return 1 if left_avg >= right_avg else -1
+
+# =========================================
+# MAIN LOOP
+# =========================================
+print("NAVIGATION START")
+
 try:
-    for scan in lidar.iter_scans(max_buf_meas=2000):
-        left, right = get_steering(scan)
-        send_motor(left, right)
-        
-        # 실시간 디버깅 (필요하면 주석 해제)
-        # print(f"θ: {theta:+6.1f}°  dist: {min_dist:.2f}m  L:{left:3.0f} R:{right:3.0f}")
+
+    last_odom_time = time.time()
+
+    v_active = 0.0
+    w_active = 0.0
+
+    while True:
+
+        raw = lidar_ser.read(5)
+
+        if len(raw) != 5:
+            continue
+
+        s_flag = raw[0] & 0x01
+
+        if (raw[0] & 0x02) >> 1 != (1 - s_flag):
+            continue
+
+        if (raw[1] & 0x01) != 1:
+            continue
+
+        if (raw[0] >> 2) < 3:
+            continue
+
+        angle = int(
+            (
+                ((raw[1] >> 1) | (raw[2] << 7))
+                / 64.0
+            )
+        ) % 360
+
+        dist_cm = (
+            (raw[3] | (raw[4] << 8))
+            / 40.0
+        )
+
+        if 3 < dist_cm < SCAN_LIMIT:
+            apply_ema(angle, dist_cm)
+
+        if s_flag != 1:
+            continue
+
+        apply_median_filter()
+
+        now = time.time()
+
+        update_heading(w_active)
+
+        # =================================
+        # STATE_REVERSE
+        # =================================
+        if state == STATE_REVERSE:
+
+            if now < maneuver_end_time:
+
+                v_active = REVERSE_SPEED
+                w_active = 0.0
+
+                send_cmd(v_active, w_active)
+
+            else:
+
+                state = STATE_ROTATE
+
+                maneuver_end_time = (
+                    now + ROTATE_DURATION
+                )
+
+            continue
+
+        # =================================
+        # STATE_ROTATE
+        # =================================
+        if state == STATE_ROTATE:
+
+            if now < maneuver_end_time:
+
+                v_active = 0.0
+                w_active = ROTATE_W * rotate_dir
+
+                send_cmd(v_active, w_active)
+
+            else:
+
+                rotate_dir *= -1
+
+                state = STATE_NORMAL
+
+                prev_angle = 0.0
+
+                is_recovering = True
+
+                # ★ recovery mode
+                recovery_until = time.time() + 0.6
+
+                # 회전 직후 가짜 emergency 방지
+                for a in range(-35, 36):
+
+                    scan_data[a % 360] = max(
+                        scan_data[a % 360],
+                        SAFE_DIST + 3
+                    )
+
+            continue
+
+        # =================================
+        # NORMAL STATE
+        # =================================
+        front_min = float(
+            np.min(
+                scan_data[
+                    np.arange(-10, 11) % 360
+                ]
+            )
+        )
+
+        # =================================
+        # EMERGENCY CHECK
+        # =================================
+        if time.time() > recovery_until:
+
+            if front_min < EMERGENCY_DIST:
+
+                rotate_dir = choose_avoid_direction()
+
+                state = STATE_REVERSE
+
+                maneuver_end_time = (
+                    now + REVERSE_DURATION
+                )
+
+                v_active = REVERSE_SPEED
+                w_active = 0.0
+
+                send_cmd(v_active, w_active)
+
+                print("EMERGENCY")
+
+                continue
+
+        # =================================
+        # PLANNING
+        # =================================
+        smoothing = (
+            SMOOTHING_DANGER
+            if front_min < DANGER_DIST
+            else SMOOTHING_NORMAL
+        )
+
+        result = find_best_direction(smoothing)
+
+        if result is None:
+
+            rotate_dir = choose_avoid_direction()
+
+            state = STATE_REVERSE
+
+            maneuver_end_time = (
+                now + REVERSE_DURATION
+            )
+
+            continue
+
+        target_angle, bias_label, front_clear = result
+
+        v_active, w_active = compute_cmd(target_angle)
+
+        send_cmd(v_active, w_active)
+
+        print(
+            f"Heading:{math.degrees(pose_theta):6.1f}° | "
+            f"TRG:{target_angle:5.1f}° | "
+            f"v:{v_active:.2f} | "
+            f"w:{w_active:.2f} | "
+            f"front:{front_min:5.1f} | "
+            f"{bias_label}"
+        )
 
 except KeyboardInterrupt:
-    print("\n종료")
-    send_motor(0, 0)
+
+    print("STOP")
+
 finally:
-    lidar.stop()
-    lidar.disconnect()
-    ser.close()
+
+    stop_robot()
+
+    lidar_ser.write(bytes([0xA5, 0x25]))
