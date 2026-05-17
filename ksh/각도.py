@@ -17,7 +17,7 @@ time.sleep(1)
 lidar.write(bytes([0xA5, 0x20]))
 time.sleep(2)
 lidar.reset_input_buffer()
-print("✅ LiDAR + Arduino 연결 완료! (강한 회전 모드)")
+print("✅ LiDAR + Arduino 연결 완료! (strength > 1 초강력 모드)")
 
 def get_scan_points():
     chunk = lidar.read(1200)
@@ -43,13 +43,13 @@ def get_scan_points():
     return points
 
 # =========================================
-# 메인 루프 - 강한 회전 버전
+# 메인 루프 - strength > 1 적용
 # =========================================
 try:
     while True:
         points = get_scan_points()
 
-        v = 0.22      # 기본 속도 (조금 낮춤)
+        v = 0.17      # 속도 더 낮춤
         w = 0.0
 
         if points:
@@ -64,37 +64,37 @@ try:
             if min_dist < float('inf'):
                 abs_theta = abs(best_theta)
 
-                # ================== 강한 tiered steering ==================
-                if abs_theta <= 60:      # 정면
-                    strength = 1.0
+                # ================== strength 1 초과 적용 ==================
+                if abs_theta <= 60:      # 정면 → **강하게**
+                    strength = 1.45      # ← 1 넘김!
                 elif abs_theta <= 90:    # 중간
-                    strength = 0.85
+                    strength = 1.15
                 elif abs_theta <= 120:   # 옆
-                    strength = 0.55
+                    strength = 0.85
                 else:
                     strength = 0.0
 
-                # steering 강도 대폭 증가
-                steering = - (best_theta / 35.0) * strength
+                # steering 계산 (더 민감하게)
+                steering = - (best_theta / 20.0) * strength
 
-                # 거리 15cm 이하이면 더 강하게
-                if min_dist < 0.15:
-                    steering *= 1.8
+                # 12cm 이하에서는 추가 증폭
+                if min_dist < 0.12:
+                    steering *= 2.2
 
-                v = 0.20 if abs(steering) > 0.8 else 0.22
-                w = steering * 3.0          # ← 여기서 크게 올림 (1.8 → 3.0)
+                v = 0.15 if abs(steering) > 1.0 else 0.17
+                w = steering * 6.0          # 회전 gain도 대폭 유지
 
-                w = max(-3.0, min(3.0, w))   # w 제한
+                w = max(-5.0, min(5.0, w))
 
         # Arduino로 전송
         cmd = f"{v:.2f},{w:.3f}\n"
         arduino.write(cmd.encode())
 
-        # 실시간 디버깅 (터미널에 출력됨)
+        # 실시간 디버깅
         if points and min_dist < float('inf'):
-            print(f"θ: {best_theta:+6.1f}°  dist: {min_dist:.2f}m  v:{v:.2f} w:{w:+.3f}")
+            print(f"θ: {best_theta:+6.1f}°  dist: {min_dist:.2f}m  strength:{strength:.2f}  w:{w:+.3f}")
 
-        time.sleep(0.03)
+        time.sleep(0.025)
 
 except KeyboardInterrupt:
     print("\n\n종료")
