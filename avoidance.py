@@ -1,5 +1,5 @@
 import asyncio
-from rplidarc1.scanner import RPLidar
+from rplidarc1.scanner import RPLidar     # ← 이 import 유지
 import serial
 import time
 import math
@@ -11,12 +11,12 @@ ARDUINO_PORT = '/dev/serial0'
 BAUD_LIDAR = 460800
 BAUD_ARDUINO = 115200
 
-V_MAX = 0.38
-V_MIN = 0.22
-W_MAX = 2.2
+V_MAX = 0.38          # 직진 속도
+V_MIN = 0.22          # 회전할 때 속도
+W_MAX = 2.2           # 최대 회전 각속도
 
-GAP_THRESHOLD = 400
-SAFETY_DIST = 350
+GAP_THRESHOLD = 400   # gap 판단 기준 (mm)
+SAFETY_DIST = 350     # 정면 안전거리 (mm)
 
 TIME_LIMIT = 58.0
 # ================================================
@@ -33,6 +33,7 @@ def send_command(v: float, w: float):
         pass
 
 def find_best_gap(scan_data):
+    """FGM + GRP 스타일 widest gap + reference bias"""
     if not scan_data:
         return 0.0
 
@@ -66,6 +67,7 @@ def find_best_gap(scan_data):
                 best_gap_center = gap_center
         i += 1
 
+    # 정면 장애물 가까우면 강하게 회전
     front_min = min((d for ang, d in points if -35 < ang < 35), default=9999)
     if front_min < SAFETY_DIST:
         best_gap_center *= 1.6
@@ -83,24 +85,32 @@ async def main():
     start_time = time.time()
 
     try:
-        async for scan in lidar.simple_scan(make_return_dict=True):
-            if time.time() - start_time > TIME_LIMIT:
-                print("⏰ 시간 제한 → 종료")
-                break
+        async with asyncio.TaskGroup() as tg:
+            # LiDAR 스캔 백그라운드 실행 (make_return_dict=True)
+            tg.create_task(lidar.simple_scan(make_return_dict=True))
 
-            gap_angle = find_best_gap(scan)
+            # 메인 제어 루프
+            while True:
+                if time.time() - start_time > TIME_LIMIT:
+                    print("⏰ 시간 제한 → 종료")
+                    break
 
-            w = math.radians(gap_angle) * 2.8
-            w = max(min(w, W_MAX), -W_MAX)
+                # 최신 스캔 데이터 polling
+                scan_data = lidar.output_dict.copy() if hasattr(lidar, 'output_dict') else {}
 
-            v = V_MIN if abs(gap_angle) > 40 else V_MAX
+                gap_angle = find_best_gap(scan_data)
 
-            send_command(v, w)
+                w = math.radians(gap_angle) * 2.8
+                w = max(min(w, W_MAX), -W_MAX)
 
-            await asyncio.sleep(0.07)
+                v = V_MIN if abs(gap_angle) > 40 else V_MAX
+
+                send_command(v, w)
+
+                await asyncio.sleep(0.07)
 
     except asyncio.CancelledError:
-        print("🛑 Ctrl+C로 중단됨")
+        print("🛑 중단됨")
     except Exception as e:
         print("❌ 에러:", e)
     finally:
@@ -108,7 +118,7 @@ async def main():
         if ser and ser.is_open:
             ser.close()
         try:
-            await lidar.shutdown()
+            lidar.reset()          # shutdown 대신 reset 사용 (안전)
         except:
             pass
         print("🏁 주행 종료")
