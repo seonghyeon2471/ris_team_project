@@ -12,8 +12,8 @@ BAUD_LIDAR = 460800
 BAUD_ARDUINO = 115200
 
 # GRP 파라미터 (논문 기반)
-V_MAX = 0.35
-V_MIN = 0.22
+V_MAX = 0.15
+V_MIN = 0.07
 W_MAX = 2.0
 
 # GRP weighted steering 파라미터 (논문 α, β)
@@ -22,8 +22,8 @@ BETA = 1.0     # reference bias (논문 β)
 
 GLOBAL_GOAL_DISTANCE = 3.5   # m (10m → 경기장 크기 3.1m에 맞춤)
 
-GAP_THRESHOLD = 400   # mm
-SAFETY_DIST = 350     # mm
+GAP_THRESHOLD = 200   # mm
+SAFETY_DIST = 70     # mm
 
 TIME_LIMIT = 58.0
 # ================================================
