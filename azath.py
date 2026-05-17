@@ -28,10 +28,10 @@ ROBOT_RADIUS = 17.0   # 상향 조정: 물리 반지름 + 측면 안전 마진 (
 WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 
 # =========================================
-# DRIVE PARAMETER
+# DRIVE PARAMETER (버전 2: 전역 최소 속도 하한선 수정)
 # =========================================
 MAX_SPEED    = 0.14   # 최대 선속도 (m/s)
-MIN_SPEED    = 0.05   # 최소 선속도 (m/s)
+MIN_SPEED    = 0.09   # [수정] 최소 선속도 하한선 상향 (0.05 -> 0.09) 주행 답답함 해소
 MAX_W        = 1.5    # 최대 각속도 (rad/s)
 TURN_GAIN    = 1.8    # 조향 게인
 
@@ -162,35 +162,29 @@ def find_best_direction(smoothing):
     start, end = best_gap
     gap_angle = float(angles[int((start + end) / 2.0)])
 
-    # 정면 정밀 탐색 거리 확인
     front_clear = float(np.min(scan_data[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]))
     
-    # -----------------------------------------
-    # 요청하신 개선 조향 및 스무딩 동적 변경 로직
-    # -----------------------------------------
     if front_clear > FRONT_CLEAR_DIST:         # 23cm 초과: 직진 편향
         target = gap_angle * 0.2
         bias_label = "STRAIGHT"
         
     elif front_clear > EMERGENCY_DIST * 2:     # 12~23cm: 완전 Gap 추종
-        target = gap_angle * 1.0               # 0.7 -> 1.0 강화
-        smoothing = SMOOTHING_DANGER           # 스무딩 강제 완화 (반응성 up)
+        target = gap_angle * 1.0               
+        smoothing = SMOOTHING_DANGER           
         bias_label = "GAP"
         
     else:                                      # 12cm 미만: 즉시 최대 선회
         target = gap_angle * 1.0
-        smoothing = 0.0                        # 스무딩 제거 (즉각 반응)
+        smoothing = 0.0                        
         bias_label = "CRITICAL"
-    # -----------------------------------------
 
-    # 동적으로 결정된 smoothing 값으로 최종 타겟 갱신
     target = prev_angle * smoothing + target * (1.0 - smoothing)
     prev_angle = target
     
     return target, bias_label, front_clear
 
 # =========================================
-# CONTROL (측면 충돌 방지 강화)
+# CONTROL (수정된 전역 MIN_SPEED가 적용되는 함수)
 # =========================================
 ALIGN_THRESHOLD = 10
 
@@ -205,17 +199,19 @@ def compute_cmd(target_angle):
 
     # 3. 정렬 상태 판단
     if abs(target_angle) > ALIGN_THRESHOLD:
-        # 정렬 중에는 제자리 회전 (측면 여유가 있을 때만 미세 전진)
         v = 0.02 if relevant_min > 20.0 else 0.0
         return v, w
 
-    # 4. 직진 속도 계산 (측면/정면 통합 장애물 거리 반영)
-    obstacle_scale = min(relevant_min / 40.0, 1.0)
+    # 4. 직진 속도 계산 (상향된 MIN_SPEED 반영)
+    # 나눗셈 계수를 40.0에서 30.0으로 낮추어 감속 진입 시점을 늦춤
+    obstacle_scale = min(relevant_min / 30.0, 1.0)
+    
+    # 상향 조정된 MIN_SPEED(0.09) 미만으로 절대로 내려가지 않음
     speed = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
 
-    # 좁은 공간/측면 근접 시 추가 감속
+    # 좁은 공간 감속 보정치도 마일드하게 변경 (0.8 -> 0.88)
     if relevant_min < 22.0:
-        speed *= 0.8
+        speed *= 0.88
 
     return speed, w
 
@@ -233,7 +229,7 @@ def choose_avoid_direction():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("NAVIGATION START (Enhanced Side Protection)")
+print("NAVIGATION START (Version 2: Global Parameter Tune)")
 try:
     while True:
         raw = lidar_ser.read(5)
