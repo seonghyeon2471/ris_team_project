@@ -58,24 +58,30 @@ FRONT_CLEAR_DIST   = 23
 FRONT_CLEAR_RANGE  = 15
 
 # =========================================
-# [핵심] 사각형 Emergency 감지 박스
-# 로봇 정면 기준 앞 5cm x 좌우 ±20cm 직사각형
+# 사각형 Emergency 감지 박스
 # =========================================
-EMERGENCY_FRONT = 9.0    # 앞 방향 감지 거리 (cm)
-EMERGENCY_SIDE  = 9.0   # 좌우 방향 감지 거리 (cm)
+EMERGENCY_FRONT = 9.0
+EMERGENCY_SIDE  = 8.0
+
+# =========================================
+# 막다른 길 판단 기준
+# =========================================
+DEADEND_THRESH = 25.0
+DEADEND_ROTATE = 2.0
 
 # =========================================
 # STATE MACHINE
 # =========================================
-STATE_NORMAL  = 0
-STATE_REVERSE = 1
-STATE_ROTATE  = 2
+STATE_NORMAL   = 0
+STATE_REVERSE  = 1
+STATE_ROTATE   = 2
+STATE_DEADEND  = 3
 
 state             = STATE_NORMAL
 maneuver_end_time = 0.0
 rotate_dir        = 1
 
-REVERSE_DURATION  = 0.18
+REVERSE_DURATION  = 0.20
 ROTATE_DURATION   = 1.00
 REVERSE_SPEED     = -0.10
 ROTATE_W          = 0.9
@@ -103,18 +109,16 @@ def apply_median_filter():
     scan_data[:] = filtered
 
 # =========================================
+# 막다른 길 감지
+# =========================================
+def check_deadend():
+    max_dist = float(np.max(scan_data))
+    return max_dist < DEADEND_THRESH
+
+# =========================================
 # EMERGENCY 감지 (사각형 박스 방식)
-# 각 스캔 포인트를 x/y 좌표로 변환 후
-# 앞 5cm x 좌우 ±20cm 직사각형 안에 있으면 발동
 # =========================================
 def check_emergency():
-    """
-    라이다 포인트를 x/y 좌표로 변환해 사각형 박스 안에
-    장애물이 있으면 emergency 발동.
-      y: 정면 방향 (0 ~ EMERGENCY_FRONT)
-      x: 좌우 방향 (-EMERGENCY_SIDE ~ +EMERGENCY_SIDE)
-    반환: (emergency 여부, 전방 최소거리)
-    """
     triggered = False
     for i in range(-90, 91):
         angle = i % 360
@@ -122,8 +126,8 @@ def check_emergency():
         if d >= SCAN_LIMIT:
             continue
         rad = math.radians(i)
-        x = d * math.sin(rad)   # 좌우
-        y = d * math.cos(rad)   # 앞뒤
+        x = d * math.sin(rad)
+        y = d * math.cos(rad)
         if 0 < y < EMERGENCY_FRONT and abs(x) < EMERGENCY_SIDE:
             triggered = True
             break
@@ -177,6 +181,37 @@ def select_best_gap(gaps, proc_dists, angles):
         if s > best_score:
             best_score, best_gap = s, gap
     return best_gap
+
+# =========================================
+# 탈출 방향 결정 (벡터 합산 방식)
+# 모든 장애물이 로봇을 밀어내는 반발력을
+# 합산해서 가장 열린 방향을 찾음
+# 가까운 장애물일수록 강하게 반발
+# =========================================
+def choose_avoid_direction():
+    vx = 0.0
+    for i in range(360):
+        d = float(scan_data[i])
+        if d >= SCAN_LIMIT:
+            continue
+        rad = math.radians(i)
+        # 거리 제곱에 반비례 → 가까울수록 강하게 밀어냄
+        force = 1.0 / max(d ** 2, 1.0)
+        vx -= force * math.sin(rad)
+
+    # vx > 0 이면 오른쪽이 열림 → 오른쪽 회전(-1)
+    # vx < 0 이면 왼쪽이 열림  → 왼쪽 회전(+1)
+    dir_chosen = -1 if vx > 0 else 1
+    label = "우" if dir_chosen == -1 else "좌"
+    print(f"[AVOID   ] 탈출벡터 vx={vx:.2f} → {label} 회전")
+    return dir_chosen
+
+# =========================================
+# 막다른 길 탈출 방향 (가장 먼 방향)
+# =========================================
+def choose_deadend_direction():
+    best_angle = int(np.argmax(scan_data))
+    return 1 if best_angle <= 180 else -1
 
 # =========================================
 # PLANNING
@@ -238,16 +273,12 @@ def send_cmd(v, w):
 def stop_robot():
     send_cmd(0.0, 0.0)
 
-def choose_avoid_direction():
-    left_avg  = float(np.mean(scan_data[1:90]))
-    right_avg = float(np.mean(scan_data[271:360]))
-    return 1 if left_avg >= right_avg else -1
-
 # =========================================
 # MAIN LOOP
 # =========================================
-print("NAVIGATION START (Rect-based Emergency Detection)")
+print("NAVIGATION START (Vector-based Avoidance)")
 print(f"Emergency box: front={EMERGENCY_FRONT}cm x side=±{EMERGENCY_SIDE}cm")
+print(f"Deadend thresh: {DEADEND_THRESH}cm")
 try:
     while True:
         raw = lidar_ser.read(5)
@@ -269,24 +300,42 @@ try:
 
         # --- STATE MACHINE ---
         if state == STATE_REVERSE:
-            if now < maneuver_end_time: send_cmd(REVERSE_SPEED, 0.0)
+            if now < maneuver_end_time:
+                send_cmd(REVERSE_SPEED, 0.0)
             else:
                 state, maneuver_end_time = STATE_ROTATE, now + ROTATE_DURATION
             continue
 
         if state == STATE_ROTATE:
-            if now < maneuver_end_time: send_cmd(0.0, ROTATE_W * rotate_dir)
+            if now < maneuver_end_time:
+                send_cmd(0.0, ROTATE_W * rotate_dir)
             else:
                 rotate_dir *= -1
                 state, prev_angle = STATE_NORMAL, 0.0
                 for a in range(-45, 46): scan_data[a % 360] = float(SCAN_LIMIT)
             continue
 
+        if state == STATE_DEADEND:
+            if now < maneuver_end_time:
+                send_cmd(0.0, ROTATE_W * rotate_dir)
+            else:
+                state, prev_angle = STATE_NORMAL, 0.0
+                for a in range(360): scan_data[a] = float(SCAN_LIMIT)
+                print("[DEADEND ] 탈출 완료")
+            continue
+
         # --- STATE_NORMAL ---
+        if check_deadend():
+            rotate_dir = choose_deadend_direction()
+            state, maneuver_end_time = STATE_DEADEND, now + DEADEND_ROTATE
+            send_cmd(0.0, ROTATE_W * rotate_dir)
+            print(f"[DEADEND ] 감지 → {'좌' if rotate_dir == 1 else '우'} 회전")
+            continue
+
         is_emergency, front_min = check_emergency()
 
         if is_emergency:
-            rotate_dir = choose_avoid_direction()
+            rotate_dir = choose_avoid_direction()   # 벡터 합산으로 방향 결정
             state, maneuver_end_time = STATE_REVERSE, now + REVERSE_DURATION
             send_cmd(REVERSE_SPEED, 0.0)
             continue
@@ -295,8 +344,10 @@ try:
         result = find_best_direction(smoothing)
 
         if result is None:
-            rotate_dir = choose_avoid_direction()
-            state, maneuver_end_time = STATE_REVERSE, now + REVERSE_DURATION
+            rotate_dir = choose_deadend_direction()
+            state, maneuver_end_time = STATE_DEADEND, now + DEADEND_ROTATE
+            send_cmd(0.0, ROTATE_W * rotate_dir)
+            print("[DEADEND ] gap 없음 → 회전")
             continue
 
         target_angle, bias_label, front_clear = result
