@@ -32,7 +32,7 @@ WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 # =========================================
 MAX_SPEED    = 0.14   # 최대 선속도 (m/s)
 MIN_SPEED    = 0.11   # 최소 속도 하한선
-MAX_W        = 0.8    # 최대 각속도 (rad/s)
+MAX_W        = 1.0    # 최대 각속도 (rad/s)
 TURN_GAIN    = 1.8    # 조향 게인
 
 SCAN_LIMIT   = 150    # 유효 인식 거리 (cm)
@@ -58,7 +58,7 @@ SAFE_DIST          = 14
 INFLATION_MAX_DIST = 25
 
 FRONT_CLEAR_DIST   = 23   # ★ 수정: 12 → 23 (CRITICAL_DIST=12와 달라야 3단계 정상 작동)
-FRONT_CLEAR_RANGE  = 15
+FRONT_CLEAR_RANGE  = 12
 
 # =========================================
 # ★ GOAL PARAMETER
