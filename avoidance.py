@@ -11,19 +11,14 @@ ARDUINO_PORT = '/dev/serial0'
 BAUD_LIDAR = 460800
 BAUD_ARDUINO = 115200
 
-# GRP 파라미터 (논문 기반)
 V_MAX = 0.15
 V_MIN = 0.07
 W_MAX = 2.0
 
-# GRP weighted steering 파라미터 (논문 α, β)
-ALPHA = 40.0   # d_min에 따른 gap 가중치 (논문에서 π/d_min 역할)
-BETA = 1.0     # reference bias (논문 β)
-
-GLOBAL_GOAL_DISTANCE = 3.5   # m (10m → 경기장 크기 3.1m에 맞춤)
-
-GAP_THRESHOLD = 200   # mm
-SAFETY_DIST = 70     # mm
+ALPHA = 40.0
+BETA = 1.0
+GAP_THRESHOLD = 200
+SAFETY_DIST = 70
 
 TIME_LIMIT = 58.0
 # ================================================
@@ -40,18 +35,23 @@ def send_command(v: float, w: float):
         pass
 
 def find_best_gap_and_steering(scan_data):
-    """GRP 논문 스타일: gap + reference bias weighted steering"""
-    if not scan_data:
-        return 0.0, 0.0
+    """None 방어 코드 추가"""
+    if scan_data is None or not isinstance(scan_data, dict) or len(scan_data) < 10:
+        return 0.0, 9999   # 스캔 데이터가 아직 준비되지 않았으면 직진
 
-    points = [(ang, info["d_mm"]) for ang, info in scan_data.items() 
-              if 200 < info.get("d_mm", 0) < 3000 and info.get("q", 0) > 8]
+    points = []
+    for ang, info in scan_data.items():
+        if not isinstance(info, dict):
+            continue
+        d_mm = info.get("d_mm", 0)
+        q = info.get("q", 0)
+        if 200 < d_mm < 3000 and q > 8:
+            points.append((ang, d_mm))
 
     if not points:
-        return 0.0, 0.0
+        return 0.0, 9999
 
     points.sort(key=lambda x: x[0])
-
     best_gap_center = 0.0
     max_score = -9999
     i = 0
@@ -66,27 +66,20 @@ def find_best_gap_and_steering(scan_data):
             gap_end = points[i-1][0]
             gap_width = gap_end - gap_start
             gap_center = gap_start + gap_width / 2.0
-
-            # GRP reference bias (global goal 방향 = 0도 선호)
             ref_bias = abs(gap_center) * 0.4
             score = gap_width - ref_bias
-
             if score > max_score:
                 max_score = score
                 best_gap_center = gap_center
-
         i += 1
 
-    # 정면 안전거리 체크
     front_min = min((d for ang, d in points if -35 < ang < 35), default=9999)
     if front_min < SAFETY_DIST:
         best_gap_center *= 1.8
 
-    # GRP weighted steering (논문 공식)
     d_min = front_min if front_min < 2000 else 2000
     phi_gap = best_gap_center
-    phi_ref = 0.0   # global goal 방향 (현재는 직진)
-
+    phi_ref = 0.0
     weight_gap = ALPHA / d_min
     phi_s = (weight_gap * phi_gap + BETA * phi_ref) / (weight_gap + BETA)
 
@@ -104,18 +97,20 @@ async def main():
 
     try:
         # LiDAR 스캔 백그라운드 시작
-        scan_task = asyncio.create_task(lidar.simple_scan(make_return_dict=True))
+        asyncio.create_task(lidar.simple_scan(make_return_dict=True))
+
+        # 스캔 데이터가 준비될 때까지 잠시 대기
+        await asyncio.sleep(1.0)
 
         while True:
             if time.time() - start_time > TIME_LIMIT:
-                print("⏰ 시간 제한 → 종료")
+                print("\n⏰ 시간 제한 → 종료")
                 break
 
-            scan_data = lidar.output_dict.copy() if hasattr(lidar, 'output_dict') else {}
+            scan_data = lidar.output_dict.copy() if hasattr(lidar, 'output_dict') and lidar.output_dict is not None else {}
 
             gap_angle, d_min = find_best_gap_and_steering(scan_data)
 
-            # steering angle → angular velocity
             w = math.radians(gap_angle) * 3.0
             w = max(min(w, W_MAX), -W_MAX)
 
@@ -123,12 +118,15 @@ async def main():
 
             send_command(v, w)
 
+            # 실시간 디버그 (필요하면 주석 처리)
+            print(f"Gap: {gap_angle:6.1f}° | d_min: {d_min:4.0f}mm | v:{v:.2f} w:{w:.2f}", end="\r")
+
             await asyncio.sleep(0.06)
 
     except asyncio.CancelledError:
-        print("🛑 중단됨")
+        print("\n🛑 중단됨")
     except Exception as e:
-        print("❌ 에러:", e)
+        print("\n❌ 에러:", e)
     finally:
         send_command(0.0, 0.0)
         if ser and ser.is_open:
@@ -137,7 +135,7 @@ async def main():
             lidar.reset()
         except:
             pass
-        print("🏁 주행 종료")
+        print("\n🏁 주행 종료")
 
 if __name__ == "__main__":
     asyncio.run(main())
