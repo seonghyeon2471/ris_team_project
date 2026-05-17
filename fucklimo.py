@@ -30,7 +30,7 @@ WHEEL_BASE   = 17.0
 # =========================================
 MAX_SPEED    = 0.14
 MIN_SPEED    = 0.11
-MAX_W        = 1.2
+MAX_W        = 0.9
 TURN_GAIN    = 1.8
 
 SCAN_LIMIT   = 150
