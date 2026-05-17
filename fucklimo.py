@@ -29,7 +29,7 @@ WHEEL_BASE   = 17.0
 # DRIVE PARAMETER
 # =========================================
 MAX_SPEED    = 0.35
-MIN_SPEED    = 0.18
+MIN_SPEED    = 0.20
 MAX_W        = 1.0
 TURN_GAIN    = 1.8
 
@@ -45,7 +45,7 @@ MEDIAN_K     = 2
 # =========================================
 # SMOOTHING PARAMETER
 # =========================================
-SMOOTHING_NORMAL = 0.55
+SMOOTHING_NORMAL = 0.7
 SMOOTHING_DANGER = 0.20
 DANGER_DIST      = 18
 
