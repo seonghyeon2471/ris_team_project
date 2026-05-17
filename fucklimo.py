@@ -28,8 +28,8 @@ WHEEL_BASE   = 17.0
 # =========================================
 # DRIVE PARAMETER
 # =========================================
-MAX_SPEED    = 0.35
-MIN_SPEED    = 0.20
+MAX_SPEED    = 0.5
+MIN_SPEED    = 0.50
 MAX_W        = 1.0
 TURN_GAIN    = 1.8
 
@@ -81,7 +81,7 @@ rotate_target_deg  = 90.0    # 회전할 목표 각도 (degrees)
 rotate_accumulated = 0.0     # 누적 회전각
 rotate_last_time   = 0.0     # 마지막 루프 시각
 
-REVERSE_DURATION = 0.20
+REVERSE_DURATION = 0.1
 REVERSE_SPEED    = -0.10
 ROTATE_W         = 1.1       # rad/s
 
