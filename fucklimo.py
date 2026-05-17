@@ -210,8 +210,15 @@ def choose_avoid_direction():
 # 막다른 길 탈출 방향 (가장 먼 방향)
 # =========================================
 def choose_deadend_direction():
-    best_angle = int(np.argmax(scan_data))
-    return 1 if best_angle <= 180 else -1
+    # 뒤쪽(90°~270°) 제외, 앞쪽 반원(±90°)에서만 탐색
+    # 좌측 1~90°, 우측 270~359° 중 가장 먼 방향
+    left_max  = float(np.max(scan_data[1:90]))
+    right_max = float(np.max(scan_data[270:360]))
+    
+    dir_chosen = 1 if left_max >= right_max else -1
+    label = "좌" if dir_chosen == 1 else "우"
+    print(f"[DEADEND ] 좌max={left_max:.1f} 우max={right_max:.1f} → {label}")
+    return dir_chosen
 
 # =========================================
 # PLANNING
