@@ -5,78 +5,80 @@ import math
 from rplidar import RPLidar
 
 # =========================================
-# SERIAL (Arduino)
+# SERIAL
 # =========================================
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.05)
 
 # =========================================
-# 로봇 스펙
-# =========================================
-ROBOT_WIDTH = 0.22
-LIDAR_OFFSET_FRONT = 0.025
-MAX_SPEED = 0.16
-STEERING_GAIN = 3.5
-
-print("RPLIDAR 라이브러리 버전 시작...")
-
-# =========================================
-# RPLIDAR 초기화
+# RPLIDAR
 # =========================================
 lidar = RPLidar('/dev/ttyUSB0', baudrate=460800)
 lidar.start_motor()
 print("✅ RPLIDAR 연결 완료")
 
+# =========================================
+# 파라미터 (회전 방지 강화)
+# =========================================
+MAX_SPEED = 0.14
+STEERING_GAIN = 1.8        # 매우 낮춤
+SMOOTH_FACTOR = 0.88       # smoothing 강하게
+DEADZONE = 15.0            # ±15도 이내는 직진
+MAX_TURN = 0.45            # 최대 steering 제한
 
-class RPLidarFollower:
+print("🚀 제자리 회전 방지 + 안정 버전 시작")
+
+
+class StableFollower:
     def __init__(self):
         self.prev_steering = 0.0
+        self.steering_history = [0.0] * 5   # 최근 5개 steering 평균
 
     def process(self, scan):
-        # scan = [(quality, angle_deg, distance_mm), ...]
         angles = np.array([m[1] for m in scan])
-        distances = np.array([m[2] for m in scan]) / 10.0   # mm → cm
+        distances = np.array([m[2] for m in scan]) / 10.0   # cm
 
-        # 전방 180도
         mask = (angles > -90) & (angles < 90)
         angles = angles[mask]
-        ranges = distances[mask] / 100.0   # cm → m
+        ranges = distances[mask] / 100.0   # m 단위
 
-        if len(ranges) < 50:
-            return 0.0, 0.14
+        if len(ranges) < 40:
+            return 0.0, 0.12
 
         # 좌우 clearance
         left_clear = np.min(ranges[angles < -20]) if np.any(angles < -20) else 3.0
         right_clear = np.min(ranges[angles > 20]) if np.any(angles > 20) else 3.0
 
-        # 중앙 방향 계산
         diff = right_clear - left_clear
-        target_angle = diff * 32.0
+        raw_target = diff * 22.0
 
-        # smoothing
-        steering = STEERING_GAIN * target_angle
-        steering = 0.78 * steering + 0.22 * self.prev_steering
-        self.prev_steering = steering
+        # steering 계산
+        steering = STEERING_GAIN * raw_target
 
-        steering = np.clip(steering, -0.65, 0.65)
+        # 강력 smoothing
+        self.steering_history.append(steering)
+        self.steering_history = self.steering_history[-5:]
+        steering = np.mean(self.steering_history)
+
+        # Deadzone 강화
+        if abs(steering) < DEADZONE:
+            steering = 0.0
+
+        steering = np.clip(steering, -MAX_TURN, MAX_TURN)
 
         # 속도
-        front_clear = np.max(ranges) if len(ranges) > 0 else 1.0
-        v = np.clip(front_clear * 0.45, 0.18, MAX_SPEED)
-
+        v = np.clip(np.max(ranges) * 0.45, 0.18, MAX_SPEED)
         if np.min(ranges) < 0.40:
-            v *= 0.65
+            v *= 0.6
 
         return steering, v
 
 
-follower = RPLidarFollower()
-
-print("🚀 rplidar 라이브러리 + 중앙 따라가기 시작!")
+follower = StableFollower()
 
 try:
-    for scan in lidar.iter_scans(max_buf_meas=1500, min_len=100):
+    for scan in lidar.iter_scans(max_buf_meas=1200, min_len=80):
         steering, v = follower.process(scan)
-        w = steering * 4.0
+        w = steering * 3.2                     # angular velocity도 낮춤
 
         cmd = f"{v:.3f},{w:.3f}\n"
         arduino_ser.write(cmd.encode('utf-8'))
