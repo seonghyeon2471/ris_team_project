@@ -22,7 +22,7 @@ except:
     print("[WARN] IMU OFF")
 
 # =========================================
-# 로봇 스펙 + 튜닝 파라미터 (좁은 통로 최적)
+# 로봇 스펙
 # =========================================
 ROBOT_LENGTH = 0.21
 ROBOT_WIDTH = 0.16
@@ -44,7 +44,7 @@ lidar_ser.read(7)
 print("✅ LIDAR SCAN START")
 
 # =========================================
-# NarrowPathFollower (정면 10cm 기준)
+# NarrowPathFollower (Domain Error 방지 버전)
 # =========================================
 class NarrowPathFollower:
     def __init__(self):
@@ -52,44 +52,46 @@ class NarrowPathFollower:
         self.beta = BETA
         self.max_steering = 0.63
 
+    def safe_asin(self, x):
+        """Domain Error 방지"""
+        return math.asin(np.clip(x, -1.0, 1.0))
+
     def correct_lidar_to_robot_center(self, angles_deg, ranges):
         angles_rad = np.radians(angles_deg)
         x = ranges * np.cos(angles_rad) - LIDAR_OFFSET_FRONT
         y = ranges * np.sin(angles_rad)
-        corrected_dist = np.sqrt(x**2 + y**2)
+        corrected_dist = np.sqrt(x**2 + y**2 + 1e-8)   # 0 방지
         corrected_angle = np.degrees(np.arctan2(y, x))
         return corrected_angle, corrected_dist
 
     def process(self, angles_deg, ranges):
         corr_angles, corr_ranges = self.correct_lidar_to_robot_center(angles_deg, ranges)
 
-        # 정면 최소 거리
         front_mask = (corr_angles > -35) & (corr_angles < 35)
         front_clear = np.min(corr_ranges[front_mask]) if np.any(front_mask) else 2.0
 
         print(f"Front: {front_clear*100:5.1f}cm | Min: {np.min(corr_ranges):.2f}m")
 
         # ==================== 정면 10cm 이내 ====================
-        if front_clear < 0.10:          # ← 여기서 10cm로 변경
-            print("⚠️⚠️ 정면 10cm 이내! 강제 회피")
+        if front_clear < 0.10:
+            print("⚠️ 정면 10cm 이내! 강제 회피")
             left_clear = np.min(corr_ranges[(corr_angles > -70) & (corr_angles < -15)])
             right_clear = np.min(corr_ranges[(corr_angles > 15) & (corr_angles < 70)])
             
-            if left_clear > right_clear:
-                steering = 0.60
-            else:
-                steering = -0.60
-            v = -0.25 if front_clear < 0.08 else 0.15   # 8cm 이내면 후진
+            steering = 0.60 if left_clear > right_clear else -0.60
+            v = -0.25 if front_clear < 0.08 else 0.15
             return steering, v
 
-        # ==================== 정상 주행 ====================
+        # ==================== 정상 처리 ====================
         proc = corr_ranges.copy()
 
-        # Disparity Extender
+        # Disparity Extender (Domain Error 방지)
         for i in range(1, len(proc)-1):
             if abs(proc[i] - proc[i-1]) > 0.18:
                 d_near = max(min(proc[i], proc[i-1]), 0.08)
-                delta = math.asin((ROBOT_WIDTH/2 * SAFETY_FACTOR) / d_near)
+                arg = (ROBOT_WIDTH/2 * SAFETY_FACTOR) / d_near
+                delta = self.safe_asin(arg)          # ← 여기서 에러 방지
+                
                 mask = int(math.ceil(delta / math.radians(0.6)))
                 for k in range(-mask, mask+1):
                     if 0 <= i+k < len(proc):
@@ -105,7 +107,7 @@ class NarrowPathFollower:
                 if abs(a - angles_rad[closest_idx]) < bubble:
                     proc[i] = 0.0
 
-        # Gap 찾기
+        # Gap
         valid = proc > 0.055
         if not np.any(valid):
             return 0.0, -0.20
@@ -129,7 +131,7 @@ class NarrowPathFollower:
 
 follower = NarrowPathFollower()
 
-print("🚀 정면 10cm 감지 + 좁은 통로 버전 시작!")
+print("🚀 Math Domain Error 수정 + 정면 10cm 버전 시작!")
 
 buffer = bytearray()
 
