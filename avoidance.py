@@ -1,50 +1,66 @@
-import asyncio
-from rplidarc1.scanner import RPLidar
-import serial
 import time
 import math
+import serial
 
+# ====================== 설정 ======================
 LIDAR_PORT = '/dev/ttyUSB0'
 ARDUINO_PORT = '/dev/serial0'
 
 V_MAX = 0.15
 V_MIN = 0.07
 W_MAX = 2.0
+
 ALPHA = 40.0
 BETA = 1.0
 GAP_THRESHOLD = 200
 SAFETY_DIST = 70
-TIME_LIMIT = 58.0
 
-ser = None
+TIME_LIMIT = 58.0
+# ================================================
+
+ser_lidar = None
+ser_arduino = None
 
 def send_command(v: float, w: float):
-    global ser
+    global ser_arduino
     cmd = f"{v:.2f},{w:.2f}\n"
     try:
-        ser.write(cmd.encode('utf-8'))
-        ser.flush()
+        ser_arduino.write(cmd.encode('utf-8'))
+        ser_arduino.flush()
     except:
         pass
 
+def parse_raw_scan(raw_bytes):
+    """RPLIDAR C1 raw 데이터에서 angle, distance 추출 (간단 파서)"""
+    scan_data = {}
+    i = 0
+    while i + 5 <= len(raw_bytes):
+        # 5바이트 measurement node
+        if (raw_bytes[i] & 0x03) == 0x01:  # Start bit + Check bit 패턴
+            quality = raw_bytes[i] >> 2
+            angle_q6 = ((raw_bytes[i+1] << 7) | (raw_bytes[i] >> 1)) & 0x7FFF
+            distance_q2 = (raw_bytes[i+3] << 8) | raw_bytes[i+2]
+
+            angle = angle_q6 / 64.0
+            distance = distance_q2 / 4.0
+
+            if distance > 200 and distance < 3000 and quality > 8:
+                scan_data[angle] = {"d_mm": distance, "q": quality}
+        i += 5
+    return scan_data
+
 def find_best_gap_and_steering(scan_data):
-    if scan_data is None or not isinstance(scan_data, dict) or len(scan_data) < 20:
-        return 0.0, 9999
-    points = []
-    for ang, info in scan_data.items():
-        if not isinstance(info, dict): continue
-        d_mm = info.get("d_mm", 0)
-        q = info.get("q", 0)
-        if 200 < d_mm < 3000 and q > 8:
-            points.append((ang, d_mm))
-    if not points:
+    if not scan_data or len(scan_data) < 30:
         return 0.0, 9999
 
+    points = [(ang, info["d_mm"]) for ang, info in scan_data.items()]
     points.sort(key=lambda x: x[0])
+
     best_gap_center = 0.0
     max_score = -9999
     i = 0
     n = len(points)
+
     while i < n:
         start_idx = i
         while i < n and points[i][1] >= GAP_THRESHOLD:
@@ -70,28 +86,38 @@ def find_best_gap_and_steering(scan_data):
     phi_ref = 0.0
     weight_gap = ALPHA / d_min
     phi_s = (weight_gap * phi_gap + BETA * phi_ref) / (weight_gap + BETA)
+
     return phi_s, d_min
 
-async def main():
-    global ser
-    ser = serial.Serial(ARDUINO_PORT, 115200, timeout=0.1)
+def main():
+    global ser_lidar, ser_arduino
+
+    # Arduino 연결
+    ser_arduino = serial.Serial(ARDUINO_PORT, 115200, timeout=0.1)
     print(f"🔌 Arduino 연결: {ARDUINO_PORT}")
 
-    lidar = RPLidar(LIDAR_PORT, baudrate=460800)
-    print("🚀 LiDAR 초기화 완료")
+    # LiDAR raw 연결
+    ser_lidar = serial.Serial(LIDAR_PORT, 460800, timeout=0.1)
+    print("🚀 RPLIDAR C1 raw 연결 완료")
+
+    # Start Scan 명령 전송 (RPLIDAR 표준)
+    ser_lidar.write(b'\xA5\x20')
+    time.sleep(1.0)   # 스캔 시작 대기
 
     start_time = time.time()
 
     try:
-        asyncio.create_task(lidar.simple_scan(make_return_dict=True))
-        await asyncio.sleep(2.0)   # LiDAR 안정화 대기
-
         while True:
             if time.time() - start_time > TIME_LIMIT:
                 print("\n⏰ 시간 제한 → 종료")
                 break
 
-            scan_data = lidar.output_dict.copy() if hasattr(lidar, 'output_dict') and lidar.output_dict is not None else {}
+            # raw 데이터 읽기
+            if ser_lidar.in_waiting > 0:
+                raw_data = ser_lidar.read(ser_lidar.in_waiting)
+                scan_data = parse_raw_scan(raw_data)
+            else:
+                scan_data = {}
 
             gap_angle, d_min = find_best_gap_and_steering(scan_data)
 
@@ -103,19 +129,20 @@ async def main():
 
             print(f"Gap: {gap_angle:6.1f}° | d_min: {d_min:4.0f}mm | v:{v:.2f} w:{w:.2f}", end="\r")
 
-            await asyncio.sleep(0.15)   # ← 부하 크게 줄임
+            time.sleep(0.18)   # Pi 부하 최소화
 
+    except KeyboardInterrupt:
+        print("\n🛑 중단됨")
     except Exception as e:
         print("\n❌ 에러:", e)
     finally:
         send_command(0.0, 0.0)
-        if ser and ser.is_open:
-            ser.close()
-        try:
-            lidar.reset()
-        except:
-            pass
+        if ser_arduino and ser_arduino.is_open:
+            ser_arduino.close()
+        if ser_lidar and ser_lidar.is_open:
+            ser_lidar.write(b'\xA5\x25')  # Stop scan
+            ser_lidar.close()
         print("\n🏁 주행 종료")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
