@@ -77,7 +77,7 @@ rotate_dir        = 1
 
 REVERSE_DURATION  = 0.20
 ROTATE_DURATION   = 0.5
-REVERSE_SPEED     = -0.10
+REVERSE_SPEED     = -0.20
 ROTATE_W          = 1.1
 
 # =========================================
