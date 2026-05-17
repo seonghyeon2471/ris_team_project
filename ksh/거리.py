@@ -23,7 +23,7 @@ print("LIDAR START")
 # PARAMETERS - 최대 속도 0.85 버전
 # =========================================
 MAX_SPEED = 0.85          # ← 이제 제대로 빨라질 겁니다
-MIN_SPEED = 0.09
+MIN_SPEED = 0.50
 MAX_W = 1.75
 
 THRESH_30 = 32.0          # 고속이라 반응 거리 조금 더 앞당김
