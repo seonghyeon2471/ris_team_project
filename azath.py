@@ -57,19 +57,14 @@ DANGER_DIST      = 12
 SAFE_DIST          = 14
 INFLATION_MAX_DIST = 25
 
-FRONT_CLEAR_DIST   = 23   # ★ 수정: 12 → 23 (CRITICAL_DIST=12와 달라야 3단계 정상 작동)
+FRONT_CLEAR_DIST   = 23
 FRONT_CLEAR_RANGE  = 15
 
 # =========================================
-# ★ GOAL PARAMETER
+# GOAL PARAMETER
 # =========================================
-GOAL_ANGLE  = 0      # 목적지 방향 (정면 = 0°, 맵 구조상 골은 항상 정면)
-GOAL_WEIGHT = 1.5    # 목적지 방향 가산점 가중치
-#
-# 효과:
-#   goal_bonus = (1 - gap방향과 골방향 차이 / FRONT_RANGE) * GOAL_WEIGHT
-#   → 골 방향에 가까운 Gap일수록 최대 1.5점 추가
-#   → 넓지만 측면인 Gap보다 좁아도 정면인 Gap을 우선 선택
+GOAL_ANGLE  = 0      # 목적지 방향 (정면 = 0°)
+GOAL_WEIGHT = 2.5    # ★ 1.5 → 2.5: 정면 방향 gap 우선도 강화
 
 # =========================================
 # STATE MACHINE
@@ -83,10 +78,14 @@ maneuver_end_time = 0.0
 rotate_dir        = 1
 
 EMERGENCY_DIST    = 6
+CRITICAL_DIST     = EMERGENCY_DIST * 2   # 12cm (CRITICAL 판정 거리)
 REVERSE_DURATION  = 0.18
 ROTATE_DURATION   = 1.00
 REVERSE_SPEED     = -0.10
 ROTATE_W          = 0.9
+
+# ★ CRITICAL 상태에서 측면 gap으로 꺾이는 것을 막는 최대 허용 조향각
+CRITICAL_MAX_ANGLE = 30.0   # 30° 초과 gap은 클램프
 
 # =========================================
 # STATE DATA
@@ -101,12 +100,12 @@ def apply_ema(angle, new_dist_cm):
     scan_data[angle] = ((1.0 - EMA_ALPHA) * scan_data[angle] + EMA_ALPHA * new_dist_cm)
 
 def apply_median_filter():
-    k      = MEDIAN_K
-    window = 2 * k + 1
+    k        = MEDIAN_K
+    window   = 2 * k + 1
     filtered = np.empty(360, dtype=np.float32)
     for i in range(360):
-        indices  = [(i + d) % 360 for d in range(-k, k + 1)]
-        values   = np.sort(scan_data[indices])
+        indices     = [(i + d) % 360 for d in range(-k, k + 1)]
+        values      = np.sort(scan_data[indices])
         filtered[i] = values[window // 2]
     scan_data[:] = filtered
 
@@ -149,16 +148,15 @@ def score_gap(gap, proc_dists, angles):
     center_angle = angles[int(center_i)]
     avg_dist     = np.mean(proc_dists[start : end + 1])
 
-    # ★ 목적지 방향 가산점
-    #   gap 중심이 GOAL_ANGLE(0°)에 가까울수록 최대 GOAL_WEIGHT(1.5)점 추가
-    #   goal_diff=0° → bonus=1.5 / goal_diff=65° → bonus=0.0
+    # 목적지(정면) 방향 가산점
     goal_diff  = abs(center_angle - GOAL_ANGLE)
     goal_bonus = max(0.0, (FRONT_RANGE - goal_diff) / FRONT_RANGE) * GOAL_WEIGHT
 
-    return (width    * 0.5
+    # ★ 각도 패널티 0.6 → 1.2: 측면 gap 점수 억제
+    return (width      * 0.5
             + avg_dist * 1.2
-            - abs(center_angle) * 0.6
-            + goal_bonus)                  # ★ 가산점 추가
+            - abs(center_angle) * 1.2   # ★ 수정
+            + goal_bonus)
 
 def select_best_gap(gaps, proc_dists, angles):
     best_gap, best_score = None, -1e9
@@ -178,7 +176,8 @@ def find_best_index_in_gap(best_gap, proc_dists, angles):
         left_margin  = i - start
         right_margin = end - i
         margin       = min(left_margin, right_margin)
-        local_score  = (dist * 1.0) + (margin * 0.8) - (abs(angle) * 1.5)
+        # ★ 각도 패널티 1.5 → 2.5: gap 내부에서도 정면 우선
+        local_score  = (dist * 1.0) + (margin * 0.8) - (abs(angle) * 2.5)   # ★ 수정
         if local_score > max_local_score:
             max_local_score = local_score
             best_idx        = i
@@ -204,19 +203,23 @@ def find_best_direction(smoothing):
         scan_data[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]
     ))
 
-    # ★ 수정: CRITICAL_DIST=12, FRONT_CLEAR_DIST=23 으로 분리
-    #         → 23~12cm 구간에서 GAP 단계 정상 작동
-    CRITICAL_DIST = EMERGENCY_DIST * 2   # 6×2 = 12cm
-
-    if front_clear > FRONT_CLEAR_DIST:   # > 23cm : 직진 편향
+    if front_clear > FRONT_CLEAR_DIST:       # > 23cm: 직진 편향
         target     = gap_angle * 0.2
         bias_label = "STRAIGHT"
-    elif front_clear > CRITICAL_DIST:    # 12~23cm : Gap 완전 추종
+
+    elif front_clear > CRITICAL_DIST:         # 12~23cm: Gap 완전 추종
         target     = gap_angle * 1.0
         smoothing  = SMOOTHING_DANGER
         bias_label = "GAP"
-    else:                                # ≤ 12cm : 즉각 반응
-        target     = gap_angle * 1.0
+
+    else:                                     # ≤ 12cm: CRITICAL
+        # ★ 핵심 수정: 측면(30° 초과) gap으로 급선회하는 것을 방지
+        #   gap이 정면 ±30° 이내면 그대로 추종
+        #   30° 초과면 최대 30°로 클램프 → 장애물 방향으로 돌진 억제
+        if abs(gap_angle) <= CRITICAL_MAX_ANGLE:
+            target = gap_angle * 1.0
+        else:
+            target = math.copysign(CRITICAL_MAX_ANGLE, gap_angle)   # ★ 수정
         smoothing  = 0.0
         bias_label = "CRITICAL"
 
@@ -237,7 +240,7 @@ def compute_cmd(target_angle):
     relevant_min   = float(np.min(scan_data[search_indices]))
 
     if abs(target_angle) > ALIGN_THRESHOLD:
-        # 선회 중 항상 v=0.05 유지 (제자리 선회 시 뒷바퀴 충돌 방지)
+        # 선회 중 v=0.05 유지 (제자리 선회 시 뒷바퀴 충돌 방지)
         return 0.05, w
 
     obstacle_scale = min(relevant_min / 25.0, 1.0)
