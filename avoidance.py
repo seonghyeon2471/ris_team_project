@@ -1,8 +1,9 @@
 import time
 import math
 import serial
+from collections import deque
 
-# ====================== 설정 (여유거리 강화 버전) ======================
+# ====================== 설정 ======================
 LIDAR_PORT = '/dev/ttyUSB0'
 ARDUINO_PORT = '/dev/serial0'
 
@@ -10,17 +11,21 @@ V_MAX = 0.15
 V_MIN = 0.07
 W_MAX = 2.0
 
-ALPHA = 45.0                  # gap 가중치 조금 올림
-BETA = 1.3                    # 직진 방향 더 선호
-GAP_THRESHOLD = 420           # ← 더 큰 gap만 선택 (여유 ↑)
-SAFETY_DIST = 350             # ← 정면 35cm부터 미리 회피 (여유 ↑)
+ALPHA = 45.0
+BETA = 1.3
+GAP_THRESHOLD = 380
+SAFETY_DIST = 320
 MAX_OBSTACLE_DIST = 2200
 
 TIME_LIMIT = 58.0
+
+# SLAM 관련 설정
+MEMORY_SCANS = 8          # 최근 몇 번 스캔을 기억할지 (8~12 추천)
 # ================================================
 
 ser_lidar = None
 ser_arduino = None
+scan_memory = deque(maxlen=MEMORY_SCANS)   # 최근 스캔 누적
 
 def send_command(v: float, w: float):
     global ser_arduino
@@ -39,20 +44,28 @@ def parse_raw_scan(raw_bytes):
             quality = raw_bytes[i] >> 2
             angle_q6 = ((raw_bytes[i+1] << 7) | (raw_bytes[i] >> 1)) & 0x7FFF
             distance_q2 = (raw_bytes[i+3] << 8) | raw_bytes[i+2]
-
             angle = angle_q6 / 64.0
             distance = distance_q2 / 4.0
-
             if 200 < distance < MAX_OBSTACLE_DIST and quality > 8:
                 scan_data[angle] = {"d_mm": distance, "q": quality}
         i += 5
     return scan_data
 
+def merge_memory():
+    """최근 스캔들을 합쳐서 누적 맵 생성"""
+    merged = {}
+    for scan in scan_memory:
+        for ang, info in scan.items():
+            if ang not in merged or info["d_mm"] < merged[ang]["d_mm"]:
+                merged[ang] = info
+    return merged
+
 def find_best_gap_and_steering(scan_data):
-    if not scan_data or len(scan_data) < 30:
+    current_merged = merge_memory() if scan_memory else scan_data
+    if not current_merged or len(current_merged) < 30:
         return 0.0, 9999
 
-    points = [(ang, info["d_mm"]) for ang, info in scan_data.items()]
+    points = [(ang, info["d_mm"]) for ang, info in current_merged.items()]
     points.sort(key=lambda x: x[0])
 
     best_gap_center = 0.0
@@ -69,7 +82,7 @@ def find_best_gap_and_steering(scan_data):
             gap_end = points[i-1][0]
             gap_width = gap_end - gap_start
             gap_center = gap_start + gap_width / 2.0
-            ref_bias = abs(gap_center) * 0.5          # ← 직진 선호 강화
+            ref_bias = abs(gap_center) * 0.48
             score = gap_width - ref_bias
             if score > max_score:
                 max_score = score
@@ -95,7 +108,7 @@ def main():
     print(f"🔌 Arduino 연결: {ARDUINO_PORT}")
 
     ser_lidar = serial.Serial(LIDAR_PORT, 460800, timeout=0.1)
-    print("🚀 RPLIDAR C1 raw 연결 완료 (여유거리 강화 버전)")
+    print("🚀 RPLIDAR C1 + 간단 SLAM (Local Memory) 시작")
 
     ser_lidar.write(b'\xA5\x20')
     time.sleep(1.5)
@@ -109,11 +122,14 @@ def main():
                 break
 
             raw_data = ser_lidar.read(ser_lidar.in_waiting) if ser_lidar.in_waiting > 0 else b''
-            scan_data = parse_raw_scan(raw_data)
+            current_scan = parse_raw_scan(raw_data)
 
-            gap_angle, d_min = find_best_gap_and_steering(scan_data)
+            if current_scan:
+                scan_memory.append(current_scan)
 
-            w = math.radians(gap_angle) * 2.2          # 회전 강도 적당히
+            gap_angle, d_min = find_best_gap_and_steering(current_scan)
+
+            w = math.radians(gap_angle) * 2.2
             w = max(min(w, W_MAX), -W_MAX)
             v = V_MIN if abs(gap_angle) > 40 else V_MAX
 
@@ -121,7 +137,7 @@ def main():
 
             print(f"Gap: {gap_angle:6.1f}° | d_min: {d_min:4.0f}mm | v:{v:.2f} w:{w:.2f}", end="\r")
 
-            time.sleep(0.18)
+            time.sleep(0.17)
 
     except KeyboardInterrupt:
         print("\n🛑 중단됨")
