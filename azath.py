@@ -28,10 +28,10 @@ ROBOT_RADIUS = 17.0   # 물리 반지름 + 측면 안전 마진 (cm)
 WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 
 # =========================================
-# DRIVE PARAMETER (하한선 대폭 상향 조정)
+# DRIVE PARAMETER (하한선 상향 유지)
 # =========================================
 MAX_SPEED    = 0.14   # 최대 선속도 (m/s)
-MIN_SPEED    = 0.11   # [수정] 최소 속도를 0.11m/s로 대폭 상향 (감속을 거의 하지 않음)
+MIN_SPEED    = 0.11   # 최소 속도 상향 (0.11m/s 유지로 뚝심 있는 주행)
 MAX_W        = 1.5    # 최대 각속도 (rad/s)
 TURN_GAIN    = 1.8    # 조향 게인
 
@@ -78,6 +78,13 @@ REVERSE_SPEED     = -0.10
 ROTATE_W          = 0.9
 
 # =========================================
+# LOOP TRAP MEMORY (원형 교차로 뺑뺑이 방지 전역 변수)
+# =========================================
+loop_counter      = 0.0    # 누적 조향 상태 추적기 (EMA 필터 기반)
+LOOP_THRESHOLD    = 15.0   # 무한 루프로 판단할 임계치 (도 단위 누적값)
+VIRTUAL_WALL_DIST = 15.0   # 루프 탈출을 위해 강제로 밀어붙일 가상 벽 거리 (cm)
+
+# =========================================
 # STATE DATA
 # =========================================
 scan_data = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
@@ -100,7 +107,7 @@ def apply_median_filter():
     scan_data[:] = filtered
 
 # =========================================
-# OBSTACLE INFLATION (강화된 반지름 적용)
+# OBSTACLE INFLATION
 # =========================================
 def inflate_obstacles(dists):
     proc = dists.copy()
@@ -147,12 +154,31 @@ def select_best_gap(gaps, proc_dists, angles):
     return best_gap
 
 # =========================================
-# PLANNING (개선된 Gap 및 스무딩 제어 적용)
+# PLANNING (가상 장애물 메모리 필터 내장)
 # =========================================
 def find_best_direction(smoothing):
-    global prev_angle
+    global prev_angle, loop_counter
+    
     angles = np.arange(-FRONT_RANGE, FRONT_RANGE + 1)
-    dists = np.array([scan_data[a % 360] for a in angles], dtype=np.float32)
+    
+    # 1. 현재 라이다 데이터를 복사하여 지역 변수화
+    local_scan = scan_data.copy()
+    
+    # 2. [핵심] 뺑뺑이 루프 탈출을 위한 가상 장애물 주입
+    # loop_counter가 큰 양수(=지속적 좌회전), 큰 음수(=지속적 우회전)를 의미함
+    if abs(loop_counter) > LOOP_THRESHOLD:
+        if loop_counter > 0:
+            # 지속적으로 좌회전하며 갇혀있는 경우 -> 전방 우측 및 우측면(15°~60°)을 가상 벽으로 채움
+            # 로봇이 우측이 완전히 막혔다고 착각하게 만들어 좌측의 다른 실마리를 찾거나 크게 틀도록 유도
+            for a in range(15, FRONT_RANGE + 1):
+                local_scan[a % 360] = min(local_scan[a % 360], VIRTUAL_WALL_DIST)
+        else:
+            # 지속적으로 우회전하며 갇혀있는 경우 -> 전방 좌측 및 좌측면(-60°~-15°)을 가상 벽으로 채움
+            for a in range(-FRONT_RANGE, -14):
+                local_scan[a % 360] = min(local_scan[a % 360], VIRTUAL_WALL_DIST)
+
+    # 가상 벽이 투영되었을 수 있는 데이터를 기반으로 Gap 연산 진행
+    dists = np.array([local_scan[a % 360] for a in angles], dtype=np.float32)
     proc_dists = inflate_obstacles(dists)
     gaps = find_gaps(proc_dists, angles)
 
@@ -162,18 +188,16 @@ def find_best_direction(smoothing):
     start, end = best_gap
     gap_angle = float(angles[int((start + end) / 2.0)])
 
-    front_clear = float(np.min(scan_data[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]))
+    front_clear = float(np.min(local_scan[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]))
     
-    if front_clear > FRONT_CLEAR_DIST:         # 23cm 초과: 직진 편향
+    if front_clear > FRONT_CLEAR_DIST:         # 직진 편향
         target = gap_angle * 0.2
         bias_label = "STRAIGHT"
-        
-    elif front_clear > EMERGENCY_DIST * 2:     # 12~23cm: 완전 Gap 추종
+    elif front_clear > EMERGENCY_DIST * 2:     # 완전 Gap 추종
         target = gap_angle * 1.0               
         smoothing = SMOOTHING_DANGER           
         bias_label = "GAP"
-        
-    else:                                      # 12cm 미만: 즉시 최대 선회
+    else:                                      # 즉시 최대 선회
         target = gap_angle * 1.0
         smoothing = 0.0                        
         bias_label = "CRITICAL"
@@ -184,34 +208,33 @@ def find_best_direction(smoothing):
     return target, bias_label, front_clear
 
 # =========================================
-# CONTROL (상향된 하한선 반영 및 추가 감속 제거)
+# CONTROL
 # =========================================
 ALIGN_THRESHOLD = 10
 
 def compute_cmd(target_angle):
+    global loop_counter
+    
     # 1. 조향 계산
     w = math.radians(target_angle) * TURN_GAIN
     w = float(np.clip(w, -MAX_W, MAX_W))
 
-    # 2. 측면 감시 범위 확대 (±60° 전체 최소 거리 확인)
+    # [핵심] 조향값을 지속적으로 누적하여 현재 루프 상태를 업데이트 (지수이동평균 방식)
+    # 똑같은 각도로 계속 돌면 값이 커지고, 좌우 와다다 흔들리면 0에 수렴함
+    loop_counter = loop_counter * 0.98 + target_angle * 0.02
+
+    # 2. 측면 감시 범위 확대
     search_indices = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     relevant_min = float(np.min(scan_data[search_indices]))
 
     # 3. 정렬 상태 판단
     if abs(target_angle) > ALIGN_THRESHOLD:
-        # 큰 조향 시에도 전진 동력을 조금 더 유지 (0.02 -> 0.05)하여 시원하게 꺾음
         v = 0.05 if relevant_min > 20.0 else 0.0
         return v, w
 
-    # 4. 직진 속도 계산 (고속 지향형 튜닝)
-    # 감속 진입 시점을 완전히 늦춤 (25cm 이내일 때만 수식 작동)
+    # 4. 직진 속도 계산 (고속 지향형 유지)
     obstacle_scale = min(relevant_min / 25.0, 1.0)
-    
-    # [수정] 아무리 좁은 곳이라도 상향된 MIN_SPEED(0.11m/s) 이하로는 속도가 떨어지지 않음
     speed = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
-
-    # [수정] 기존에 존재하던 좁은 공간 진입 시 추가 감속(speed *= 0.8) 로직을 과감히 제거하여
-    # 좁은 틈새나 코너에서도 머뭇거림 없이 고속(최소 0.11 m/s)을 뚝심 있게 유지하도록 세팅함
 
     return speed, w
 
@@ -229,7 +252,7 @@ def choose_avoid_direction():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("NAVIGATION START (High-Speed & High-Minimum Drive Mode)")
+print("NAVIGATION START (Loop Escape & High-Speed Mode Active)")
 try:
     while True:
         raw = lidar_ser.read(5)
@@ -260,7 +283,7 @@ try:
             if now < maneuver_end_time: send_cmd(0.0, ROTATE_W * rotate_dir)
             else:
                 rotate_dir *= -1
-                state, prev_angle = STATE_NORMAL, 0.0
+                state, prev_angle, loop_counter = STATE_NORMAL, 0.0, 0.0 # 탈출 완료 시 카운터 리셋
                 for a in range(-45, 46): scan_data[a % 360] = float(SCAN_LIMIT)
             continue
 
@@ -284,7 +307,8 @@ try:
         v, w = compute_cmd(target_angle)
         send_cmd(v, w)
 
-        print(f"TRG:{target_angle:5.1f}° | v:{v:.2f} | w:{w:.2f} | f_min:{front_min:.1f} | bias:{bias_label}")
+        # 디버그 모니터링용 출력 (뒤에 Loop 카운터 상태 추가)
+        print(f"TRG:{target_angle:5.1f}° | v:{v:.2f} | w:{w:.2f} | f_min:{front_min:.1f} | LOOP_CTR:{loop_counter:+.1f}")
 
 except KeyboardInterrupt:
     print("STOP")
