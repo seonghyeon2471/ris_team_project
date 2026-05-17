@@ -3,9 +3,9 @@ import math
 import time
 import numpy as np
 
-# =========================================================
+# =========================================
 # SERIAL
-# =========================================================
+# =========================================
 arduino_ser = serial.Serial(
     "/dev/serial0",
     115200,
@@ -18,9 +18,9 @@ lidar_ser = serial.Serial(
     timeout=0.1
 )
 
-# =========================================================
+# =========================================
 # LIDAR START
-# =========================================================
+# =========================================
 lidar_ser.write(bytes([0xA5, 0x40]))
 
 time.sleep(2)
@@ -32,97 +32,123 @@ lidar_ser.read(7)
 
 print("LIDAR START")
 
-# =========================================================
-# PARAMETER
-# =========================================================
+# =========================================
+# ROBOT PARAMETER
+# =========================================
 
-SCAN_LIMIT = 150
+ROBOT_RADIUS = 15.5
+WHEEL_BASE   = 17.0
 
-# 기본 속도
-BASE_SPEED = 0.22
+# =========================================
+# DRIVE PARAMETER
+# =========================================
 
-# 최소 속도
-# 너무 낮으면 장애물 앞에서 멈춤
+MAX_SPEED = 0.14
 MIN_SPEED = 0.11
 
-# 최대 회전 속도
-MAX_W = 1.2
+MAX_W     = 1.2
 
-# 조향 게인
-TURN_GAIN = 0.022
+# ★ 회전 반응 강화
+TURN_GAIN = 2.3
 
-# 바퀴 간 거리
-WHEEL_BASE = 0.17
+SCAN_LIMIT  = 150
+FRONT_RANGE = 65
 
-# =========================================================
-# SOFT AVOIDANCE
-# =========================================================
+# =========================================
+# FILTER PARAMETER
+# =========================================
 
-# 일반 회피 거리
-SAFE_DIST = 45
-
-# 정면 회피 시작 거리
-FRONT_DIST = 60
-
-# =========================================================
-# HARD SAFETY
-# =========================================================
-
-# 진짜 위험 거리
-# 이 안으로 들어오면 강제 회피
-CRITICAL_DIST = 18
-
-# 강제 회피 회전 속도
-CRITICAL_W = 0.95
-
-# =========================================================
-# FILTER
-# =========================================================
-
-EMA_ALPHA = 0.35
+EMA_ALPHA = 0.30
 MEDIAN_K  = 2
 
-# =========================================================
+# =========================================
 # SMOOTHING
-# =========================================================
+# =========================================
 
-STEERING_ALPHA = 0.22
+# ★ steering 반응 빠르게
+SMOOTHING_NORMAL = 0.35
 
-current_w = 0.0
+SMOOTHING_DANGER = 0.15
 
-# =========================================================
-# ESCAPE MEMORY
-# =========================================================
+DANGER_DIST = 14
 
-# 정면 막혔을 때
-# 회피 방향 기억
+# =========================================
+# GAP PARAMETER
+# =========================================
 
-escape_dir = 1
+SAFE_DIST          = 5
+INFLATION_MAX_DIST = SCAN_LIMIT
 
-# =========================================================
+# ★ 더 멀리서 회피 시작
+FRONT_CLEAR_DIST = 38
+
+# ★ 전방 범위 확대
+FRONT_CLEAR_RANGE = 18
+
+# =========================================
+# GOAL PARAMETER
+# =========================================
+
+GOAL_ANGLE  = 0
+GOAL_WEIGHT = 1.3
+
+# =========================================
+# STATE MACHINE
+# =========================================
+
+STATE_NORMAL  = 0
+STATE_REVERSE = 1
+STATE_ROTATE  = 2
+
+state = STATE_NORMAL
+
+maneuver_end_time = 0.0
+
+rotate_dir = 1
+
+EMERGENCY_DIST = 6
+
+REVERSE_DURATION = 0.18
+ROTATE_DURATION  = 0.85
+
+REVERSE_SPEED = -0.10
+ROTATE_W      = 1.0
+
+# =========================================
+# ESCAPE LOCK
+# =========================================
+
+escape_lock_until = 0.0
+
+# =========================================
 # DATA
-# =========================================================
+# =========================================
+
 scan_data = np.full(
     360,
     float(SCAN_LIMIT),
     dtype=np.float32
 )
 
-# =========================================================
+prev_angle = 0.0
+
+# =========================================
 # EMA FILTER
-# =========================================================
-def apply_ema(angle, dist):
+# =========================================
+def apply_ema(angle, new_dist_cm):
 
     scan_data[angle] = (
         (1.0 - EMA_ALPHA)
         * scan_data[angle]
-        + EMA_ALPHA * dist
+        + EMA_ALPHA * new_dist_cm
     )
 
-# =========================================================
+# =========================================
 # MEDIAN FILTER
-# =========================================================
+# =========================================
 def apply_median_filter():
+
+    k = MEDIAN_K
 
     filtered = np.empty(
         360,
@@ -131,310 +157,397 @@ def apply_median_filter():
 
     for i in range(360):
 
-        idx = [
+        indices = [
             (i + d) % 360
-            for d in range(-MEDIAN_K, MEDIAN_K + 1)
+            for d in range(-k, k + 1)
         ]
 
-        values = np.sort(scan_data[idx])
+        values = np.sort(scan_data[indices])
 
         filtered[i] = values[len(values)//2]
 
     scan_data[:] = filtered
 
-# =========================================================
-# REGION
-# =========================================================
-def get_region_mean(start_deg, end_deg):
+# =========================================
+# INFLATION
+# =========================================
+def inflate_obstacles(dists):
 
-    if start_deg <= end_deg:
+    proc = dists.copy()
 
-        idx = np.arange(
-            start_deg,
-            end_deg + 1
+    for i in range(len(dists)):
+
+        d = dists[i]
+
+        if d < 5.0 or d >= INFLATION_MAX_DIST:
+            continue
+
+        try:
+
+            alpha = math.degrees(
+                math.asin(
+                    min(ROBOT_RADIUS / d, 1.0)
+                )
+            )
+
+        except ValueError:
+
+            alpha = 45.0
+
+        start_idx = max(
+            0,
+            int(i - alpha)
         )
 
-    else:
-
-        idx = np.concatenate((
-            np.arange(start_deg, 360),
-            np.arange(0, end_deg + 1)
-        ))
-
-    return float(np.mean(scan_data[idx]))
-
-def get_region_min(start_deg, end_deg):
-
-    if start_deg <= end_deg:
-
-        idx = np.arange(
-            start_deg,
-            end_deg + 1
+        end_idx = min(
+            len(dists) - 1,
+            int(i + alpha)
         )
 
-    else:
+        proc[start_idx:end_idx + 1] = 0.0
 
-        idx = np.concatenate((
-            np.arange(start_deg, 360),
-            np.arange(0, end_deg + 1)
-        ))
+    return proc
 
-    return float(np.min(scan_data[idx]))
+# =========================================
+# GAP SEARCH
+# =========================================
+def find_gaps(proc_dists):
 
-# =========================================================
-# SENSOR ANALYSIS
-# =========================================================
-def analyze_obstacle():
+    gaps = []
 
-    # =====================================================
-    # FRONT
-    # =====================================================
+    gap_start = None
 
-    # 전방 범위를 넓게 사용
-    # 늦은 회피 방지
+    for i, d in enumerate(proc_dists):
 
-    front_region = scan_data[
-        np.arange(-15, 16) % 360
-    ]
+        if d > SAFE_DIST:
 
-    front_mean = float(
-        np.mean(front_region)
-    )
-
-    front_min = float(
-        np.min(front_region)
-    )
-
-    # 평균 + 최소 혼합
-    # min 비중 증가
-    # 충돌 방지 강화
-
-    front = (
-        front_mean * 0.5
-        + front_min * 0.5
-    )
-
-    # =====================================================
-    # LEFT
-    # =====================================================
-
-    left_mean = get_region_mean(15, 70)
-    left_min  = get_region_min(15, 70)
-
-    left = (
-        left_mean * 0.7
-        + left_min * 0.3
-    )
-
-    # =====================================================
-    # RIGHT
-    # =====================================================
-
-    right_mean = get_region_mean(290, 345)
-    right_min  = get_region_min(290, 345)
-
-    right = (
-        right_mean * 0.7
-        + right_min * 0.3
-    )
-
-    return (
-        front,
-        front_min,
-        left,
-        right
-    )
-
-# =========================================================
-# CONTROL
-# =========================================================
-def compute_control():
-
-    global current_w
-    global escape_dir
-
-    (
-        front,
-        front_min,
-        left,
-        right
-    ) = analyze_obstacle()
-
-    # =====================================================
-    # obstacle force
-    # =====================================================
-
-    left_force = max(
-        0.0,
-        SAFE_DIST - left
-    )
-
-    right_force = max(
-        0.0,
-        SAFE_DIST - right
-    )
-
-    # =====================================================
-    # SOFT AVOIDANCE
-    # =====================================================
-
-    # 부드러운 회피
-
-    target_w = (
-        left_force
-        - right_force
-    ) * TURN_GAIN
-
-    # =====================================================
-    # FRONT BOOST
-    # =====================================================
-
-    if front < FRONT_DIST:
-
-        # 더 넓은 방향 선택
-
-        if left > right:
-
-            escape_dir = 1
+            if gap_start is None:
+                gap_start = i
 
         else:
 
-            escape_dir = -1
+            if gap_start is not None:
 
-        # 가까울수록 steering 강화
+                gaps.append(
+                    (gap_start, i - 1)
+                )
 
-        boost = (
-            (FRONT_DIST - front)
-            / FRONT_DIST
+                gap_start = None
+
+    if gap_start is not None:
+
+        gaps.append(
+            (gap_start, len(proc_dists) - 1)
         )
 
-        target_w *= (
-            1.0 + boost * 4.0
+    return gaps
+
+# =========================================
+# GAP SCORE
+# =========================================
+def score_gap(gap, proc_dists, angles):
+
+    start, end = gap
+
+    width = end - start
+
+    center_i = int(
+        (start + end) / 2
+    )
+
+    center_angle = angles[center_i]
+
+    avg_dist = np.mean(
+        proc_dists[start:end + 1]
+    )
+
+    goal_diff = abs(
+        center_angle - GOAL_ANGLE
+    )
+
+    goal_bonus = max(
+        0.0,
+        (FRONT_RANGE - goal_diff)
+        / FRONT_RANGE
+    ) * GOAL_WEIGHT
+
+    score = (
+        width * 0.55
+        + avg_dist * 1.25
+        - abs(center_angle) * 0.45
+        + goal_bonus
+    )
+
+    return score
+
+# =========================================
+# BEST GAP
+# =========================================
+def select_best_gap(gaps, proc_dists, angles):
+
+    best_gap = None
+
+    best_score = -1e9
+
+    for gap in gaps:
+
+        score = score_gap(
+            gap,
+            proc_dists,
+            angles
         )
 
-        # steering 0 방지
+        if score > best_score:
 
-        target_w += (
-            0.35 * escape_dir
+            best_score = score
+            best_gap = gap
+
+    return best_gap
+
+# =========================================
+# BEST INDEX
+# =========================================
+def find_best_index_in_gap(
+    best_gap,
+    proc_dists,
+    angles
+):
+
+    start, end = best_gap
+
+    center_idx = int(
+        (start + end) / 2
+    )
+
+    best_idx = center_idx
+
+    max_score = -1e9
+
+    for i in range(start, end + 1):
+
+        dist = proc_dists[i]
+
+        angle = angles[i]
+
+        left_margin = i - start
+        right_margin = end - i
+
+        min_margin = min(
+            left_margin,
+            right_margin
         )
 
-    # =====================================================
-    # HARD SAFETY OVERRIDE
-    # =====================================================
-
-    # 진짜 가까우면
-    # 부드러운 회피 중단
-    # 강제 회피
-
-    if front_min < CRITICAL_DIST:
-
-        target_w = (
-            CRITICAL_W
-            * escape_dir
+        local_score = (
+            min_margin * 3.5
+            + dist * 0.45
+            - abs(angle) * 0.8
         )
 
-    # =====================================================
+        if local_score > max_score:
+
+            max_score = local_score
+            best_idx = i
+
+    return best_idx
+
+# =========================================
+# FIND BEST DIRECTION
+# =========================================
+def find_best_direction(smoothing):
+
+    global prev_angle
+    global escape_lock_until
+
+    angles = np.arange(
+        -FRONT_RANGE,
+        FRONT_RANGE + 1
+    )
+
+    dists = np.array([
+        scan_data[a % 360]
+        for a in angles
+    ], dtype=np.float32)
+
+    proc_dists = inflate_obstacles(dists)
+
+    gaps = find_gaps(proc_dists)
+
+    if not gaps:
+        return None
+
+    best_gap = select_best_gap(
+        gaps,
+        proc_dists,
+        angles
+    )
+
+    best_idx = find_best_index_in_gap(
+        best_gap,
+        proc_dists,
+        angles
+    )
+
+    gap_angle = float(
+        angles[best_idx]
+    )
+
+    # =====================================
+    # FRONT CLEAR
+    # =====================================
+
+    front_clear = float(
+        np.min(
+            scan_data[
+                np.arange(
+                    -FRONT_CLEAR_RANGE,
+                    FRONT_CLEAR_RANGE + 1
+                ) % 360
+            ]
+        )
+    )
+
+    CRITICAL_DIST = EMERGENCY_DIST * 2
+
+    # =====================================
+    # STRAIGHT / GAP / CRITICAL
+    # =====================================
+
+    if front_clear > FRONT_CLEAR_DIST:
+
+        # ★ 직진 bias 약화
+        target = gap_angle * 0.45
+
+        bias_label = "STRAIGHT"
+
+    elif front_clear > CRITICAL_DIST:
+
+        target = gap_angle * 1.0
+
+        smoothing = SMOOTHING_DANGER
+
+        bias_label = "GAP"
+
+    else:
+
+        target = gap_angle * 1.0
+
+        smoothing = 0.0
+
+        bias_label = "CRITICAL"
+
+    # =====================================
     # SMOOTHING
-    # =====================================================
+    # =====================================
 
-    current_w = (
-        current_w * (1.0 - STEERING_ALPHA)
-        + target_w * STEERING_ALPHA
+    target = (
+        prev_angle * smoothing
+        + target * (1.0 - smoothing)
     )
 
-    # =====================================================
-    # LIMIT
-    # =====================================================
+    prev_angle = target
 
-    current_w = np.clip(
-        current_w,
-        -MAX_W,
-        MAX_W
+    return (
+        target,
+        bias_label,
+        front_clear
     )
 
-    # =====================================================
-    # SPEED
-    # =====================================================
+# =========================================
+# CONTROL
+# =========================================
+def compute_cmd(target_angle):
 
-    # 가까울수록 감속
+    w = math.radians(
+        target_angle
+    ) * TURN_GAIN
 
-    front_scale = np.clip(
-        front / 80.0,
-        0.45,
+    w = float(
+        np.clip(
+            w,
+            -MAX_W,
+            MAX_W
+        )
+    )
+
+    # ★ 전방 범위 확대
+    search_indices = (
+        np.arange(-18, 19) % 360
+    )
+
+    relevant_min = float(
+        np.min(
+            scan_data[search_indices]
+        )
+    )
+
+    # =====================================
+    # SPEED CONTROL
+    # =====================================
+
+    angle_filter = max(
+        0.0,
+        1.0 - (
+            abs(target_angle)
+            / FRONT_RANGE
+        )
+    )
+
+    obstacle_scale = min(
+        relevant_min / 25.0,
         1.0
     )
 
-    v = BASE_SPEED * front_scale
-
-    # =====================================================
-    # TURN SLOWDOWN
-    # =====================================================
-
-    # 회전 중 너무 감속하면
-    # 장애물 앞에서 멈춤
-
-    turn_scale = max(
-        0.70,
-        1.0 - abs(current_w) * 0.35
+    base_speed = max(
+        MAX_SPEED * obstacle_scale,
+        MIN_SPEED
     )
 
-    v *= turn_scale
-
-    # =====================================================
-    # MIN SPEED
-    # =====================================================
-
-    v = max(v, MIN_SPEED)
-
-    # =====================================================
-    # DIFFERENTIAL DRIVE
-    # =====================================================
-
-    left_wheel = (
-        v - (WHEEL_BASE / 2.0) * current_w
+    speed = (
+        MIN_SPEED
+        + (base_speed - MIN_SPEED)
+        * angle_filter
     )
 
-    right_wheel = (
-        v + (WHEEL_BASE / 2.0) * current_w
+    return float(speed), w
+
+# =========================================
+# SEND CMD
+# =========================================
+def send_cmd(v, w):
+
+    arduino_ser.write(
+        f"{v:.3f},{-w:.3f}\n".encode()
+    )
+
+# =========================================
+# STOP
+# =========================================
+def stop_robot():
+
+    send_cmd(0.0, 0.0)
+
+# =========================================
+# AVOID DIRECTION
+# =========================================
+def choose_avoid_direction():
+
+    left_avg = float(
+        np.mean(scan_data[1:90])
+    )
+
+    right_avg = float(
+        np.mean(scan_data[271:360])
     )
 
     return (
-        left_wheel,
-        right_wheel,
-        v,
-        current_w,
-        front,
-        front_min,
-        left,
-        right,
-        left_force,
-        right_force,
-        escape_dir
+        1 if left_avg >= right_avg
+        else -1
     )
 
-# =========================================================
-# MOTOR
-# =========================================================
-def send_motor(left_wheel, right_wheel):
-
-    cmd = (
-        f"{left_wheel:.3f},"
-        f"{right_wheel:.3f}\n"
-    )
-
-    arduino_ser.write(cmd.encode())
-
-# =========================================================
-# STOP
-# =========================================================
-def stop_robot():
-
-    send_motor(0.0, 0.0)
-
-# =========================================================
+# =========================================
 # MAIN LOOP
-# =========================================================
-print("START NAVIGATION")
+# =========================================
+print("NAVIGATION START")
 
 try:
 
@@ -467,62 +580,167 @@ try:
             )
         ) % 360
 
-        dist = (
+        dist_cm = (
             (raw[3]
             | (raw[4] << 8))
             / 40.0
         )
 
-        if 3 < dist < SCAN_LIMIT:
+        if 3 < dist_cm < SCAN_LIMIT:
 
-            apply_ema(angle, dist)
-
-        # =================================================
-        # 한 바퀴 스캔 완료
-        # =================================================
+            apply_ema(
+                angle,
+                dist_cm
+            )
 
         if s_flag != 1:
             continue
 
         apply_median_filter()
 
-        (
-            left_wheel,
-            right_wheel,
-            v,
-            w,
-            front,
-            front_min,
-            left,
-            right,
-            left_force,
-            right_force,
-            escape_dir
-        ) = compute_control()
+        now = time.time()
 
-        # =================================================
-        # MOTOR SEND
-        # =================================================
+        # =================================
+        # STATE_REVERSE
+        # =================================
+        if state == STATE_REVERSE:
 
-        send_motor(
-            left_wheel,
-            right_wheel
+            if now < maneuver_end_time:
+
+                send_cmd(
+                    REVERSE_SPEED,
+                    0.0
+                )
+
+            else:
+
+                state = STATE_ROTATE
+
+                maneuver_end_time = (
+                    now + ROTATE_DURATION
+                )
+
+            continue
+
+        # =================================
+        # STATE_ROTATE
+        # =================================
+        if state == STATE_ROTATE:
+
+            if now < maneuver_end_time:
+
+                send_cmd(
+                    0.0,
+                    ROTATE_W * rotate_dir
+                )
+
+            else:
+
+                rotate_dir *= -1
+
+                state = STATE_NORMAL
+
+                prev_angle = 0.0
+
+                for a in range(-45, 46):
+
+                    scan_data[a % 360] = (
+                        float(SCAN_LIMIT)
+                    )
+
+            continue
+
+        # =================================
+        # NORMAL
+        # =================================
+
+        front_min = float(
+            np.min(
+                scan_data[
+                    np.arange(-18, 19) % 360
+                ]
+            )
         )
 
-        # =================================================
+        # =================================
+        # EMERGENCY
+        # =================================
+
+        if front_min < EMERGENCY_DIST:
+
+            rotate_dir = (
+                choose_avoid_direction()
+            )
+
+            state = STATE_REVERSE
+
+            maneuver_end_time = (
+                now + REVERSE_DURATION
+            )
+
+            send_cmd(
+                REVERSE_SPEED,
+                0.0
+            )
+
+            continue
+
+        # =================================
+        # NORMAL NAVIGATION
+        # =================================
+
+        smoothing = (
+            SMOOTHING_DANGER
+            if front_min < DANGER_DIST
+            else SMOOTHING_NORMAL
+        )
+
+        result = find_best_direction(
+            smoothing
+        )
+
+        if result is None:
+
+            rotate_dir = (
+                choose_avoid_direction()
+            )
+
+            state = STATE_REVERSE
+
+            maneuver_end_time = (
+                now + REVERSE_DURATION
+            )
+
+            send_cmd(
+                REVERSE_SPEED,
+                0.0
+            )
+
+            continue
+
+        (
+            target_angle,
+            bias_label,
+            front_clear
+        ) = result
+
+        v, w = compute_cmd(
+            target_angle
+        )
+
+        send_cmd(v, w)
+
+        # =================================
         # DEBUG
-        # =================================================
+        # =================================
 
         print(
+            f"TRG:{target_angle:5.1f}° | "
             f"v:{v:.2f} | "
             f"w:{w:.2f} | "
-            f"F:{front:.1f} | "
-            f"Fmin:{front_min:.1f} | "
-            f"L:{left:.1f} | "
-            f"R:{right:.1f} | "
-            f"LF:{left_force:.1f} | "
-            f"RF:{right_force:.1f} | "
-            f"DIR:{escape_dir}"
+            f"f_min:{front_min:.1f} | "
+            f"clear:{front_clear:.1f} | "
+            f"bias:{bias_label}"
         )
 
 except KeyboardInterrupt:
