@@ -22,15 +22,15 @@ print("LIDAR START")
 # =========================================
 # ROBOT PHYSICAL PARAMETER
 # =========================================
-ROBOT_RADIUS = 19.0
+ROBOT_RADIUS = 17.0
 WHEEL_BASE   = 17.0
 
 # =========================================
 # DRIVE PARAMETER
 # =========================================
-MAX_SPEED    = 0.17
-MIN_SPEED    = 0.11
-MAX_W        = 0.9
+MAX_SPEED    = 0.19
+MIN_SPEED    = 0.14
+MAX_W        = 1.0
 TURN_GAIN    = 1.8
 
 SCAN_LIMIT   = 150
@@ -61,7 +61,7 @@ FRONT_CLEAR_RANGE  = 15
 # [핵심] 사각형 Emergency 감지 박스
 # 로봇 정면 기준 앞 5cm x 좌우 ±20cm 직사각형
 # =========================================
-EMERGENCY_FRONT = 5.0    # 앞 방향 감지 거리 (cm)
+EMERGENCY_FRONT = 7.0    # 앞 방향 감지 거리 (cm)
 EMERGENCY_SIDE  = 9.0   # 좌우 방향 감지 거리 (cm)
 
 # =========================================
