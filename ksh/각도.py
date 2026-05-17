@@ -17,9 +17,13 @@ time.sleep(1)
 lidar.write(bytes([0xA5, 0x20]))
 time.sleep(2)
 lidar.reset_input_buffer()
-print("✅ 연결 완료! (v 고정 + 지속 초강력 w 모드)")
+print("✅ 연결 완료! (v 고정 + 흔들림 방지 smoothing 모드)")
 
-REACTION_DIST = 0.70   # 70cm 이내에서만 반응
+REACTION_DIST = 0.70
+
+# smoothing 변수
+smoothed_w = 0.0
+SMOOTH_ALPHA = 0.35   # 0.3~0.5 사이에서 테스트 (작을수록 더 부드러움)
 
 def get_scan_points():
     chunk = lidar.read(1200)
@@ -45,13 +49,13 @@ def get_scan_points():
     return points
 
 # =========================================
-# 메인 루프 - v 고정 + w 초강력 지속
+# 메인 루프 - 흔들림 방지 버전
 # =========================================
 try:
     while True:
         points = get_scan_points()
 
-        v = 0.22                    # ← v는 항상 이 속도로 유지 (사용자 요청)
+        v = 0.22                    # v 완전 고정
         w = 0.0
         min_dist = float('inf')
         best_theta = 0.0
@@ -62,28 +66,32 @@ try:
                     min_dist = dist
                     best_theta = theta
 
-            if min_dist < REACTION_DIST:          # 장애물이 감지되는 동안
+            if min_dist < REACTION_DIST:
                 abs_theta = abs(best_theta)
 
-                if abs_theta <= 60:      # 정면
-                    strength = 1.80
+                # 작은 각도는 무시 (deadzone)
+                if abs_theta < 8:
+                    strength = 0.0
+                elif abs_theta <= 60:
+                    strength = 1.65
                 elif abs_theta <= 90:
-                    strength = 1.40
+                    strength = 1.30
                 elif abs_theta <= 120:
-                    strength = 1.05
+                    strength = 1.00
                 else:
                     strength = 0.0
 
-                steering = - (best_theta / 18.0) * strength
+                steering = - (best_theta / 20.0) * strength
 
-                # 가까우면 더 강하게
                 if min_dist < 0.15:
-                    steering *= 2.4
+                    steering *= 2.2
 
-                v = 0.22                                   # v는 절대 낮추지 않음
-                w = steering * 13.0                        # ← w 지속 강하게 (대폭 증가)
+                # ================== smoothing 적용 ==================
+                new_w = steering * 8.5                     # gain 약간 낮춤
+                smoothed_w = SMOOTH_ALPHA * new_w + (1 - SMOOTH_ALPHA) * smoothed_w
+                w = smoothed_w
 
-                w = max(-7.0, min(7.0, w))
+                w = max(-6.5, min(6.5, w))
 
         # Arduino 전송
         cmd = f"{v:.2f},{w:.3f}\n"
@@ -94,7 +102,7 @@ try:
             status = "REACTION" if min_dist < REACTION_DIST else "IGNORE"
             print(f"θ: {best_theta:+6.1f}°  dist: {min_dist:.2f}m  [{status}]  v:{v:.2f}  w:{w:+.3f}")
 
-        time.sleep(0.025)
+        time.sleep(0.03)
 
 except KeyboardInterrupt:
     print("\n\n종료")
