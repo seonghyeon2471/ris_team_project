@@ -1,186 +1,131 @@
 import serial
-import math
 import time
-import numpy as np
 
 # =========================================
-# SERIAL
+# SERIAL PORTS
 # =========================================
-arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
-lidar_ser = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)
+ARDUINO_PORT = "/dev/serial0"
+LIDAR_PORT   = "/dev/ttyUSB0"
 
-# =========================================
-# LIDAR START
-# =========================================
-lidar_ser.write(bytes([0xA5, 0x40]))
+arduino = serial.Serial(ARDUINO_PORT, 115200, timeout=0.1)
+lidar   = serial.Serial(LIDAR_PORT,   460800, timeout=0.05)
+
+# LIDAR 시작
+print("LiDAR 시작 중...")
+lidar.write(bytes([0xA5, 0x40]))
+time.sleep(1)
+lidar.write(bytes([0xA5, 0x20]))
 time.sleep(2)
-lidar_ser.reset_input_buffer()
-lidar_ser.write(bytes([0xA5, 0x20]))
-lidar_ser.read(7)
-print("LIDAR START")
+lidar.reset_input_buffer()
+print("✅ 거리별 tier 회피 시작 (30cm / 20cm / 10cm)")
+
+# ================== 거리 tier ==================
+TIER_30CM = 0.30
+TIER_20CM = 0.20
+TIER_10CM = 0.10
+
+BASE_V = 0.22
+MAX_W  = 7.5
+
+# smoothing
+smoothed_w = 0.0
+ALPHA = 0.45
+
+def get_scan_points():
+    chunk = lidar.read(1400)
+    points = []
+    i = 0
+    while i + 4 < len(chunk):
+        q = chunk[i]
+        a1 = chunk[i+1]
+        a2 = chunk[i+2]
+        d1 = chunk[i+3]
+        d2 = chunk[i+4]
+
+        angle_raw = (a2 << 8) | a1
+        angle = (angle_raw / 64.0) % 360.0
+        dist = ((d2 << 8 | d1) / 4.0) / 1000.0   # m 단위
+
+        if 0.08 < dist < 5.0 and (q & 0x01):
+            if angle > 180:
+                angle -= 360
+            points.append((angle, dist))
+        i += 5
+    return points
 
 # =========================================
-# ★★★ 여기서 OFFSET 조정하세요 ★★★
+# 메인 루프
 # =========================================
-ANGLE_OFFSET = 0          # ← 0, 90, -90, 180, -180 중에서 테스트!
-# =========================================
-
-# =========================================
-# ROBOT PARAMETER (기존 그대로)
-# =========================================
-ROBOT_RADIUS = 8.5
-WHEEL_BASE = 17.0
-
-MAX_SPEED = 0.18
-MIN_SPEED = 0.10
-MAX_W = 1.5
-TURN_GAIN = 3.0           # ← 2.2 → 3.0으로 증가 (더 잘 돌게)
-SCAN_LIMIT = 150
-FRONT_RANGE = 90          # ← 55 → 90으로 확대 (측면도 더 잘 보게)
-
-# 나머지 파라미터는 그대로...
-EMA_ALPHA = 0.3
-MEDIAN_K = 2
-SMOOTHING_NORMAL = 0.55
-SMOOTHING_DANGER = 0.10
-DANGER_DIST = 10
-SAFE_DIST = 8.5
-INFLATION_MAX_DIST = 60.0
-FRONT_CLEAR_DIST = 20.0
-FRONT_CLEAR_RANGE = 20     # ← 12 → 20으로 확대
-EMERGENCY_DIST = 4.5
-REVERSE_DURATION = 0.12
-ROTATE_DURATION = 0.75
-REVERSE_SPEED = -0.08
-ROTATE_W = 1.2
-
-# =========================================
-# STATE MACHINE 등 (기존 그대로)
-# =========================================
-state = 0
-STATE_NORMAL = 0
-STATE_REVERSE = 1
-STATE_ROTATE = 2
-maneuver_end_time = 0.0
-rotate_dir = 1
-recovery_until = 0.0
-scan_data = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
-prev_angle = 0.0
-last_odom_time = time.time()
-pose_theta = 0.0
-GLOBAL_GOAL_THETA = 0.0
-GOAL_WEIGHT = 2.5
-
-# (apply_ema, apply_median_filter, update_heading, inflate_obstacles, find_gaps, score_gap, select_best_gap 함수들은 그대로 유지)
-
-def apply_ema(angle, new_dist_cm):
-    scan_data[angle] = (1.0 - EMA_ALPHA) * scan_data[angle] + EMA_ALPHA * new_dist_cm
-
-def apply_median_filter():
-    k = MEDIAN_K
-    window = 2 * k + 1
-    filtered = np.empty(360, dtype=np.float32)
-    for i in range(360):
-        indices = [(i + d) % 360 for d in range(-k, k + 1)]
-        values = np.sort(scan_data[indices])
-        filtered[i] = values[window // 2]
-    scan_data[:] = filtered
-
-def update_heading(w_radps):
-    global pose_theta, last_odom_time
-    now = time.time()
-    dt = now - last_odom_time
-    last_odom_time = now
-    if dt <= 0 or dt > 0.5:
-        return
-    pose_theta += w_radps * dt
-    pose_theta = (pose_theta + math.pi) % (2 * math.pi) - math.pi
-
-# (inflate_obstacles, find_gaps, score_gap, select_best_gap, find_best_direction, compute_cmd 함수들은 그대로)
-
-# =========================================
-# MAIN LOOP (ANGLE_OFFSET 적용 핵심 부분)
-# =========================================
-print("NAVIGATION START")
 try:
-    last_odom_time = time.time()
-    v_active = 0.0
-    w_active = 0.0
     while True:
-        raw = lidar_ser.read(5)
-        if len(raw) != 5:
-            continue
+        points = get_scan_points()
 
-        s_flag = raw[0] & 0x01
-        if (raw[0] & 0x02) >> 1 != (1 - s_flag):
-            continue
-        if (raw[1] & 0x01) != 1:
-            continue
-        if (raw[0] >> 2) < 3:
-            continue
+        v = BASE_V
+        w = 0.0
+        min_dist = 999.0
+        best_theta = 0.0
 
-        # ================== ANGLE_OFFSET 적용 ==================
-        angle = int(
-            (((raw[1] >> 1) | (raw[2] << 7)) / 64.0)
-        ) % 360
-        angle = (angle + ANGLE_OFFSET) % 360
-        # =====================================================
+        # 전방 ±120도 내 가장 가까운 장애물 찾기
+        for theta, dist in points:
+            if abs(theta) <= 120 and dist < min_dist:
+                min_dist = dist
+                best_theta = theta
 
-        dist_cm = (raw[3] | (raw[4] << 8)) / 40.0
+        # ================== 거리별 + 좌우 반대 방향 ==================
+        if min_dist < TIER_30CM:
+            abs_theta = abs(best_theta)
+            
+            # 좌우 판단 및 반대 방향 회전
+            if best_theta > 0:      # 왼쪽 장애물 → 오른쪽으로 회전 (w < 0)
+                direction = -1
+            else:                   # 오른쪽 장애물 → 왼쪽으로 회전 (w > 0)
+                direction = 1
 
-        if 3 < dist_cm < SCAN_LIMIT:
-            apply_ema(angle, dist_cm)
+            # 거리 tier별 강도
+            if min_dist < TIER_10CM:
+                strength = 1.0      # 10cm 이하 = 초강력
+            elif min_dist < TIER_20CM:
+                strength = 0.75     # 20cm
+            else:
+                strength = 0.45     # 30cm
 
-        if s_flag != 1:
-            continue
+            target_w = direction * 9.5 * strength
 
-        apply_median_filter()
-        now = time.time()
-        update_heading(w_active)
+            # smoothing 적용
+            smoothed_w = ALPHA * target_w + (1 - ALPHA) * smoothed_w
+            w = smoothed_w
 
-        # STATE_REVERSE, STATE_ROTATE 부분은 그대로...
+            # 매우 가까우면 속도 낮춤
+            if min_dist < TIER_10CM:
+                v = 0.10
+            elif min_dist < TIER_20CM:
+                v = 0.16
 
-        # NORMAL STATE
-        front_min = float(np.min(scan_data[np.arange(-10, 11) % 360]))
+        else:
+            # 장애물 없으면 w 천천히 0으로
+            smoothed_w *= 0.65
 
-        if time.time() > recovery_until:
-            if front_min < EMERGENCY_DIST:
-                rotate_dir = 1 if np.mean(scan_data[1:90]) >= np.mean(scan_data[271:360]) else -1
-                state = STATE_REVERSE
-                maneuver_end_time = now + REVERSE_DURATION
-                v_active = REVERSE_SPEED
-                w_active = 0.0
-                arduino_ser.write(f"{v_active:.3f},{-w_active:.3f}\n".encode())
-                print("EMERGENCY")
-                continue
+        w = max(-MAX_W, min(MAX_W, w))
 
-        # PLANNING
-        smoothing = SMOOTHING_DANGER if front_min < DANGER_DIST else SMOOTHING_NORMAL
-        result = find_best_direction(smoothing)   # (기존 함수 그대로 사용)
+        # Arduino로 전송
+        cmd = f"{v:.2f},{w:.3f}\n"
+        arduino.write(cmd.encode())
 
-        if result is None:
-            rotate_dir = 1 if np.mean(scan_data[1:90]) >= np.mean(scan_data[271:360]) else -1
-            state = STATE_REVERSE
-            maneuver_end_time = now + REVERSE_DURATION
-            continue
+        # 실시간 출력
+        if min_dist < TIER_30CM:
+            side = "LEFT" if best_theta > 0 else "RIGHT"
+            tier = "10cm↑" if min_dist < TIER_10CM else "20cm↑" if min_dist < TIER_20CM else "30cm↑"
+            print(f"{side} [{tier}] dist:{min_dist:.2f}m  θ:{best_theta:+5.1f}°  v:{v:.2f}  w:{w:+.3f}")
+        else:
+            print(f"CLEAR  dist:{min_dist:.2f}m  v:{v:.2f}  w:{w:+.3f}")
 
-        target_angle, bias_label, front_clear = result
-        v_active, w_active = compute_cmd(target_angle)
-
-        # SEND
-        arduino_ser.write(f"{v_active:.3f},{-w_active:.3f}\n".encode())
-
-        print(
-            f"Heading:{math.degrees(pose_theta):6.1f}° | "
-            f"TRG:{target_angle:5.1f}° | "
-            f"v:{v_active:.2f} | "
-            f"w:{w_active:.2f} | "
-            f"front:{front_min:5.1f} | "
-            f"offset:{ANGLE_OFFSET} | {bias_label}"
-        )
+        time.sleep(0.03)
 
 except KeyboardInterrupt:
-    print("STOP")
+    print("\n종료")
+    arduino.write(b"0.0,0.0\n")
+
 finally:
-    arduino_ser.write(b"0.0,0.0\n")
-    lidar_ser.write(bytes([0xA5, 0x25]))
+    lidar.write(bytes([0xA5, 0x25]))
+    arduino.close()
+    lidar.close()
