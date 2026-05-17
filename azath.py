@@ -24,8 +24,7 @@ print("LIDAR START")
 # =========================================
 # ROBOT PHYSICAL PARAMETER
 # =========================================
-ROBOT_RADIUS = 12.0   # 실제 물리 반지름에 가깝게 하향 (cm)
-WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
+ROBOT_RADIUS = 12.0   # 로봇 물리 반지름 (cm)
 
 # =========================================
 # DRIVE PARAMETER
@@ -45,11 +44,12 @@ EMA_ALPHA        = 0.3
 MEDIAN_K         = 2
 SMOOTHING_NORMAL = 0.55
 SMOOTHING_DANGER = 0.10
-DANGER_DIST      = 12     # [수정] 감속 기준을 12cm로 살짝 상향
+DANGER_DIST      = 15     # 감속 기준 거리 (cm)
 
-SAFE_DIST          = 12.0   
-INFLATION_MAX_DIST = 60.0   
-FRONT_CLEAR_DIST   = 20.0   
+# [핵심 수정] 물리 반지름보다 최소 3cm의 여유를 주어야 벽에 처박지 않고 스무스하게 돌아 나갑니다.
+SAFE_DIST          = 15.0   # 기존 12.0 -> 15.0 (벽 충돌 방지 안전 마진 확보)
+INFLATION_MAX_DIST = 50.0   # 부풀리기를 적용할 최대 거리
+FRONT_CLEAR_DIST   = 22.0   
 FRONT_CLEAR_RANGE  = 12     
 
 # =========================================
@@ -60,7 +60,7 @@ GLOBAL_GOAL_THETA = 0.0
 GOAL_WEIGHT = 2.5 
 
 # =========================================
-# STATE MACHINE (후진/회전 밸런스 조정)
+# STATE MACHINE
 # =========================================
 STATE_NORMAL  = 0
 STATE_REVERSE = 1
@@ -70,11 +70,11 @@ state             = STATE_NORMAL
 maneuver_end_time = 0.0
 rotate_dir        = 1
 
-EMERGENCY_DIST    = 7.0    # [수정] 비상 거리 실효값으로 조정
-REVERSE_DURATION  = 0.40   # [수정] 0.15초 -> 0.4초로 늘려 확실하게 뒤로 공간 확보
-ROTATE_DURATION   = 0.70   # [수정] 1.0초 -> 0.7초로 줄여 과도한 회전 방지
-REVERSE_SPEED     = -0.12  # [수정] 후진 속도 살짝 상향
-ROTATE_W          = 1.0    # [수정] 회전 각속도 상향
+EMERGENCY_DIST    = 8.0    # 처박기 전에 멈추도록 비상 정지 거리 상향
+REVERSE_DURATION  = 0.45   
+ROTATE_DURATION   = 0.65   
+REVERSE_SPEED     = -0.12  
+ROTATE_W          = 1.0    
 
 # =========================================
 # STATE DATA
@@ -117,18 +117,30 @@ def update_heading(w_radps):
     pose_theta = (math.pi + pose_theta) % (2 * math.pi) - math.pi
 
 # =========================================
-# OBSTACLE INFLATION
+# OBSTACLE INFLATION (배열 인덱스 버그 수정본)
 # =========================================
-def inflate_obstacles(dists):
+def inflate_obstacles(dists, angles):
+    """ 탐색 범위 내의 장애물을 로봇 크기만큼 확실하게 부풀려 0.0으로 만듭니다. """
     proc = dists.copy()
-    for i in range(len(dists)):
-        d = dists[i]
-        if d < 5 or d >= INFLATION_MAX_DIST:
+    num_elements = len(dists)
+    
+    for i in range(num_elements):
+        real_angle = angles[i] % 360
+        # 실제 원본 데이터(scan_data)에서 거리를 가져와 판별
+        d = scan_data[real_angle]
+        
+        if d < 4.0 or d >= INFLATION_MAX_DIST:
             continue
+            
+        # 장애물 각도 스크리닝 부풀리기 연산
         alpha = math.degrees(math.asin(min(ROBOT_RADIUS / d, 1.0)))
-        start_idx = max(0, int(i - alpha))
-        end_idx   = min(len(dists) - 1, int(i + alpha))
-        proc[start_idx : end_idx + 1] = 0.0
+        
+        # 현재 슬라이스(angles) 내에서 부풀려야 할 인덱스 범위를 계산
+        for j in range(num_elements):
+            angle_diff = (angles[j] - angles[i] + 180) % 360 - 180
+            if abs(angle_diff) <= alpha:
+                proc[j] = 0.0  # 안전거리 이하 지역은 강제로 틈새 탐색에서 제외
+                
     return proc
 
 # =========================================
@@ -184,7 +196,9 @@ def find_best_direction(smoothing):
     global prev_angle, is_recovering
     angles = np.arange(-FRONT_RANGE, FRONT_RANGE + 1)
     dists = np.array([scan_data[a % 360] for a in angles], dtype=np.float32)
-    proc_dists = inflate_obstacles(dists)
+    
+    # [수정] 인덱스 깨짐 방지를 위해 angles 배열을 인자로 같이 전달합니다.
+    proc_dists = inflate_obstacles(dists, angles)
     
     gaps = find_gaps(proc_dists, angles)
     if not gaps: return None
@@ -252,7 +266,7 @@ def choose_avoid_direction():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("NAVIGATION START (Anti-Deadlock Anti-Oscillation Mode)")
+print("NAVIGATION START (Wall-Collision Fix Mode)")
 try:
     last_odom_time = time.time()
     v_active, w_active = 0.0, 0.0
@@ -291,8 +305,6 @@ try:
                 v_active, w_active = 0.0, ROTATE_W * rotate_dir
                 send_cmd(v_active, w_active)
             else:
-                # [수정] 가짜 데이터 주입 로직 완전 삭제
-                # 회전 직후 깨끗한 데이터 수집을 위해 시리얼 버퍼를 비우고 판단을 0.1초 강제 유예
                 stop_robot()
                 lidar_ser.reset_input_buffer()
                 time.sleep(0.1) 
@@ -302,7 +314,6 @@ try:
             continue
 
         # --- STATE_NORMAL ---
-        # [핵심 수정] 충돌 감지 범위를 정면(±10°)에서 좌우 측면(±90°) 전체로 확장하여 옆구리 끼임 원천 차단
         emergency_indices = np.arange(-90, 91) % 360
         side_front_min = float(np.min(scan_data[emergency_indices]))
         
