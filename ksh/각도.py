@@ -20,25 +20,25 @@ lidar_ser.read(7)
 print("LIDAR START")
 
 # =========================================
-# ★★★ OFFSET 여기서 바꿔가며 테스트하세요 ★★★
+# ★★★ 여기서 OFFSET 조정하세요 ★★★
 # =========================================
-ANGLE_OFFSET = 0          # ← 0 → 90 → -90 → 180 → -180 순으로 테스트!!
+ANGLE_OFFSET = 0          # ← 0, 90, -90, 180, -180 중에서 테스트!
 # =========================================
 
 # =========================================
-# ROBOT PARAMETER (회전 강화)
+# ROBOT PARAMETER (기존 그대로)
 # =========================================
 ROBOT_RADIUS = 8.5
 WHEEL_BASE = 17.0
+
 MAX_SPEED = 0.18
 MIN_SPEED = 0.10
 MAX_W = 1.5
-TURN_GAIN = 3.2           # ← 회전 더 강하게
+TURN_GAIN = 3.0           # ← 2.2 → 3.0으로 증가 (더 잘 돌게)
 SCAN_LIMIT = 150
-FRONT_RANGE = 90          # 측면까지 더 넓게 보기
+FRONT_RANGE = 90          # ← 55 → 90으로 확대 (측면도 더 잘 보게)
 
-# (나머지 파라미터는 그대로 유지)
-
+# 나머지 파라미터는 그대로...
 EMA_ALPHA = 0.3
 MEDIAN_K = 2
 SMOOTHING_NORMAL = 0.55
@@ -47,14 +47,16 @@ DANGER_DIST = 10
 SAFE_DIST = 8.5
 INFLATION_MAX_DIST = 60.0
 FRONT_CLEAR_DIST = 20.0
-FRONT_CLEAR_RANGE = 20
+FRONT_CLEAR_RANGE = 20     # ← 12 → 20으로 확대
 EMERGENCY_DIST = 4.5
 REVERSE_DURATION = 0.12
 ROTATE_DURATION = 0.75
 REVERSE_SPEED = -0.08
 ROTATE_W = 1.2
 
-# STATE MACHINE 등 (기존과 동일하게 유지)
+# =========================================
+# STATE MACHINE 등 (기존 그대로)
+# =========================================
 state = 0
 STATE_NORMAL = 0
 STATE_REVERSE = 1
@@ -69,7 +71,8 @@ pose_theta = 0.0
 GLOBAL_GOAL_THETA = 0.0
 GOAL_WEIGHT = 2.5
 
-# ====================== UTIL 함수들 (기존 그대로) ======================
+# (apply_ema, apply_median_filter, update_heading, inflate_obstacles, find_gaps, score_gap, select_best_gap 함수들은 그대로 유지)
+
 def apply_ema(angle, new_dist_cm):
     scan_data[angle] = (1.0 - EMA_ALPHA) * scan_data[angle] + EMA_ALPHA * new_dist_cm
 
@@ -88,56 +91,93 @@ def update_heading(w_radps):
     now = time.time()
     dt = now - last_odom_time
     last_odom_time = now
-    if dt <= 0 or dt > 0.5: return
+    if dt <= 0 or dt > 0.5:
+        return
     pose_theta += w_radps * dt
     pose_theta = (pose_theta + math.pi) % (2 * math.pi) - math.pi
 
-# inflate_obstacles, find_gaps, score_gap, select_best_gap, find_best_direction, compute_cmd 함수들은 그대로 유지
-# (코드 길이 때문에 생략했지만, 기존 코드에 있던 함수들은 그대로 복사해서 사용하세요)
+# (inflate_obstacles, find_gaps, score_gap, select_best_gap, find_best_direction, compute_cmd 함수들은 그대로)
 
 # =========================================
-# MAIN LOOP
+# MAIN LOOP (ANGLE_OFFSET 적용 핵심 부분)
 # =========================================
-print("NAVIGATION START - OFFSET:", ANGLE_OFFSET)
+print("NAVIGATION START")
 try:
     last_odom_time = time.time()
     v_active = 0.0
     w_active = 0.0
     while True:
         raw = lidar_ser.read(5)
-        if len(raw) != 5: continue
+        if len(raw) != 5:
+            continue
 
         s_flag = raw[0] & 0x01
-        if (raw[0] & 0x02) >> 1 != (1 - s_flag): continue
-        if (raw[1] & 0x01) != 1: continue
-        if (raw[0] >> 2) < 3: continue
+        if (raw[0] & 0x02) >> 1 != (1 - s_flag):
+            continue
+        if (raw[1] & 0x01) != 1:
+            continue
+        if (raw[0] >> 2) < 3:
+            continue
 
         # ================== ANGLE_OFFSET 적용 ==================
-        angle = int((((raw[1] >> 1) | (raw[2] << 7)) / 64.0)) % 360
+        angle = int(
+            (((raw[1] >> 1) | (raw[2] << 7)) / 64.0)
+        ) % 360
         angle = (angle + ANGLE_OFFSET) % 360
         # =====================================================
 
         dist_cm = (raw[3] | (raw[4] << 8)) / 40.0
+
         if 3 < dist_cm < SCAN_LIMIT:
             apply_ema(angle, dist_cm)
 
-        if s_flag != 1: continue
+        if s_flag != 1:
+            continue
 
         apply_median_filter()
         now = time.time()
         update_heading(w_active)
 
-        # STATE_REVERSE, STATE_ROTATE 부분은 기존 그대로...
+        # STATE_REVERSE, STATE_ROTATE 부분은 그대로...
 
         # NORMAL STATE
         front_min = float(np.min(scan_data[np.arange(-10, 11) % 360]))
 
-        # 디버깅: 좌 / 우 / 전방 평균 거리 출력 (중요!)
-        left_avg = float(np.mean(scan_data[0:90]))
-        right_avg = float(np.mean(scan_data[270:360]))
-        print(f"OFFSET:{ANGLE_OFFSET} | Left:{left_avg:5.1f}cm | Right:{right_avg:5.1f}cm | Front:{front_min:5.1f}cm")
+        if time.time() > recovery_until:
+            if front_min < EMERGENCY_DIST:
+                rotate_dir = 1 if np.mean(scan_data[1:90]) >= np.mean(scan_data[271:360]) else -1
+                state = STATE_REVERSE
+                maneuver_end_time = now + REVERSE_DURATION
+                v_active = REVERSE_SPEED
+                w_active = 0.0
+                arduino_ser.write(f"{v_active:.3f},{-w_active:.3f}\n".encode())
+                print("EMERGENCY")
+                continue
 
-        # ... (나머지 EMERGENCY, PLANNING, send_cmd 부분은 기존 코드 그대로)
+        # PLANNING
+        smoothing = SMOOTHING_DANGER if front_min < DANGER_DIST else SMOOTHING_NORMAL
+        result = find_best_direction(smoothing)   # (기존 함수 그대로 사용)
+
+        if result is None:
+            rotate_dir = 1 if np.mean(scan_data[1:90]) >= np.mean(scan_data[271:360]) else -1
+            state = STATE_REVERSE
+            maneuver_end_time = now + REVERSE_DURATION
+            continue
+
+        target_angle, bias_label, front_clear = result
+        v_active, w_active = compute_cmd(target_angle)
+
+        # SEND
+        arduino_ser.write(f"{v_active:.3f},{-w_active:.3f}\n".encode())
+
+        print(
+            f"Heading:{math.degrees(pose_theta):6.1f}° | "
+            f"TRG:{target_angle:5.1f}° | "
+            f"v:{v_active:.2f} | "
+            f"w:{w_active:.2f} | "
+            f"front:{front_min:5.1f} | "
+            f"offset:{ANGLE_OFFSET} | {bias_label}"
+        )
 
 except KeyboardInterrupt:
     print("STOP")
