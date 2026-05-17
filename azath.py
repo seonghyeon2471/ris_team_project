@@ -71,7 +71,7 @@ rotate_dir        = 1
 
 EMERGENCY_DIST    = 8.0    # 비상 정지 거리
 REVERSE_DURATION  = 0.45   # 후진 시간 (초)
-ROTATE_DURATION   = 0.65   # 제자리 회전 시간 (초)
+ROTATE_DURATION   = 0.60   # 제자리 회전 시간 (초)
 REVERSE_SPEED     = -0.12  # 후진 속도
 ROTATE_W          = 1.0    # 회전 각속도
 
