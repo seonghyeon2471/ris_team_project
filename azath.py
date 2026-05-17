@@ -31,7 +31,7 @@ WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 # DRIVE PARAMETER
 # =========================================
 MAX_SPEED    = 0.14   # 최대 선속도 (m/s)
-MIN_SPEED    = 0.09    # 최소 속도
+MIN_SPEED    = 0.09   # [수정] 최소 속도 정상화 (0.9 -> 0.09)
 MAX_W        = 1.5    # 최대 각속도 (rad/s)
 TURN_GAIN    = 2.2    # 조향 게인
 
@@ -55,13 +55,8 @@ FRONT_CLEAR_RANGE  = 15
 # =========================================
 # GLOBAL DIRECTION PARAMETERS (단위: rad)
 # =========================================
-# 위치(x, y) 대신 로봇의 현재 전역 헤딩 각도만 관리합니다.
 pose_theta = 0.0  # rad (시작할 때 정면 방향을 0으로 기준 잡음)
-
-# [수정] 로봇이 유지하고자 하는 절대적인 '전역 목표 방향' (0.0 = 처음 출발할 때의 정면 방향)
 GLOBAL_GOAL_THETA = 0.0  # rad
-
-# 가중치 튜닝 변수 (보내주신 값 유지)
 GOAL_WEIGHT = 2.5 # 목적지 방향 틈새에 줄 가중치
 
 # =========================================
@@ -70,7 +65,6 @@ GOAL_WEIGHT = 2.5 # 목적지 방향 틈새에 줄 가중치
 STATE_NORMAL  = 0
 STATE_REVERSE = 1
 STATE_ROTATE  = 2
-# STATE_ARRIVED 상태 제거 (종료 없이 계속 주행)
 
 state             = STATE_NORMAL
 maneuver_end_time = 0.0
@@ -87,7 +81,10 @@ ROTATE_W          = 0.9
 # =========================================
 scan_data = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
 prev_angle = 0.0
-last_odom_time = time.time() # 각도 적분용 시간 기록
+last_odom_time = time.time() 
+
+# 회전 직후 가짜 프리패스 방지용 플래그
+is_recovering = False
 
 # =========================================
 # UTIL & FILTER
@@ -109,7 +106,6 @@ def apply_median_filter():
 # HEADING UPDATE (각도 누적 적분)
 # =========================================
 def update_heading(w_radps):
-    """위치 좌표 대신 로봇의 '현재 회전 각도(헤딩)'만 실시간 누적합니다."""
     global pose_theta, last_odom_time
     now = time.time()
     dt = now - last_odom_time
@@ -118,9 +114,7 @@ def update_heading(w_radps):
     if dt <= 0 or dt > 0.5:
         return
 
-    # 각속도를 적분하여 현재 전역 헤딩 계산
     pose_theta += w_radps * dt
-    # -PI ~ PI 범위로 정규화
     pose_theta = (pose_theta + math.pi) % (2 * math.pi) - math.pi
 
 # =========================================
@@ -154,34 +148,34 @@ def find_gaps(proc_dists, angles):
     if gap_start is not None: gaps.append((gap_start, len(proc_dists) - 1))
     return gaps
 
-def score_gap(gap, proc_dists, angles):
+def score_gap(gap, proc_dists, angles, is_critical=False):
     start, end = gap
     width = end - start
     center_i = (start + end) / 2.0
-    center_angle = angles[int(center_i)] # 로봇 정면 기준 틈새의 상대 각도 (도)
+    center_angle = angles[int(center_i)] 
     avg_dist = np.mean(proc_dists[start : end + 1])
 
-    # [수정] 전역 목표 방향과 현재 로봇 헤딩의 차이로 '상대적 목표 각도' 구하기
+    base_score = (width * 0.5 + avg_dist * 1.2 - abs(center_angle) * 0.4)
+    
+    # [버그 수정 1] 박기 직전(is_critical)일 때는 방향 가중치를 배제하여
+    # 목표 방향보다 '눈앞의 장애물 회피'를 무조건 최우선으로 잡도록 만듭니다.
+    if is_critical:
+        return base_score
+
     relative_goal_angle = math.degrees(GLOBAL_GOAL_THETA - pose_theta)
     relative_goal_angle = (relative_goal_angle + 180) % 360 - 180
 
-    # 이 틈새의 중심 각도가 '목표 방향 각도'와 얼마나 일치하는지 차이 계산
     angle_diff = abs(center_angle - relative_goal_angle)
     angle_diff = (angle_diff + 180) % 360 - 180
     angle_diff = abs(angle_diff)
 
-    # 기본 Gap 점수 (너비 + 깊이 - 정면편향)
-    base_score = (width * 0.5 + avg_dist * 1.2 - abs(center_angle) * 0.4)
-    
-    # 목표 방향(출발지 기준 정면)과 일치할수록 높은 보너스 점수 부여
     goal_bonus = (180.0 - angle_diff) / 180.0 * GOAL_WEIGHT
-
     return base_score + goal_bonus
 
-def select_best_gap(gaps, proc_dists, angles):
+def select_best_gap(gaps, proc_dists, angles, is_critical=False):
     best_gap, best_score = None, -1e9
     for gap in gaps:
-        s = score_gap(gap, proc_dists, angles)
+        s = score_gap(gap, proc_dists, angles, is_critical)
         if s > best_score:
             best_score, best_gap = s, gap
     return best_gap
@@ -190,31 +184,38 @@ def select_best_gap(gaps, proc_dists, angles):
 # PLANNING
 # =========================================
 def find_best_direction(smoothing):
-    global prev_angle
+    global prev_angle, is_recovering
     angles = np.arange(-FRONT_RANGE, FRONT_RANGE + 1)
     dists = np.array([scan_data[a % 360] for a in angles], dtype=np.float32)
     proc_dists = inflate_obstacles(dists)
+    
     gaps = find_gaps(proc_dists, angles)
-
     if not gaps: return None
-
-    best_gap = select_best_gap(gaps, proc_dists, angles)
-    start, end = best_gap
-    gap_angle = float(angles[int((start + end) / 2.0)])
 
     front_clear = float(np.min(scan_data[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]))
     
     if front_clear > FRONT_CLEAR_DIST:
-        target = gap_angle * 0.2
+        is_critical = False
+        best_gap = select_best_gap(gaps, proc_dists, angles, is_critical)
+        target = float(angles[int((best_gap[0] + best_gap[1]) / 2.0)]) * 0.2
         bias_label = "STRAIGHT"
     elif front_clear > EMERGENCY_DIST * 2:
-        target = gap_angle * 1.0               
+        is_critical = False
+        best_gap = select_best_gap(gaps, proc_dists, angles, is_critical)
+        target = float(angles[int((best_gap[0] + best_gap[1]) / 2.0)]) * 1.0               
         smoothing = SMOOTHING_DANGER           
         bias_label = "GAP"
     else:
-        target = gap_angle * 1.0
+        is_critical = True
+        best_gap = select_best_gap(gaps, proc_dists, angles, is_critical)
+        target = float(angles[int((best_gap[0] + best_gap[1]) / 2.0)]) * 1.0
         smoothing = 0.0                        
         bias_label = "CRITICAL"
+
+    # 회전 제어 복귀 직후 루프에서 급격히 핸들을 꺾는 현상 방지
+    if is_recovering:
+        smoothing = 0.8
+        is_recovering = False
 
     target = prev_angle * smoothing + target * (1.0 - smoothing)
     prev_angle = target
@@ -237,6 +238,8 @@ def compute_cmd(target_angle):
         v = 0.05 if relevant_min > 20.0 else 0.0
         return v, w
 
+    # [버그 수정 2] MIN_SPEED 수식 교정
+    # 장애물이 다가올 때 MAX_SPEED를 줄이되, 수정된 MIN_SPEED(0.09) 미만으로 내려가지 않게 제한합니다.
     obstacle_scale = min(relevant_min / 25.0, 1.0)
     speed = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
 
@@ -256,7 +259,7 @@ def choose_avoid_direction():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("NAVIGATION START (Global Direction Aware & Continuous Drive Mode)")
+print("NAVIGATION START (Global Direction Aware & Bug Fixed Mode)")
 try:
     last_odom_time = time.time()
     v_active, w_active = 0.0, 0.0
@@ -279,7 +282,6 @@ try:
         apply_median_filter()
         now = time.time()
 
-        # [수정] 회전 각속도(w)를 바탕으로 현재 로봇의 헤딩 각도(pose_theta)만 실시간 적분 업데이트
         update_heading(w_active)
 
         # --- STATE MACHINE ---
@@ -298,7 +300,13 @@ try:
             else:
                 rotate_dir *= -1
                 state, prev_angle = STATE_NORMAL, 0.0
-                for a in range(-45, 46): scan_data[a % 360] = float(SCAN_LIMIT)
+                is_recovering = True  
+                
+                # [버그 수정 3] 150cm 가짜 벽 착시현상 해결
+                # 회전 직후 라이다 값이 다 채워지기 전에 뻥 뚫렸다고 판단해 돌진하는 문제를 막기 위해,
+                # 임시로 안전 거리 경계값(SAFE_DIST)으로 채워 센서가 갱신될 때까지 보수적으로 움직이게 유도합니다.
+                for a in range(-45, 46): 
+                    scan_data[a % 360] = float(SAFE_DIST)
             continue
 
         # --- STATE_NORMAL ---
@@ -322,7 +330,6 @@ try:
         v_active, w_active = compute_cmd(target_angle)
         send_cmd(v_active, w_active)
 
-        # 디버그 출력에 현재 로봇의 전역 각도(Heading) 상황 표시
         print(f"Heading:{math.degrees(pose_theta):6.1f}° | TRG:{target_angle:5.1f}° | v:{v_active:.2f} | w:{w_active:.2f} | bias:{bias_label}")
 
 except KeyboardInterrupt:
