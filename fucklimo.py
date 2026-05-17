@@ -132,7 +132,7 @@ def check_emergency():
             triggered = True
             break
 
-    front_min = float(np.min(scan_data[np.arange(-60, 61) % 360]))
+    front_min = float(np.min(scan_data[np.arange(-90, 90) % 360]))
     return triggered, front_min
 
 # =========================================
