@@ -24,47 +24,47 @@ print("LIDAR START")
 # =========================================
 # ROBOT PHYSICAL PARAMETER
 # =========================================
-ROBOT_RADIUS = 17.0
-WHEEL_BASE   = 17.0
+ROBOT_RADIUS = 17.0   # 물리 반지름 + 측면 안전 마진 (cm)
+WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 
 # =========================================
 # DRIVE PARAMETER
 # =========================================
-MAX_SPEED    = 0.14
-MIN_SPEED    = 0.11
-MAX_W        = 0.8
-TURN_GAIN    = 1.8
+MAX_SPEED    = 0.14   # 최대 선속도 (m/s)
+MIN_SPEED    = 0.11   # 최소 속도 하한선 유지
+MAX_W        = 0.8    # 최대 각속도 (rad/s)
+TURN_GAIN    = 1.8    # 조향 게인
 
-SCAN_LIMIT   = 150
-FRONT_RANGE  = 65
+SCAN_LIMIT   = 150    # 유효 인식 거리 (cm)
+FRONT_RANGE  = 65     # 탐색 반경 (±65°)
 
 # =========================================
 # FILTER PARAMETER
 # =========================================
-EMA_ALPHA    = 0.3
-MEDIAN_K     = 2
+EMA_ALPHA    = 0.3    # EMA 필터 계수
+MEDIAN_K     = 2      # 중앙값 필터 범위
 
 # =========================================
 # SMOOTHING PARAMETER
 # =========================================
 SMOOTHING_NORMAL = 0.55
 SMOOTHING_DANGER = 0.20
-DANGER_DIST      = 12
+DANGER_DIST      = 12     # 위험 감지 거리 (cm)
 
 # =========================================
 # GAP & INFLATION PARAMETER
 # =========================================
-SAFE_DIST          = 14
-INFLATION_MAX_DIST = 25
+SAFE_DIST          = 14   # Gap 유효 최소 거리 (cm)
+INFLATION_MAX_DIST = 25   # 팽창 적용 최대 거리 (cm)
 
-FRONT_CLEAR_DIST   = 23
-FRONT_CLEAR_RANGE  = 15
+FRONT_CLEAR_DIST   = 23   # 직진 편향 판단 거리 (cm)
+FRONT_CLEAR_RANGE  = 15   # 직진 편향 범위 (±15°)
 
 # =========================================
-# GOAL PARAMETER
+# GOAL PARAMETER (목적지 편향 가중치)
 # =========================================
-GOAL_ANGLE  = 0
-GOAL_WEIGHT = 1.5
+GOAL_ANGLE  = 0       # 로봇 기준 정면 목적지 방향
+GOAL_WEIGHT = 1.5     # Gap 스코어링용 가중치
 
 # =========================================
 # STATE MACHINE
@@ -72,24 +72,28 @@ GOAL_WEIGHT = 1.5
 STATE_NORMAL   = 0
 STATE_REVERSE  = 1
 STATE_ROTATE   = 2
-STATE_REORIENT = 3   # ★ 추가: 탈출 후 목적지 방향 재정렬
+STATE_REORIENT = 3    # 탈출 후 목적지 방향 재정렬
 
 state             = STATE_NORMAL
 maneuver_end_time = 0.0
 rotate_dir        = 1
 
-EMERGENCY_DIST    = 6
+EMERGENCY_DIST    = 6      # 긴급회피 거리 (cm)
 REVERSE_DURATION  = 0.18
 ROTATE_DURATION   = 1.00
 REVERSE_SPEED     = -0.10
 ROTATE_W          = 0.9
 
-# ★ REORIENT 파라미터
-REORIENT_W          = 0.6    # 재정렬 중 각속도 (천천히 회전)
-REORIENT_CLEAR_DIST = 25     # 이 거리 이상 전방이 열리면 재정렬 완료
-REORIENT_TIMEOUT    = 4.0    # 최대 재정렬 시간 (초) — 무한 회전 방지
+# REORIENT 파라미터
+REORIENT_W          = 0.6    # 재정렬 중 각속도
+REORIENT_CLEAR_DIST = 25     # 재정렬 완료 판단 거리
+REORIENT_TIMEOUT    = 4.0    # 최대 재정렬 시간 (초)
 reorient_dir        = 1      # 재정렬 회전 방향
 reorient_start_time = 0.0    # 재정렬 시작 시각
+
+# 갇힘 탈출(Stuck) 카운터
+stuck_counter   = 0
+STUCK_THRESHOLD = 3          # 연속 "NO GAP" 발생 시 180도 완전 회전
 
 # =========================================
 # STATE DATA
@@ -101,9 +105,7 @@ prev_angle = 0.0
 # UTIL & FILTER
 # =========================================
 def apply_ema(angle, new_dist_cm):
-    scan_data[angle] = (
-        (1.0 - EMA_ALPHA) * scan_data[angle] + EMA_ALPHA * new_dist_cm
-    )
+    scan_data[angle] = ((1.0 - EMA_ALPHA) * scan_data[angle] + EMA_ALPHA * new_dist_cm)
 
 def apply_median_filter():
     k      = MEDIAN_K
@@ -131,7 +133,7 @@ def inflate_obstacles(dists):
     return proc
 
 # =========================================
-# GAP SEARCH
+# GAP SEARCH & SCORE (목적지 가중치 융합)
 # =========================================
 def find_gaps(proc_dists, angles):
     gaps      = []
@@ -143,8 +145,7 @@ def find_gaps(proc_dists, angles):
             if gap_start is not None:
                 gaps.append((gap_start, i - 1))
                 gap_start = None
-    if gap_start is not None:
-        gaps.append((gap_start, len(proc_dists) - 1))
+    if gap_start is not None: gaps.append((gap_start, len(proc_dists) - 1))
     return gaps
 
 def score_gap(gap, proc_dists, angles):
@@ -171,37 +172,49 @@ def select_best_gap(gaps, proc_dists, angles):
     return best_gap
 
 def find_best_index_in_gap(best_gap, proc_dists, angles):
+    """
+    [핵심 수정] 선택된 Gap 내부 인덱스를 조사할 때 목적지 가중치(Goal Weight)를 결합합니다.
+    외통수 길이나 넓은 대각선 갭이 선택되었을 때, 무작정 통로 한가운데로 돌진하지 않고
+    통로 내부 범위 중 최대한 목적지(GOAL_ANGLE=0°)와 가까운 쪽의 안전한 길목을 타겟으로 잡습니다.
+    """
     start, end      = best_gap
     best_idx        = int((start + end) / 2)
     max_local_score = -1e9
+    
     for i in range(start, end + 1):
         dist         = proc_dists[i]
         angle        = angles[i]
+        
         left_margin  = i - start
         right_margin = end - i
         margin       = min(left_margin, right_margin)
-        local_score  = (dist * 1.0) + (margin * 0.8) - (abs(angle) * 1.5)
+        
+        # 🎯 각 레이(Ray)의 각도가 목적지 방향(0도)과 일치할수록 보너스 점수 가산
+        goal_diff_local = abs(angle - GOAL_ANGLE)
+        goal_bonus_local = max(0.0, (FRONT_RANGE - goal_diff_local) / FRONT_RANGE) * 12.0
+        
+        # 기존 스코어 수식에 목적지 보너스를 더해 융합
+        local_score  = (dist * 1.0) + (margin * 0.8) - (abs(angle) * 1.5) + goal_bonus_local
+        
         if local_score > max_local_score:
             max_local_score = local_score
             best_idx        = i
+            
     return best_idx
 
 # =========================================
-# ★ REORIENT 방향 결정
-#   전방 반구(±90°)에서 어느 쪽이 더 열려있는지 판단하여
-#   목적지(0°) 방향이 빠르게 열리는 쪽으로 회전
+# REORIENT 방향 결정
 # =========================================
 def choose_reorient_direction():
-    # 왼쪽(1~90°) vs 오른쪽(270~359°) 전방 반구 평균 거리 비교
     left_avg  = float(np.mean(scan_data[1:91]))
     right_avg = float(np.mean(scan_data[270:360]))
 
     if left_avg >= right_avg:
         print(f"  [REORIENT DIR] LEFT  (L:{left_avg:.1f}cm R:{right_avg:.1f}cm)")
-        return 1    # 좌회전 → 열린 공간이 왼쪽에 있으므로 왼쪽으로 돌아서 정면 확보
+        return 1    
     else:
         print(f"  [REORIENT DIR] RIGHT (L:{left_avg:.1f}cm R:{right_avg:.1f}cm)")
-        return -1   # 우회전
+        return -1   
 
 # =========================================
 # PLANNING
@@ -242,7 +255,7 @@ def find_best_direction(smoothing):
     return target, bias_label, front_clear
 
 # =========================================
-# CONTROL
+# CONTROL (조향각 정렬 상태에 따른 Pivot Turn 구조 강화)
 # =========================================
 ALIGN_THRESHOLD = 10
 
@@ -253,8 +266,9 @@ def compute_cmd(target_angle):
     search_indices = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     relevant_min   = float(np.min(scan_data[search_indices]))
 
+    # 목표 조향각이 정렬 한계치보다 크다면, 선회 중 측면 벽을 긁지 않도록 제자리 회전(Pivot) 유도
     if abs(target_angle) > ALIGN_THRESHOLD:
-        return 0.05, w
+        return 0.0, w
 
     obstacle_scale = min(relevant_min / 25.0, 1.0)
     speed          = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
@@ -320,7 +334,6 @@ try:
                 send_cmd(0.0, ROTATE_W * rotate_dir)
                 print(f"  [ROTATE] remaining:{maneuver_end_time - now:.2f}s")
             else:
-                # ★ ROTATE 완료 → REORIENT 진입 (기존: 바로 NORMAL)
                 rotate_dir         *= -1
                 reorient_dir        = choose_reorient_direction()
                 reorient_start_time = now
@@ -331,32 +344,25 @@ try:
                 print(f"  [REORIENT START] dir:{'+' if reorient_dir > 0 else '-'}")
             continue
 
-        # ── ★ STATE_REORIENT : 목적지 방향 재정렬 ──
+        # ── STATE_REORIENT : 목적지 방향 재정렬 ──
         if state == STATE_REORIENT:
             elapsed     = now - reorient_start_time
             front_clear = float(np.min(
                 scan_data[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]
             ))
 
-            # 종료 조건 ①: 전방이 충분히 열림
             if front_clear > REORIENT_CLEAR_DIST:
                 state = STATE_NORMAL
                 print(f"  [REORIENT→NORMAL] 전방 개방 ({front_clear:.1f}cm) 재정렬 완료")
                 continue
 
-            # 종료 조건 ②: 타임아웃 (무한 회전 방지)
             if elapsed > REORIENT_TIMEOUT:
                 state = STATE_NORMAL
                 print(f"  [REORIENT→NORMAL] 타임아웃 ({elapsed:.1f}s) 강제 복귀")
                 continue
 
-            # 재정렬 중: 목적지 방향 쪽으로 천천히 회전
             send_cmd(0.0, REORIENT_W * reorient_dir)
-            print(
-                f"  [REORIENT] elapsed:{elapsed:.1f}s "
-                f"front:{front_clear:.1f}cm "
-                f"dir:{'+' if reorient_dir > 0 else '-'}"
-            )
+            print(f"  [REORIENT] elapsed:{elapsed:.1f}s front:{front_clear:.1f}cm dir:{'+' if reorient_dir > 0 else '-'}")
             continue
 
         # ── STATE_NORMAL ──
@@ -372,22 +378,31 @@ try:
         smoothing = SMOOTHING_DANGER if front_min < DANGER_DIST else SMOOTHING_NORMAL
         result    = find_best_direction(smoothing)
 
+        # 주변이 통째로 막혀 갈 수 있는 갭이 하나도 없을 때 (Stuck 예외 처리)
         if result is None:
-            rotate_dir        = choose_avoid_direction()
-            state             = STATE_REVERSE
-            maneuver_end_time = now + REVERSE_DURATION
-            send_cmd(REVERSE_SPEED, 0.0)
-            print("  NO GAP → REVERSE")
+            stuck_counter += 1
+            print(f"  [NO GAP WARNING] 연속 갇힘 횟수: {stuck_counter}/{STUCK_THRESHOLD}")
+            
+            if stuck_counter >= STUCK_THRESHOLD:
+                rotate_dir        = choose_avoid_direction()
+                state             = STATE_ROTATE
+                maneuver_end_time = now + (ROTATE_DURATION * 2.0)  # 탈출 회전 시간 증폭
+                stuck_counter     = 0
+                print("  🔥🔥 [CRITICAL STUCK] 사방 고립! 180도 회전 탈출 시도! 🔥🔥")
+            else:
+                rotate_dir        = choose_avoid_direction()
+                state             = STATE_REVERSE
+                maneuver_end_time = now + REVERSE_DURATION
+                send_cmd(REVERSE_SPEED, 0.0)
             continue
 
+        # 정상 주행 시 Stuck 카운터 리셋
+        stuck_counter = 0
         target_angle, bias_label, front_clear = result
         v, w = compute_cmd(target_angle)
         send_cmd(v, w)
 
-        print(
-            f"TRG:{target_angle:5.1f}° | v:{v:.2f} | w:{w:.2f} | "
-            f"f_min:{front_min:.1f} | clear:{front_clear:.1f} | bias:{bias_label}"
-        )
+        print(f"TRG:{target_angle:5.1f}° | v:{v:.2f} | w:{w:.2f} | f_min:{front_min:.1f} | clear:{front_clear:.1f} | bias:{bias_label}")
 
 except KeyboardInterrupt:
     print("STOP")
