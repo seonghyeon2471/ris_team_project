@@ -4,14 +4,12 @@ import numpy as np
 import math
 
 # =========================================
-# SERIAL & LIDAR INIT (당신 원본 그대로)
+# SERIAL & LIDAR
 # =========================================
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
 lidar_ser = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)
 
-# =========================================
-# IMU (원본 그대로)
-# =========================================
+# IMU
 USE_IMU = True
 try:
     import smbus2
@@ -19,112 +17,120 @@ try:
     IMU_ADDR = 0x68
     imu_bus.write_byte_data(IMU_ADDR, 0x6B, 0)
     print("✅ IMU ON")
-except Exception:
+except:
     USE_IMU = False
     print("[WARN] IMU OFF")
 
 # =========================================
-# 로봇 물리 스펙
+# 로봇 스펙 + 튜닝 파라미터 (좁은 통로 최적)
 # =========================================
-ROBOT_WIDTH = 0.16       # m
+ROBOT_LENGTH = 0.21
+ROBOT_WIDTH = 0.16
 LIDAR_OFFSET_FRONT = 0.025
-SAFETY_FACTOR = 1.32
-ALPHA = 2.15
-BETA = 0.85
+
+SAFETY_FACTOR = 1.22
+ALPHA = 2.85
+BETA = 0.68
 
 # =========================================
-# LIDAR START (원본 그대로)
+# LIDAR START
 # =========================================
 print("LIDAR 시작 중...")
-lidar_ser.write(bytes([0xA5, 0x40]))   # STOP
+lidar_ser.write(bytes([0xA5, 0x40]))
 time.sleep(2)
 lidar_ser.reset_input_buffer()
-lidar_ser.write(bytes([0xA5, 0x20]))   # SCAN
+lidar_ser.write(bytes([0xA5, 0x20]))
 lidar_ser.read(7)
 print("✅ LIDAR SCAN START")
 
 # =========================================
-# Advanced Gap Follower (IFGM + Disparity + 좁은통로 개선)
+# NarrowPathFollower (정면 10cm 기준)
 # =========================================
-class AdvancedFollower:
+class NarrowPathFollower:
     def __init__(self):
         self.alpha = ALPHA
         self.beta = BETA
-        self.max_steering = 0.55
-        self.normal_radius = ROBOT_WIDTH/2 + 0.08
-        self.tight_radius = ROBOT_WIDTH/2 + 0.035
+        self.max_steering = 0.63
 
-    def is_narrow_passage(self, ranges):
-        valid = ranges > 0.05
-        if not np.any(valid):
-            return False
-        return np.min(ranges[valid]) < 0.28
-
-    def disparity_extender(self, ranges):
-        extended = ranges.copy()
-        for i in range(1, len(ranges)-1):
-            if abs(ranges[i] - ranges[i-1]) > 0.22:
-                d_near = max(min(ranges[i], ranges[i-1]), 0.1)
-                delta_theta = math.asin((ROBOT_WIDTH/2 * SAFETY_FACTOR) / d_near)
-                mask = int(math.ceil(delta_theta / math.radians(0.8)))
-                for k in range(-mask, mask + 1):
-                    idx = i + k
-                    if 0 <= idx < len(extended):
-                        extended[idx] = 0.0
-        return extended
-
-    def process(self, ranges, angles_deg):
+    def correct_lidar_to_robot_center(self, angles_deg, ranges):
         angles_rad = np.radians(angles_deg)
-        proc = self.disparity_extender(ranges)
+        x = ranges * np.cos(angles_rad) - LIDAR_OFFSET_FRONT
+        y = ranges * np.sin(angles_rad)
+        corrected_dist = np.sqrt(x**2 + y**2)
+        corrected_angle = np.degrees(np.arctan2(y, x))
+        return corrected_angle, corrected_dist
 
-        is_narrow = self.is_narrow_passage(ranges)
-        current_radius = self.tight_radius if is_narrow else self.normal_radius
-        min_valid = 0.06 if is_narrow else 0.08
+    def process(self, angles_deg, ranges):
+        corr_angles, corr_ranges = self.correct_lidar_to_robot_center(angles_deg, ranges)
 
-        if is_narrow:
-            print("🟡 좁은 통로 모드 ON")
+        # 정면 최소 거리
+        front_mask = (corr_angles > -35) & (corr_angles < 35)
+        front_clear = np.min(corr_ranges[front_mask]) if np.any(front_mask) else 2.0
+
+        print(f"Front: {front_clear*100:5.1f}cm | Min: {np.min(corr_ranges):.2f}m")
+
+        # ==================== 정면 10cm 이내 ====================
+        if front_clear < 0.10:          # ← 여기서 10cm로 변경
+            print("⚠️⚠️ 정면 10cm 이내! 강제 회피")
+            left_clear = np.min(corr_ranges[(corr_angles > -70) & (corr_angles < -15)])
+            right_clear = np.min(corr_ranges[(corr_angles > 15) & (corr_angles < 70)])
+            
+            if left_clear > right_clear:
+                steering = 0.60
+            else:
+                steering = -0.60
+            v = -0.25 if front_clear < 0.08 else 0.15   # 8cm 이내면 후진
+            return steering, v
+
+        # ==================== 정상 주행 ====================
+        proc = corr_ranges.copy()
+
+        # Disparity Extender
+        for i in range(1, len(proc)-1):
+            if abs(proc[i] - proc[i-1]) > 0.18:
+                d_near = max(min(proc[i], proc[i-1]), 0.08)
+                delta = math.asin((ROBOT_WIDTH/2 * SAFETY_FACTOR) / d_near)
+                mask = int(math.ceil(delta / math.radians(0.6)))
+                for k in range(-mask, mask+1):
+                    if 0 <= i+k < len(proc):
+                        proc[i+k] = 0.0
 
         # Bubble
         if len(proc) > 0:
             closest_idx = np.argmin(proc)
-            closest_d = max(proc[closest_idx], 0.1)
-            bubble = math.atan2(current_radius * 1.25, closest_d)
+            closest_d = max(proc[closest_idx], 0.08)
+            bubble = math.atan2(ROBOT_WIDTH/2 + 0.045, closest_d)
+            angles_rad = np.radians(corr_angles)
             for i, a in enumerate(angles_rad):
                 if abs(a - angles_rad[closest_idx]) < bubble:
                     proc[i] = 0.0
 
         # Gap 찾기
-        valid = proc > min_valid
+        valid = proc > 0.055
         if not np.any(valid):
-            if np.min(ranges) > 0.055:
-                valid = ranges > 0.055
-            else:
-                return 0.0, 0.0   # 완전 막힘
+            return 0.0, -0.20
 
         valid_idx = np.where(valid)[0]
-        gap_center_idx = int((valid_idx[0] + valid_idx[-1]) / 2)
-        phi_gap = angles_rad[gap_center_idx]
+        weights = proc[valid_idx] ** 1.7
+        best_idx = valid_idx[np.argmax(weights)]
+        phi_gap = np.radians(corr_angles[best_idx])
 
-        # IFGM
-        d_min = np.min(ranges) if len(ranges) > 0 else 2.0
+        d_min = np.min(corr_ranges)
         phi_final = (self.alpha * d_min * phi_gap) / (self.alpha * d_min + 1.0)
 
-        # 속도 + Safety
-        v_max = np.max(ranges) if len(ranges) > 0 else 1.5
-        v = np.clip(v_max * 0.40, 0.22, 0.70)
-        safety = math.exp(-self.beta * v / max(d_min, 0.12))
+        v_max = np.max(corr_ranges)
+        v = np.clip(v_max * 0.46, 0.20, 0.70)
+
+        safety = math.exp(-self.beta * v / max(d_min, 0.1))
         steering = np.clip(phi_final * safety, -self.max_steering, self.max_steering)
 
         return steering, v
 
 
-follower = AdvancedFollower()
+follower = NarrowPathFollower()
 
-print("🚀 로봇 자율 주행 시작! (Ctrl+C로 종료)")
+print("🚀 정면 10cm 감지 + 좁은 통로 버전 시작!")
 
-# =========================================
-# Raw LIDAR 파싱 루프
-# =========================================
 buffer = bytearray()
 
 try:
@@ -143,42 +149,32 @@ try:
                 angle_deg = (angle_q6 / 64.0) - 180.0
                 dist_mm = ((buffer[i+3] << 8) | buffer[i+2]) * 4
 
-                if quality > 0 and 150 < dist_mm < 12000:
+                if quality > 0 and 100 < dist_mm < 12000:
                     points.append((angle_deg, dist_mm))
             except:
                 pass
             i += 5
 
-        # 충분한 데이터 모이면 처리
-        if len(points) >= 80:
+        if len(points) >= 60:
             angles = np.array([p[0] for p in points])
-            ranges = np.array([p[1] / 1000.0 for p in points])   # mm → m
+            ranges = np.array([p[1]/1000.0 for p in points])
 
-            # 앞쪽만 사용 (출발선 회귀 방지)
-            front_mask = (angles > -65) & (angles < 65)
+            front_mask = (angles > -70) & (angles < 70)
             if np.any(front_mask):
-                front_angles = angles[front_mask]
-                front_ranges = ranges[front_mask]
-
-                steering, v = follower.process(front_ranges, front_angles)
-                w = steering * 2.9   # steering → angular velocity
+                steering, v = follower.process(angles[front_mask], ranges[front_mask])
+                w = steering * 3.2
 
                 cmd = f"{v:.3f},{w:.3f}\n"
                 arduino_ser.write(cmd.encode('utf-8'))
 
-                print(f"Steer: {np.degrees(steering):+6.1f}° | v:{v:.3f} | d_min:{np.min(front_ranges):.2f}m | Points:{len(points)}")
-
-            # 사용한 데이터 정리
             buffer = buffer[i:]
 
-        time.sleep(0.008)
+        time.sleep(0.006)
 
 except KeyboardInterrupt:
-    print("\n\n🛑 종료")
-
+    print("\n🛑 종료")
 finally:
-    lidar_ser.write(bytes([0xA5, 0x40]))  # STOP
+    lidar_ser.write(bytes([0xA5, 0x40]))
     lidar_ser.close()
     arduino_ser.write(b"0,0\n")
     arduino_ser.close()
-    print("✅ 정리 완료")
