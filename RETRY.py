@@ -33,37 +33,53 @@ lidar_ser.read(7)
 print("LIDAR START")
 
 # =========================================
-# DRIVE PARAMETER
+# PARAMETER
 # =========================================
+SCAN_LIMIT = 150
+
 BASE_SPEED = 0.18
 MIN_SPEED  = 0.05
 
-TURN_GAIN = 0.020
-MAX_W     = 1.0
+MAX_W      = 0.9
 
 WHEEL_BASE = 0.17
 
 # =========================================
-# DETECTION PARAMETER
+# DISTANCE PARAMETER
 # =========================================
-SCAN_LIMIT = 150
+FRONT_WARN_DIST   = 60
+FRONT_DANGER_DIST = 35
+EMERGENCY_DIST    = 12
 
-SIDE_DIST      = 45
-FRONT_DIST     = 60
-EMERGENCY_DIST = 10
+SIDE_DIST = 35
 
 # =========================================
-# FILTER PARAMETER
+# FILTER
 # =========================================
 EMA_ALPHA = 0.35
 MEDIAN_K  = 2
 
 # =========================================
-# HEADING HOLD
+# STATE MACHINE
 # =========================================
-STEERING_DECAY = 0.75
+STATE_FORWARD     = 0
+STATE_AVOID_LEFT  = 1
+STATE_AVOID_RIGHT = 2
 
-prev_w = 0.0
+state = STATE_FORWARD
+
+AVOID_HOLD_TIME = 0.65
+state_end_time  = 0.0
+
+# =========================================
+# STEERING
+# =========================================
+TARGET_W_FORWARD = 0.0
+TARGET_W_AVOID   = 0.55
+
+STEERING_ALPHA = 0.18
+
+current_w = 0.0
 
 # =========================================
 # DATA
@@ -87,8 +103,6 @@ def apply_ema(angle, dist):
 
 def apply_median_filter():
 
-    k = MEDIAN_K
-
     filtered = np.empty(
         360,
         dtype=np.float32
@@ -98,7 +112,7 @@ def apply_median_filter():
 
         idx = [
             (i + d) % 360
-            for d in range(-k, k + 1)
+            for d in range(-MEDIAN_K, MEDIAN_K + 1)
         ]
 
         values = np.sort(scan_data[idx])
@@ -108,26 +122,8 @@ def apply_median_filter():
     scan_data[:] = filtered
 
 # =========================================
-# REGION DISTANCE
+# REGION
 # =========================================
-def get_region_mean(start_deg, end_deg):
-
-    if start_deg <= end_deg:
-
-        idx = np.arange(
-            start_deg,
-            end_deg + 1
-        )
-
-    else:
-
-        idx = np.concatenate((
-            np.arange(start_deg, 360),
-            np.arange(0, end_deg + 1)
-        ))
-
-    return float(np.mean(scan_data[idx]))
-
 def get_region_min(start_deg, end_deg):
 
     if start_deg <= end_deg:
@@ -146,115 +142,138 @@ def get_region_min(start_deg, end_deg):
 
     return float(np.min(scan_data[idx]))
 
-# =========================================
-# OBSTACLE ANALYSIS
-# =========================================
-def analyze_obstacle():
+def get_region_mean(start_deg, end_deg):
 
-    # =====================================
-    # 정면 최소거리
-    # =====================================
+    if start_deg <= end_deg:
+
+        idx = np.arange(
+            start_deg,
+            end_deg + 1
+        )
+
+    else:
+
+        idx = np.concatenate((
+            np.arange(start_deg, 360),
+            np.arange(0, end_deg + 1)
+        ))
+
+    return float(np.mean(scan_data[idx]))
+
+# =========================================
+# SENSOR ANALYSIS
+# =========================================
+def analyze():
+
+    # 정면
     front = min(
         get_region_min(350, 359),
         get_region_min(0, 10)
     )
 
-    # =====================================
-    # 좌측
-    # 평균 + 최소 혼합
-    # =====================================
-    left_mean = get_region_mean(15, 60)
-    left_min  = get_region_min(15, 60)
-
+    # 좌우
     left = (
-        left_mean * 0.7
-        + left_min * 0.3
+        get_region_mean(15, 60) * 0.7
+        + get_region_min(15, 60) * 0.3
     )
 
-    # =====================================
-    # 우측
-    # 평균 + 최소 혼합
-    # =====================================
-    right_mean = get_region_mean(300, 345)
-    right_min  = get_region_min(300, 345)
-
     right = (
-        right_mean * 0.7
-        + right_min * 0.3
+        get_region_mean(300, 345) * 0.7
+        + get_region_min(300, 345) * 0.3
     )
 
     return front, left, right
 
 # =========================================
-# CONTROL
+# STATE UPDATE
 # =========================================
-def compute_control():
+def update_state(front, left, right):
 
-    global prev_w
+    global state
+    global state_end_time
 
-    front, left, right = analyze_obstacle()
-
-    # =====================================
-    # 기본 직진
-    # =====================================
-    target_w = 0.0
+    now = time.time()
 
     # =====================================
-    # 좌측 장애물 회피
+    # 회피 상태 유지
     # =====================================
-    if left < SIDE_DIST:
-
-        error = SIDE_DIST - left
-
-        target_w -= (
-            error * TURN_GAIN
-        )
+    if now < state_end_time:
+        return
 
     # =====================================
-    # 우측 장애물 회피
+    # 전방 충분히 비어있음
     # =====================================
-    if right < SIDE_DIST:
+    if front > FRONT_WARN_DIST:
 
-        error = SIDE_DIST - right
-
-        target_w += (
-            error * TURN_GAIN
-        )
+        state = STATE_FORWARD
+        return
 
     # =====================================
-    # 정면 장애물 강제 회피
+    # 오른쪽이 더 막힘
+    # → 왼쪽 회피
     # =====================================
-    if front < FRONT_DIST:
+    if right < left:
 
-        if left > right:
-
-            target_w += (
-                (FRONT_DIST - front)
-                * TURN_GAIN * 2.8
-            )
-
-        else:
-
-            target_w -= (
-                (FRONT_DIST - front)
-                * TURN_GAIN * 2.8
-            )
+        state = STATE_AVOID_LEFT
 
     # =====================================
-    # HEADING HOLD
+    # 왼쪽이 더 막힘
+    # → 오른쪽 회피
     # =====================================
-    target_w = (
-        prev_w * STEERING_DECAY
-        + target_w * (1.0 - STEERING_DECAY)
+    else:
+
+        state = STATE_AVOID_RIGHT
+
+    state_end_time = (
+        now + AVOID_HOLD_TIME
     )
 
-    prev_w = target_w
+# =========================================
+# CONTROL
+# =========================================
+def compute_control(front):
+
+    global current_w
 
     # =====================================
-    # 각속도 제한
+    # STATE별 목표 회전
     # =====================================
-    target_w = np.clip(
-        target_w,
+    if state == STATE_FORWARD:
+
+        target_w = TARGET_W_FORWARD
+
+    elif state == STATE_AVOID_LEFT:
+
+        target_w = TARGET_W_AVOID
+
+    else:
+
+        target_w = -TARGET_W_AVOID
+
+    # =====================================
+    # 매우 가까우면 회전 강화
+    # =====================================
+    if front < FRONT_DANGER_DIST:
+
+        scale = (
+            (FRONT_DANGER_DIST - front)
+            / FRONT_DANGER_DIST
+        )
+
+        target_w *= (
+            1.0 + scale * 1.2
+        )
+
+    # =====================================
+    # Steering Smoothing
+    # =====================================
+    current_w = (
+        current_w * (1.0 - STEERING_ALPHA)
+        + target_w * STEERING_ALPHA
+    )
+
+    current_w = np.clip(
+        current_w,
         -MAX_W,
         MAX_W
     )
@@ -270,60 +289,50 @@ def compute_control():
 
         v = 0.15
 
-    elif front > 35:
+    elif front > 40:
 
         v = 0.11
 
-    elif front > 20:
-
-        v = 0.08
-
     elif front > EMERGENCY_DIST:
 
-        v = 0.05
+        v = 0.07
 
     else:
 
-        v = 0.03
+        v = 0.04
 
     # =====================================
     # 회전 클수록 감속
     # =====================================
     turn_scale = max(
-        0.5,
-        1.0 - abs(target_w) * 0.6
+        0.45,
+        1.0 - abs(current_w) * 0.7
     )
 
     v *= turn_scale
 
-    # =====================================
-    # 최소 속도 유지
-    # =====================================
     v = max(v, MIN_SPEED)
 
     # =====================================
-    # DIFFERENTIAL DRIVE
+    # Differential Drive
     # =====================================
     left_wheel = (
-        v - (WHEEL_BASE / 2.0) * target_w
+        v - (WHEEL_BASE / 2.0) * current_w
     )
 
     right_wheel = (
-        v + (WHEEL_BASE / 2.0) * target_w
+        v + (WHEEL_BASE / 2.0) * current_w
     )
 
     return (
         left_wheel,
         right_wheel,
         v,
-        target_w,
-        front,
-        left,
-        right
+        current_w
     )
 
 # =========================================
-# MOTOR SEND
+# MOTOR
 # =========================================
 def send_motor(left_wheel, right_wheel):
 
@@ -334,9 +343,6 @@ def send_motor(left_wheel, right_wheel):
 
     arduino_ser.write(cmd.encode())
 
-# =========================================
-# STOP
-# =========================================
 def stop_robot():
 
     send_motor(0.0, 0.0)
@@ -387,34 +393,57 @@ try:
 
             apply_ema(angle, dist)
 
-        # =================================
         # 한 바퀴 완료
-        # =================================
         if s_flag != 1:
             continue
 
         apply_median_filter()
 
+        # =================================
+        # SENSOR
+        # =================================
+        front, left, right = analyze()
+
+        # =================================
+        # STATE UPDATE
+        # =================================
+        update_state(
+            front,
+            left,
+            right
+        )
+
+        # =================================
+        # CONTROL
+        # =================================
         (
             left_wheel,
             right_wheel,
             v,
-            w,
-            front,
-            left,
-            right
-        ) = compute_control()
+            w
+        ) = compute_control(front)
 
+        # =================================
+        # SEND
+        # =================================
         send_motor(
             left_wheel,
             right_wheel
         )
 
+        # =================================
+        # DEBUG
+        # =================================
+        state_name = {
+            0: "FORWARD",
+            1: "LEFT",
+            2: "RIGHT"
+        }[state]
+
         print(
+            f"{state_name} | "
             f"v:{v:.2f} | "
             f"w:{w:.2f} | "
-            f"LW:{left_wheel:.2f} | "
-            f"RW:{right_wheel:.2f} | "
             f"F:{front:.1f} | "
             f"L:{left:.1f} | "
             f"R:{right:.1f}"
