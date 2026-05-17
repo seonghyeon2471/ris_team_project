@@ -32,7 +32,7 @@ WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 # =========================================
 MAX_SPEED    = 0.14   # 최대 선속도 (m/s)
 MIN_SPEED    = 0.9    # 최소 속도
-MAX_W        = 1.2    # 최대 각속도 (rad/s)
+MAX_W        = 1.5    # 최대 각속도 (rad/s)
 TURN_GAIN    = 2.2    # 조향 게인
 
 SCAN_LIMIT   = 150    # 유효 인식 거리 (cm)
@@ -80,9 +80,9 @@ maneuver_end_time = 0.0
 rotate_dir        = 1
 
 EMERGENCY_DIST    = 6
-REVERSE_DURATION  = 0.18
+REVERSE_DURATION  = 0.15
 ROTATE_DURATION   = 1.00
-REVERSE_SPEED     = -0.06
+REVERSE_SPEED     = -0.10
 ROTATE_W          = 0.9
 
 # =========================================
