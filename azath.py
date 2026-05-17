@@ -24,8 +24,7 @@ print("LIDAR START")
 # =========================================
 # ROBOT PHYSICAL PARAMETER
 # =========================================
-# [튜닝] 안전 마진을 줄여 로봇이 좁은 틈새를 벽으로 인식하지 않도록 합니다.
-ROBOT_RADIUS = 12.0   # 기존 17.0 -> 12.0 (실제 물리 반지름에 가깝게 하향)
+ROBOT_RADIUS = 12.0   # 실제 물리 반지름에 가깝게 하향 (cm)
 WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 
 # =========================================
@@ -37,7 +36,7 @@ MAX_W        = 1.5    # 최대 각속도 (rad/s)
 TURN_GAIN    = 2.2    # 조향 게인
 
 SCAN_LIMIT   = 150    # 유효 인식 거리 (cm)
-FRONT_RANGE  = 60     # 탐색 반경 (±60°)
+FRONT_RANGE  = 55     # 탐색 반경 (±55°)
 
 # =========================================
 # FILTER & SMOOTHING PARAMETER
@@ -48,11 +47,10 @@ SMOOTHING_NORMAL = 0.55
 SMOOTHING_DANGER = 0.10
 DANGER_DIST      = 10
 
-# [튜닝] 틈새 판단 플래그 및 범위 최적화
-SAFE_DIST          = 12.0   # 기존 17.0 -> ROBOT_RADIUS와 동기화 (이 정도 틈만 있어도 진입 시도)
-INFLATION_MAX_DIST = 60.0   # 기존 25.0 -> 60.0 (멀리서부터 장애물을 부풀려 착시현상 방지)
-FRONT_CLEAR_DIST   = 20.0   # 기존 23.0 -> 20.0 (좁은 문 통과 시 조기 감속 완화)
-FRONT_CLEAR_RANGE  = 12     # 기존 15 -> 12 (정면 시야각을 좁혀 측면 벽 간섭 줄임)
+SAFE_DIST          = 12.0   # ROBOT_RADIUS와 동기화
+INFLATION_MAX_DIST = 60.0   # 멀리서부터 장애물을 부풀려 착시현상 방지
+FRONT_CLEAR_DIST   = 20.0   # 좁은 문 통과 시 조기 감속 완화
+FRONT_CLEAR_RANGE  = 12     # 정면 시야각을 좁혀 측면 벽 간섭 줄임
 
 # =========================================
 # GLOBAL DIRECTION PARAMETERS (단위: rad)
@@ -159,7 +157,6 @@ def score_gap(gap, proc_dists, angles, is_critical=False):
 
     base_score = (width * 0.5 + avg_dist * 1.2 - abs(center_angle) * 0.4)
     
-    # 크리티컬 상황(벽에 너무 붙음)일 때는 방향 가중치를 강제 배제
     if is_critical:
         return base_score
 
@@ -225,7 +222,7 @@ def find_best_direction(smoothing):
 # =========================================
 # CONTROL
 # =========================================
-ALIGN_THRESHOLD = 7
+ALIGN_THRESHOLD = 10  # [수정] 조향 임계값을 10도로 상향하여 미세 진동으로 인한 감속 차단
 
 def compute_cmd(target_angle):
     w = math.radians(target_angle) * TURN_GAIN
@@ -234,10 +231,10 @@ def compute_cmd(target_angle):
     search_indices = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     relevant_min = float(np.min(scan_data[search_indices]))
 
-    # 조향각이 클 때 완전히 멈추지 않고 연속 주행을 유도하는 로직
+    # [수정] 조향각이 클 때 모터 토크 부족으로 멈추는 현상(0.03m/s) 제거
     if abs(target_angle) > ALIGN_THRESHOLD:
-        v = MIN_SPEED if relevant_min > 15.0 else 0.03
-        return v, w
+        # 대각선 벽이나 옆 장애물 때문에 꺾어야 할 때도 최소 구동 속도(MIN_SPEED)를 100% 보장하여 바퀴를 무조건 굴립니다.
+        return MIN_SPEED, w
 
     # 정면 주행 속도 감속 제어
     obstacle_scale = min(relevant_min / 25.0, 1.0)
