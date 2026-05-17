@@ -70,7 +70,7 @@ EMERGENCY_SIDE  = 8.0
 # → 같은 방향 GAP 반복 선택 루프 방지
 # =========================================
 PENALTY_WEIGHT   = 8.0   # GAP 점수 감점량 (클수록 회피 강도 ↑)
-PENALTY_ANGLE    = 30.0  # 패널티 적용 각도 범위 (°), 실패 방향 ±30° 이내
+PENALTY_ANGLE    = 10.0  # 패널티 적용 각도 범위 (°), 실패 방향 ±30° 이내
 PENALTY_DURATION = 3.0   # 패널티 유지 시간 (초)
 
 penalty_angle = None  # 실패한 GAP 중심 각도 (°)
