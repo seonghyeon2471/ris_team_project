@@ -3,25 +3,25 @@ import math
 import serial
 from collections import deque
 
-# ====================== 설정 ======================
+# ====================== 설정 (벽 돌진 방지 강화) ======================
 LIDAR_PORT = '/dev/ttyUSB0'
 ARDUINO_PORT = '/dev/serial0'
 
-V_MAX = 0.15
-V_MIN = 0.07
-W_MAX = 2.0
+V_MAX = 0.14
+V_MIN = 0.06
+W_MAX = 1.9                     # ← 회전 강도 대폭 낮춤 (급회전 방지)
 
-ALPHA = 45.0
-BETA = 1.3
-GAP_THRESHOLD = 380
-SAFETY_DIST = 320
-SAFETY_WALL_DIST = 250
-MAX_OBSTACLE_DIST = 2200
+ALPHA = 40.0
+BETA = 1.8                      # ← 직진 강하게 선호 (벽으로 돌진 방지)
+GAP_THRESHOLD = 420             # ← 작은 gap 무시
+SAFETY_DIST = 350
+SAFETY_WALL_DIST = 280          # 벽 감지 거리
+MAX_OBSTACLE_DIST = 2000
 
 TIME_LIMIT = 58.0
 INITIAL_STRAIGHT_TIME = 2.0
 
-MEMORY_SCANS = 10
+MEMORY_SCANS = 8                # 기억 개수 줄임 (너무 오래 기억하면 오판 가능성 ↑)
 # ================================================
 
 ser_lidar = None
@@ -67,21 +67,15 @@ def wall_avoidance(scan_data, elapsed_time):
     if not scan_data:
         return 0.0
 
-    # 좌측 벽
-    left_wall = min((info["d_mm"] for ang, info in scan_data.items() if -120 < ang < -40), default=9999)
-    # 우측 벽
-    right_wall = min((info["d_mm"] for ang, info in scan_data.items() if 40 < ang < 120), default=9999)
-    # 후방 벽
-    rear_wall = min((info["d_mm"] for ang, info in scan_data.items() if abs(ang) > 140), default=9999)
+    left_wall = min((info["d_mm"] for ang, info in scan_data.items() if -125 < ang < -45), default=9999)
+    right_wall = min((info["d_mm"] for ang, info in scan_data.items() if 45 < ang < 125), default=9999)
 
     if left_wall < SAFETY_WALL_DIST:
-        print(f"⚠️ 좌측 벽 가까움 ({left_wall:.0f}mm) → 우회전")
-        return -1.8
+        print(f"⚠️ 좌측 벽 가까움 ({left_wall:.0f}mm) → 강 우회전")
+        return -2.0
     elif right_wall < SAFETY_WALL_DIST:
-        print(f"⚠️ 우측 벽 가까움 ({right_wall:.0f}mm) → 좌회전")
-        return 1.8
-    elif rear_wall < SAFETY_WALL_DIST:
-        return 0.0
+        print(f"⚠️ 우측 벽 가까움 ({right_wall:.0f}mm) → 강 좌회전")
+        return 2.0
 
     return None
 
@@ -93,7 +87,7 @@ def find_best_gap_and_steering(scan_data, elapsed_time):
     merged = merge_memory()
     current_merged = {**merged, **scan_data}
 
-    if not current_merged or len(current_merged) < 30:
+    if not current_merged or len(current_merged) < 40:
         return 0.0, 9999
 
     points = [(ang, info["d_mm"]) for ang, info in current_merged.items()]
@@ -108,21 +102,21 @@ def find_best_gap_and_steering(scan_data, elapsed_time):
         start_idx = i
         while i < n and points[i][1] >= GAP_THRESHOLD:
             i += 1
-        if i > start_idx:
+        if i > start_idx + 3:                     # ← 최소 gap 폭도 요구 (너무 좁은 gap 무시)
             gap_start = points[start_idx][0]
             gap_end = points[i-1][0]
             gap_width = gap_end - gap_start
             gap_center = gap_start + gap_width / 2.0
-            ref_bias = abs(gap_center) * 0.48
+            ref_bias = abs(gap_center) * 0.55     # ← 직진 선호 더 강화
             score = gap_width - ref_bias
             if score > max_score:
                 max_score = score
                 best_gap_center = gap_center
         i += 1
 
-    front_min = min((d for ang, d in points if -35 < ang < 35), default=9999)
+    front_min = min((d for ang, d in points if -40 < ang < 40), default=9999)
     if front_min < SAFETY_DIST:
-        best_gap_center *= 1.6
+        best_gap_center *= 1.7
 
     d_min = front_min if front_min < 2000 else 2000
     phi_gap = best_gap_center
@@ -139,7 +133,7 @@ def main():
     print(f"🔌 Arduino 연결: {ARDUINO_PORT}")
 
     ser_lidar = serial.Serial(LIDAR_PORT, 460800, timeout=0.1)
-    print("🚀 RPLIDAR C1 + 기억하면서 주행 (Local Memory Mapping) 시작")
+    print("🚀 RPLIDAR + 기억하면서 주행 (벽 돌진 방지 버전)")
 
     ser_lidar.write(b'\xA5\x20')
     time.sleep(1.5)
@@ -161,15 +155,15 @@ def main():
 
             gap_angle, d_min = find_best_gap_and_steering(current_scan, elapsed)
 
-            w = math.radians(gap_angle) * 2.3
+            w = math.radians(gap_angle) * 2.0          # 회전 강도 더 낮춤
             w = max(min(w, W_MAX), -W_MAX)
-            v = V_MIN if abs(gap_angle) > 40 else V_MAX
+            v = V_MIN if abs(gap_angle) > 45 else V_MAX
 
             send_command(v, w)
 
             print(f"Gap: {gap_angle:6.1f}° | d_min: {d_min:4.0f}mm | v:{v:.2f} w:{w:.2f}", end="\r")
 
-            time.sleep(0.17)
+            time.sleep(0.18)
 
     except KeyboardInterrupt:
         print("\n🛑 중단됨")
