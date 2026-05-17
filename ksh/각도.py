@@ -17,10 +17,9 @@ time.sleep(1)
 lidar.write(bytes([0xA5, 0x20]))
 time.sleep(2)
 lidar.reset_input_buffer()
-print("✅ 연결 완료! (반응 거리 80cm 제한 + strength >1)")
+print("✅ 연결 완료! (v 고정 + 지속 초강력 w 모드)")
 
-# ================== 새로 추가 ==================
-REACTION_DIST = 0.80   # 80cm 이내일 때만 회전 (필요하면 0.7~1.0으로 조정)
+REACTION_DIST = 0.70   # 70cm 이내에서만 반응
 
 def get_scan_points():
     chunk = lidar.read(1200)
@@ -46,13 +45,13 @@ def get_scan_points():
     return points
 
 # =========================================
-# 메인 루프
+# 메인 루프 - v 고정 + w 초강력 지속
 # =========================================
 try:
     while True:
         points = get_scan_points()
 
-        v = 0.20
+        v = 0.22                    # ← v는 항상 이 속도로 유지 (사용자 요청)
         w = 0.0
         min_dist = float('inf')
         best_theta = 0.0
@@ -63,38 +62,37 @@ try:
                     min_dist = dist
                     best_theta = theta
 
-            # ================== 핵심 수정 ==================
-            if min_dist < REACTION_DIST:          # ← 80cm 이내일 때만 반응!
+            if min_dist < REACTION_DIST:          # 장애물이 감지되는 동안
                 abs_theta = abs(best_theta)
 
-                if abs_theta <= 60:
-                    strength = 1.55      # 정면 초강력
+                if abs_theta <= 60:      # 정면
+                    strength = 1.80
                 elif abs_theta <= 90:
-                    strength = 1.20
+                    strength = 1.40
                 elif abs_theta <= 120:
-                    strength = 0.90
+                    strength = 1.05
                 else:
                     strength = 0.0
 
-                steering = - (best_theta / 20.0) * strength
+                steering = - (best_theta / 18.0) * strength
 
-                # 12cm 이하 초강력
-                if min_dist < 0.12:
-                    steering *= 2.3
+                # 가까우면 더 강하게
+                if min_dist < 0.15:
+                    steering *= 2.4
 
-                v = 0.15 if abs(steering) > 1.0 else 0.20
-                w = steering * 6.2
+                v = 0.22                                   # v는 절대 낮추지 않음
+                w = steering * 13.0                        # ← w 지속 강하게 (대폭 증가)
 
-                w = max(-5.0, min(5.0, w))
+                w = max(-7.0, min(7.0, w))
 
         # Arduino 전송
         cmd = f"{v:.2f},{w:.3f}\n"
         arduino.write(cmd.encode())
 
-        # 디버깅 (매우 유용함)
+        # 디버깅
         if min_dist < float('inf'):
             status = "REACTION" if min_dist < REACTION_DIST else "IGNORE"
-            print(f"θ: {best_theta:+6.1f}°  dist: {min_dist:.2f}m  [{status}]  w:{w:+.3f}")
+            print(f"θ: {best_theta:+6.1f}°  dist: {min_dist:.2f}m  [{status}]  v:{v:.2f}  w:{w:+.3f}")
 
         time.sleep(0.025)
 
