@@ -2,117 +2,93 @@ import serial
 import time
 import numpy as np
 import math
+from rplidar import RPLidar
 
 # =========================================
-# SERIAL (최대 지연 최소화)
+# SERIAL (Arduino)
 # =========================================
-arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.03)
-lidar_ser = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.0)   # Non-blocking
+arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.05)
 
 # =========================================
 # 로봇 스펙
 # =========================================
 ROBOT_WIDTH = 0.22
 LIDAR_OFFSET_FRONT = 0.025
+MAX_SPEED = 0.16
+STEERING_GAIN = 3.5
 
-MAX_SPEED = 0.15
-STEERING_GAIN = 2.6
-SMOOTH_FACTOR = 0.80
+print("RPLIDAR 라이브러리 버전 시작...")
 
-print("LIDAR 시작 중 (Ultra Low Latency Mode)...")
-lidar_ser.write(bytes([0xA5, 0x40]))
-time.sleep(1)
-lidar_ser.reset_input_buffer()
-lidar_ser.write(bytes([0xA5, 0x20]))
-lidar_ser.read(7)
-print("✅ Ultra Low Latency + Clean Reading 시작")
+# =========================================
+# RPLIDAR 초기화
+# =========================================
+lidar = RPLidar('/dev/ttyUSB0', baudrate=460800)
+lidar.start_motor()
+print("✅ RPLIDAR 연결 완료")
 
 
-class FastFollower:
+class RPLidarFollower:
     def __init__(self):
         self.prev_steering = 0.0
 
-    def process(self, angles_deg, ranges):
+    def process(self, scan):
+        # scan = [(quality, angle_deg, distance_mm), ...]
+        angles = np.array([m[1] for m in scan])
+        distances = np.array([m[2] for m in scan]) / 10.0   # mm → cm
+
+        # 전방 180도
+        mask = (angles > -90) & (angles < 90)
+        angles = angles[mask]
+        ranges = distances[mask] / 100.0   # cm → m
+
         if len(ranges) < 50:
             return 0.0, 0.14
 
-        mask = (angles_deg > -90) & (angles_deg < 90)
-        angles = angles_deg[mask]
-        ranges = ranges[mask]
-
+        # 좌우 clearance
         left_clear = np.min(ranges[angles < -20]) if np.any(angles < -20) else 3.0
         right_clear = np.min(ranges[angles > 20]) if np.any(angles > 20) else 3.0
 
+        # 중앙 방향 계산
         diff = right_clear - left_clear
-        target = diff * 28.0
+        target_angle = diff * 32.0
 
-        steering = STEERING_GAIN * target
-        steering = SMOOTH_FACTOR * steering + (1 - SMOOTH_FACTOR) * self.prev_steering
+        # smoothing
+        steering = STEERING_GAIN * target_angle
+        steering = 0.78 * steering + 0.22 * self.prev_steering
         self.prev_steering = steering
 
-        if abs(steering) < 10.0:        # deadzone
-            steering = 0.0
+        steering = np.clip(steering, -0.65, 0.65)
 
-        steering = np.clip(steering, -0.58, 0.58)
+        # 속도
+        front_clear = np.max(ranges) if len(ranges) > 0 else 1.0
+        v = np.clip(front_clear * 0.45, 0.18, MAX_SPEED)
 
-        v = np.clip(np.max(ranges) * 0.48, 0.18, MAX_SPEED)
-        if np.min(ranges) < 0.35:
+        if np.min(ranges) < 0.40:
             v *= 0.65
 
         return steering, v
 
 
-follower = FastFollower()
-buffer = bytearray()
+follower = RPLidarFollower()
+
+print("🚀 rplidar 라이브러리 + 중앙 따라가기 시작!")
 
 try:
-    while True:
-        # ==================== 지연 최소화 ====================
-        data = lidar_ser.read(2048)      # 큰 버퍼로 한 번에 읽기
-        if data:
-            buffer.extend(data)
+    for scan in lidar.iter_scans(max_buf_meas=1500, min_len=100):
+        steering, v = follower.process(scan)
+        w = steering * 4.0
 
-        points = []
-        i = 0
-        n = len(buffer)
-        while i + 5 <= n:
-            try:
-                byte1 = buffer[i]
-                quality = byte1 >> 2
-                angle_q6 = ((buffer[i+1] << 7) | (byte1 >> 1)) & 0x7FFF
-                angle_deg = (angle_q6 / 64.0) - 180.0
-                dist_mm = ((buffer[i+3] << 8) | buffer[i+2]) * 4
+        cmd = f"{v:.3f},{w:.3f}\n"
+        arduino_ser.write(cmd.encode('utf-8'))
 
-                if quality >= 5 and 60 < dist_mm < 10000:   # quality 강화
-                    points.append((angle_deg, dist_mm / 1000.0))
-            except:
-                pass
-            i += 5
-
-        if len(points) >= 60:                     # 충분한 데이터만 처리
-            angles = np.array([p[0] for p in points])
-            ranges = np.array([p[1] for p in points])
-
-            steering, v = follower.process(angles, ranges)
-            w = steering * 4.0
-
-            cmd = f"{v:.3f},{w:.3f}\n"
-            arduino_ser.write(cmd.encode('utf-8'))
-
-            print(f"Steer: {steering:+6.1f}° | v:{v:.3f} | Points:{len(points)}")
-
-            buffer = buffer[i:]      # 사용한 데이터 정리
-        else:
-            # buffer 과부하 방지
-            if len(buffer) > 8192:
-                buffer = buffer[-4096:]
-
-        time.sleep(0.001)   # 1ms (최소)
+        print(f"Steer: {steering:+6.1f}° | v:{v:.3f}")
 
 except KeyboardInterrupt:
     print("\n🛑 종료")
 finally:
-    lidar_ser.write(bytes([0xA5, 0x40]))
-    lidar_ser.close()
+    lidar.stop()
+    lidar.stop_motor()
+    lidar.disconnect()
     arduino_ser.write(b"0,0\n")
     arduino_ser.close()
+    print("✅ 정리 완료")
