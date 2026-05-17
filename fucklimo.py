@@ -83,7 +83,7 @@ rotate_last_time   = 0.0     # 마지막 루프 시각
 
 REVERSE_DURATION = 0.1
 REVERSE_SPEED    = -0.10
-ROTATE_W         = 1.1       # rad/s
+ROTATE_W         = 0.8      # rad/s
 
 # =========================================
 # SCAN DATA
