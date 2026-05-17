@@ -46,7 +46,7 @@ print("LIDAR START")
 # ROBOT PHYSICAL PARAMETER
 # =========================================
 
-ROBOT_RADIUS = 14.0
+ROBOT_RADIUS = 12.0
 WHEEL_BASE   = 17.0
 
 # ★ 추가
@@ -86,7 +86,7 @@ DANGER_DIST = 7
 # GAP PARAMETER
 # =========================================
 
-SAFE_DIST          = 17
+SAFE_DIST          = 10
 INFLATION_MAX_DIST = 25
 
 FRONT_CLEAR_DIST  = 23
