@@ -31,7 +31,7 @@ WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 # DRIVE PARAMETER
 # =========================================
 MAX_SPEED    = 0.14   # 최대 선속도 (m/s)
-MIN_SPEED    = 0.9   # 최소 속도
+MIN_SPEED    = 0.9    # 최소 속도
 MAX_W        = 1.2    # 최대 각속도 (rad/s)
 TURN_GAIN    = 2.2    # 조향 게인
 
@@ -53,7 +53,7 @@ FRONT_CLEAR_DIST   = 23
 FRONT_CLEAR_RANGE  = 15
 
 # =========================================
-# [추가] GLOBAL GOAL & ODOMETRY PARAMETERS (단위: cm, rad, sec)
+# GLOBAL GOAL & ODOMETRY PARAMETERS (단위: cm, rad, sec)
 # =========================================
 # 로봇의 현재 추정 자세 (시작점 기반 데드 레코닝)
 pose_x = 0.0      # cm
@@ -63,10 +63,9 @@ pose_theta = 0.0  # rad (로봇의 현재 헤딩)
 # 목표 지점 세팅: 시작 지점 정면 방향(X축)으로 직선거리 3.2m (320cm)
 GOAL_X = 320.0    # cm
 GOAL_Y = 0.0      # cm
-GOAL_THRESHOLD = 15.0 # 목적지 주변 15cm 이내 진입 시 도달로 판단
 
 # 가중치 튜닝 변수
-GOAL_WEIGHT = 2.5 # [핵심] 목적지 방향 틈새에 줄 가중치 (높을수록 장애물보다 목적지를 향해 과감해짐)
+GOAL_WEIGHT = 2.5 # [핵심] 목적지 방향 틈새에 줄 가중치
 
 # =========================================
 # STATE MACHINE
@@ -74,7 +73,7 @@ GOAL_WEIGHT = 2.5 # [핵심] 목적지 방향 틈새에 줄 가중치 (높을수
 STATE_NORMAL  = 0
 STATE_REVERSE = 1
 STATE_ROTATE  = 2
-STATE_ARRIVED = 3  # [추가] 목표 도착 상태
+STATE_ARRIVED = 3  # 목표 도착(통과) 상태
 
 state             = STATE_NORMAL
 maneuver_end_time = 0.0
@@ -110,7 +109,7 @@ def apply_median_filter():
     scan_data[:] = filtered
 
 # =========================================
-# [추가] ODOMETRY UPDATE (데드 레코닝)
+# ODOMETRY UPDATE (데드 레코닝)
 # =========================================
 def update_odometry(v_mps, w_radps):
     """실제 나간 속도 제어 명령을 바탕으로 가상 오도메트리를 누적합니다."""
@@ -171,7 +170,6 @@ def find_gaps(proc_dists, angles):
     return gaps
 
 def score_gap(gap, proc_dists, angles):
-    """[수정] 기존 Gap 점수 판정에 전역 목표지점 가중치를 결합합니다."""
     start, end = gap
     width = end - start
     center_i = (start + end) / 2.0
@@ -196,7 +194,7 @@ def score_gap(gap, proc_dists, angles):
     # 기본 Gap 점수 (너비 + 깊이 - 정면편향)
     base_score = (width * 0.5 + avg_dist * 1.2 - abs(center_angle) * 0.4)
     
-    # [핵심] 목적지와의 각도 오차가 작을수록 높은 보너스 점수 부여 (최대 GOAL_WEIGHT 점 차감/가산)
+    # 목적지와의 각도 오차가 작을수록 높은 보너스 점수 부여
     goal_bonus = (180.0 - angle_diff) / 180.0 * GOAL_WEIGHT
 
     return base_score + goal_bonus
@@ -306,13 +304,16 @@ try:
         # [필수] 루프 주기마다 로봇의 오도메트리 위치를 누적 추정
         update_odometry(v_active, w_active)
 
-        # --- GOAL DISTANCE CHECK ---
+        # 현재 위치와 전역 목적지 사이의 남은 거리 계산 (출력용)
         dist_to_goal = math.hypot(GOAL_X - pose_x, GOAL_Y - pose_y)
-        if dist_to_goal < GOAL_THRESHOLD or state == STATE_ARRIVED:
+
+        # --- GOAL DISTANCE CHECK [수정] ---
+        # 로봇의 현재 X 좌표가 목적지 X 라인(320cm)을 넘어섰을 때 확실하게 미션 성공 및 멈춤 처리
+        if pose_x >= GOAL_X or state == STATE_ARRIVED:
             state = STATE_ARRIVED
             stop_robot()
             v_active, w_active = 0.0, 0.0
-            print(f"🎉 GOAL ARRIVED! Position: ({pose_x:.1f}, {pose_y:.1f})")
+            print(f"🎉 GOAL PASSED! Position: ({pose_x:.1f}, {pose_y:.1f})")
             time.sleep(0.5)
             continue
 
@@ -356,7 +357,7 @@ try:
         v_active, w_active = compute_cmd(target_angle)
         send_cmd(v_active, w_active)
 
-        # 디버그 터미널 출력에 현재 위치와 목적지까지 남은 거리 표시 추가
+        # 디버그 터미널 출력에 현재 위치와 목적지까지 남은 거리 표시
         print(f"Pos:({pose_x:5.1f},{pose_y:5.1f})| Rem:{dist_to_goal:5.1f}cm | TRG:{target_angle:5.1f}° | v:{v_active:.2f} | w:{w_active:.2f} | bias:{bias_label}")
 
 except KeyboardInterrupt:
