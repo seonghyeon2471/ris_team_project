@@ -16,13 +16,17 @@ ROBOT_WIDTH = 0.24
 LIDAR_OFFSET_FRONT = 0.025
 
 # =========================================
-# 튜닝 파라미터 (조향 부드럽게 수정)
+# 튜닝 파라미터
 # =========================================
-MAX_SPEED = 0.15          
-STEERING_GAIN = 2.8       # ← 조향 감도 크게 낮춤 (부드럽게)
-STEERING_REVERSE = False  # ← 방향 반전 (False로 변경)
+MAX_SPEED = 0.15
+STEERING_GAIN = 2.8
+STEERING_REVERSE = False
+SMOOTH_FACTOR = 0.78
 
-SMOOTH_FACTOR = 0.78      # ← smoothing 더 강하게
+# 회전 탐색 설정
+NO_PATH_THRESHOLD = 0.25   # 25cm 이하로 막히면 회전 시작
+ROTATION_SPEED = 1.8       # 제자리 회전 속도 (rad/s)
+MAX_ROTATION_TIME = 4.0    # 최대 회전 시간 (초)
 
 # =========================================
 # LIDAR START
@@ -35,12 +39,15 @@ lidar_ser.write(bytes([0xA5, 0x20]))
 lidar_ser.read(7)
 print("✅ LIDAR SCAN START")
 
+
 # =========================================
-# Centerline Follower
+# Centerline Follower + 회전 탐색
 # =========================================
 class CenterlineFollower:
     def __init__(self):
         self.prev_target = 0.0
+        self.is_rotating = False
+        self.rotation_start_time = 0
 
     def correct_to_center(self, angles_deg, ranges):
         angles_rad = np.radians(angles_deg)
@@ -57,7 +64,21 @@ class CenterlineFollower:
         ranges = corr_ranges[mask]
 
         if len(angles) < 20:
-            return 0.0, 1.0
+            return 0.0, 0.0
+
+        # 정면 거리 확인
+        front_clear = np.min(ranges[(angles > -35) & (angles < 35)])
+
+        # ==================== 길이 막힌 경우 ====================
+        if front_clear < NO_PATH_THRESHOLD:
+            if not self.is_rotating:
+                self.is_rotating = True
+                self.rotation_start_time = time.time()
+                print(f"🚧 길 막힘! ({front_clear*100:.1f}cm) → 회전 탐색 시작")
+            return 0.0, front_clear   # 회전 모드
+
+        # 정상 주행
+        self.is_rotating = False
 
         left = angles < 0
         right = angles > 0
@@ -67,7 +88,6 @@ class CenterlineFollower:
         else:
             center_angle = np.mean(angles)
 
-        # 더 부드러운 smoothing
         target = SMOOTH_FACTOR * center_angle + (1 - SMOOTH_FACTOR) * self.prev_target
         self.prev_target = target
 
@@ -76,7 +96,7 @@ class CenterlineFollower:
 
 follower = CenterlineFollower()
 
-print("🚀 조향 부드럽게 + 방향 반전 적용 버전")
+print("🚀 중앙선 따라가기 + 막혔을 때 회전 탐색 모드 시작")
 
 buffer = bytearray()
 
@@ -109,25 +129,38 @@ try:
             front_mask = (angles > -75) & (angles < 75)
             if np.any(front_mask):
                 target_angle, forward_clear = follower.find_centerline(angles[front_mask], ranges[front_mask])
-
-                steering = target_angle * STEERING_GAIN
-                if STEERING_REVERSE:
-                    steering = -steering
-
-                steering = np.clip(steering, -0.55, 0.55)   # 최대 조향각도 제한
-
-                v = np.clip(forward_clear * 0.42, 0.18, MAX_SPEED)
-
                 d_min = np.min(ranges[front_mask]) if len(ranges[front_mask]) > 0 else 1.0
-                if d_min < 0.35:
-                    v *= 0.7
 
-                w = steering * 3.5                     # angular velocity도 부드럽게
+                # ==================== 회전 탐색 중 ====================
+                if follower.is_rotating:
+                    elapsed = time.time() - follower.rotation_start_time
+                    if elapsed < MAX_ROTATION_TIME:
+                        v = 0.0
+                        w = ROTATION_SPEED
+                        print(f"🔄 회전 탐색 중... ({elapsed:.1f}s)")
+                    else:
+                        v = -0.15
+                        w = 0.0
+                        follower.is_rotating = False
+                        print("⏹ 회전 시간 초과 → 약한 후진")
+                else:
+                    # 정상 중앙선 따라가기
+                    steering = target_angle * STEERING_GAIN
+                    if STEERING_REVERSE:
+                        steering = -steering
+                    steering = np.clip(steering, -0.55, 0.55)
+
+                    v = np.clip(forward_clear * 0.42, 0.18, MAX_SPEED)
+                    if d_min < 0.35:
+                        v *= 0.7
+
+                    w = steering * 3.5
 
                 cmd = f"{v:.3f},{w:.3f}\n"
                 arduino_ser.write(cmd.encode('utf-8'))
 
-                print(f"Target: {target_angle:+6.1f}° | Steer: {steering:+6.1f}° | v:{v:.3f} | d_min:{d_min:.2f}m")
+                status = "ROTATING" if follower.is_rotating else "NORMAL"
+                print(f"[{status}] Target: {target_angle:+6.1f}° | Steer: {steering:+6.1f}° | v:{v:.3f} | d_min:{d_min:.2f}m")
 
             buffer = buffer[i:]
 
@@ -140,3 +173,4 @@ finally:
     lidar_ser.close()
     arduino_ser.write(b"0,0\n")
     arduino_ser.close()
+    print("✅ 정리 완료")
