@@ -45,22 +45,22 @@ EMA_ALPHA        = 0.3
 MEDIAN_K         = 2
 SMOOTHING_NORMAL = 0.55
 SMOOTHING_DANGER = 0.10
-DANGER_DIST      = 10
+DANGER_DIST      = 12     # [수정] 감속 기준을 12cm로 살짝 상향
 
-SAFE_DIST          = 12.0   # ROBOT_RADIUS와 동기화
-INFLATION_MAX_DIST = 60.0   # 멀리서부터 장애물을 부풀려 착시현상 방지
-FRONT_CLEAR_DIST   = 20.0   # 좁은 문 통과 시 조기 감속 완화
-FRONT_CLEAR_RANGE  = 12     # 정면 시야각을 좁혀 측면 벽 간섭 줄임
+SAFE_DIST          = 12.0   
+INFLATION_MAX_DIST = 60.0   
+FRONT_CLEAR_DIST   = 20.0   
+FRONT_CLEAR_RANGE  = 12     
 
 # =========================================
 # GLOBAL DIRECTION PARAMETERS (단위: rad)
 # =========================================
-pose_theta = 0.0  # rad (시작할 때 정면 방향을 0으로 기준 잡음)
-GLOBAL_GOAL_THETA = 0.0  # rad
-GOAL_WEIGHT = 2.5 # 목적지 방향 틈새에 줄 가중치
+pose_theta = 0.0  
+GLOBAL_GOAL_THETA = 0.0  
+GOAL_WEIGHT = 2.5 
 
 # =========================================
-# STATE MACHINE
+# STATE MACHINE (후진/회전 밸런스 조정)
 # =========================================
 STATE_NORMAL  = 0
 STATE_REVERSE = 1
@@ -70,11 +70,11 @@ state             = STATE_NORMAL
 maneuver_end_time = 0.0
 rotate_dir        = 1
 
-EMERGENCY_DIST    = 6
-REVERSE_DURATION  = 0.15
-ROTATE_DURATION   = 1.00
-REVERSE_SPEED     = -0.10
-ROTATE_W          = 0.9
+EMERGENCY_DIST    = 7.0    # [수정] 비상 거리 실효값으로 조정
+REVERSE_DURATION  = 0.40   # [수정] 0.15초 -> 0.4초로 늘려 확실하게 뒤로 공간 확보
+ROTATE_DURATION   = 0.70   # [수정] 1.0초 -> 0.7초로 줄여 과도한 회전 방지
+REVERSE_SPEED     = -0.12  # [수정] 후진 속도 살짝 상향
+ROTATE_W          = 1.0    # [수정] 회전 각속도 상향
 
 # =========================================
 # STATE DATA
@@ -83,7 +83,6 @@ scan_data = np.full(360, float(SCAN_LIMIT), dtype=np.float32)
 prev_angle = 0.0
 last_odom_time = time.time() 
 
-# 회전 직후 가짜 프리패스 방지용 플래그
 is_recovering = False
 
 # =========================================
@@ -103,7 +102,7 @@ def apply_median_filter():
     scan_data[:] = filtered
 
 # =========================================
-# HEADING UPDATE (각도 누적 적분)
+# HEADING UPDATE
 # =========================================
 def update_heading(w_radps):
     global pose_theta, last_odom_time
@@ -115,7 +114,7 @@ def update_heading(w_radps):
         return
 
     pose_theta += w_radps * dt
-    pose_theta = (pose_theta + math.pi) % (2 * math.pi) - math.pi
+    pose_theta = (math.pi + pose_theta) % (2 * math.pi) - math.pi
 
 # =========================================
 # OBSTACLE INFLATION
@@ -133,7 +132,7 @@ def inflate_obstacles(dists):
     return proc
 
 # =========================================
-# GAP SEARCH & SCORED WITH DIRECTION BIAS
+# GAP SEARCH
 # =========================================
 def find_gaps(proc_dists, angles):
     gaps = []
@@ -222,7 +221,7 @@ def find_best_direction(smoothing):
 # =========================================
 # CONTROL
 # =========================================
-ALIGN_THRESHOLD = 10  # [수정] 조향 임계값을 10도로 상향하여 미세 진동으로 인한 감속 차단
+ALIGN_THRESHOLD = 10  
 
 def compute_cmd(target_angle):
     w = math.radians(target_angle) * TURN_GAIN
@@ -231,12 +230,9 @@ def compute_cmd(target_angle):
     search_indices = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     relevant_min = float(np.min(scan_data[search_indices]))
 
-    # [수정] 조향각이 클 때 모터 토크 부족으로 멈추는 현상(0.03m/s) 제거
     if abs(target_angle) > ALIGN_THRESHOLD:
-        # 대각선 벽이나 옆 장애물 때문에 꺾어야 할 때도 최소 구동 속도(MIN_SPEED)를 100% 보장하여 바퀴를 무조건 굴립니다.
         return MIN_SPEED, w
 
-    # 정면 주행 속도 감속 제어
     obstacle_scale = min(relevant_min / 25.0, 1.0)
     speed = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
 
@@ -256,7 +252,7 @@ def choose_avoid_direction():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("NAVIGATION START (Gap Optimized & No-Lock Continuous Drive Mode)")
+print("NAVIGATION START (Anti-Deadlock Anti-Oscillation Mode)")
 try:
     last_odom_time = time.time()
     v_active, w_active = 0.0, 0.0
@@ -295,24 +291,29 @@ try:
                 v_active, w_active = 0.0, ROTATE_W * rotate_dir
                 send_cmd(v_active, w_active)
             else:
-                rotate_dir *= -1
+                # [수정] 가짜 데이터 주입 로직 완전 삭제
+                # 회전 직후 깨끗한 데이터 수집을 위해 시리얼 버퍼를 비우고 판단을 0.1초 강제 유예
+                stop_robot()
+                lidar_ser.reset_input_buffer()
+                time.sleep(0.1) 
+                
                 state, prev_angle = STATE_NORMAL, 0.0
                 is_recovering = True  
-                
-                # 회전 후 데이터 정상 수신 전까지 안전 경계값 유지
-                for a in range(-45, 46): 
-                    scan_data[a % 360] = float(SAFE_DIST)
             continue
 
         # --- STATE_NORMAL ---
-        front_min = float(np.min(scan_data[np.arange(-10, 11) % 360]))
-        if front_min < EMERGENCY_DIST:
+        # [핵심 수정] 충돌 감지 범위를 정면(±10°)에서 좌우 측면(±90°) 전체로 확장하여 옆구리 끼임 원천 차단
+        emergency_indices = np.arange(-90, 91) % 360
+        side_front_min = float(np.min(scan_data[emergency_indices]))
+        
+        if side_front_min < EMERGENCY_DIST:
             rotate_dir = choose_avoid_direction()
             state, maneuver_end_time = STATE_REVERSE, now + REVERSE_DURATION
             v_active, w_active = REVERSE_SPEED, 0.0
             send_cmd(v_active, w_active)
             continue
 
+        front_min = float(np.min(scan_data[np.arange(-10, 11) % 360]))
         smoothing = SMOOTHING_DANGER if front_min < DANGER_DIST else SMOOTHING_NORMAL
         result = find_best_direction(smoothing)
 
