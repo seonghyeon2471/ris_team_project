@@ -31,7 +31,7 @@ ROBOT_RADIUS = 12.0   # 로봇 물리 반지름 (cm)
 # =========================================
 MAX_SPEED    = 0.18   # 최대 선속도 (m/s)
 MIN_SPEED    = 0.10   # 최소 속도 (m/s)
-MAX_W        = 1.5    # 최대 각속도 (rad/s)
+MAX_W        = 1.8    # 최대 각속도 (rad/s)
 TURN_GAIN    = 2.2    # 조향 게인
 
 SCAN_LIMIT   = 150    # 유효 인식 거리 (cm)
