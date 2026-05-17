@@ -23,15 +23,15 @@ print("LIDAR START")
 # PARAMETERS
 # =========================================
 MAX_SPEED = 0.18
-MIN_SPEED = 0.10
-MAX_W = 1.8                    # 최대 조향 강도 (필요시 조정)
+MIN_SPEED = 0.09          # 최소 전진 속도
+MAX_W = 1.9               # 최대 조향 강도 (필요시 2.0까지 올려도 OK)
 
-# 전방 장애물 threshold (cm)
+# 전방 장애물 threshold (cm) - 30cm부터 반응 시작
 THRESH_30 = 30.0
 THRESH_20 = 20.0
 THRESH_10 = 10.0
 
-FRONT_CHECK_RANGE = 45         # 전방 체크 각도 ±45도
+FRONT_CHECK_RANGE = 45    # 전방 체크 각도 (±45도)
 
 # FILTER
 EMA_ALPHA = 0.35
@@ -61,11 +61,10 @@ def get_front_min():
     return float(np.min(scan_data[indices]))
 
 def choose_avoid_direction():
-    """장애물 반대 방향 결정 (좌/우 평균 비교)"""
+    """장애물 반대 방향 판단 (좌/우 평균 비교)"""
     left_avg = float(np.mean(scan_data[1:90]))
     right_avg = float(np.mean(scan_data[271:360]))
-    # left_avg가 크면 오른쪽이 더 비어있음 → 오른쪽으로 회전 (기존 코드 기준)
-    return 1 if left_avg >= right_avg else -1
+    return 1 if left_avg >= right_avg else -1   # 1: 오른쪽 회전, -1: 왼쪽 회전
 
 # =========================================
 # MOTOR
@@ -79,7 +78,7 @@ def stop_robot():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("SIMPLE REACTIVE OBSTACLE AVOIDANCE START")
+print("PURE FORWARD OBSTACLE AVOIDANCE START (후진 없음)")
 
 try:
     while True:
@@ -87,7 +86,7 @@ try:
         if len(raw) != 5:
             continue
 
-        # LiDAR packet parsing (기존 코드 그대로)
+        # LiDAR packet parsing
         s_flag = raw[0] & 0x01
         if ((raw[0] & 0x02) >> 1) != (1 - s_flag) or (raw[1] & 0x01) != 1 or (raw[0] >> 2) < 3:
             continue
@@ -103,29 +102,29 @@ try:
 
         apply_median_filter()
 
-        # =============== 【요청하신 단순 회피 로직】 ===============
+        # =============== 【주요 회피 로직】 ===============
         front_min = get_front_min()
 
         if front_min < THRESH_10:
-            # 10cm 이내 → 매우 강한 emergency (후진 + 강한 회전)
+            # 10cm 이내 → 매우 강하게 조향하면서 천천히 전진
             direction = choose_avoid_direction()
-            v = -0.08
-            w = direction * 1.7
-            print(f"🚨 EMERGENCY! front={front_min:.1f}cm → STRONG REVERSE + TURN (dir={direction})")
+            v = MIN_SPEED
+            w = direction * MAX_W
+            print(f"🚨 VERY CLOSE! front={front_min:.1f}cm → STRONG TURN (dir={direction})")
         elif front_min < THRESH_20:
-            # 20cm 이내 → 강한 회전
+            # 20cm 이내 → 강하게 조향
             direction = choose_avoid_direction()
-            v = 0.09
-            w = direction * 1.4
+            v = 0.12
+            w = direction * 1.55
             print(f"⚠️ CRITICAL front={front_min:.1f}cm → STRONG TURN (dir={direction})")
         elif front_min < THRESH_30:
-            # 30cm 이내 → 중간 강도 회전
+            # 30cm 이내 → 중간 조향
             direction = choose_avoid_direction()
-            v = 0.13
-            w = direction * 0.95
+            v = 0.15
+            w = direction * 1.0
             print(f"⚡ WARNING front={front_min:.1f}cm → MEDIUM TURN (dir={direction})")
         else:
-            # 정상 → 직진
+            # 안전 → 직진
             v = MAX_SPEED
             w = 0.0
             # print("→ STRAIGHT")
