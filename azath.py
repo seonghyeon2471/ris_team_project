@@ -24,7 +24,8 @@ print("LIDAR START")
 # =========================================
 # ROBOT PHYSICAL PARAMETER
 # =========================================
-ROBOT_RADIUS = 17.0   # 물리 반지름 + 측면 안전 마진 (cm)
+# ★ 좁은 길 통과를 위해 안전 마진을 타이트하게 조정 (필요시 환경에 맞춰 15.0~17.0 조절)
+ROBOT_RADIUS = 15.5   # 물리 반지름 + 최소 안전 마진 (cm)
 WHEEL_BASE   = 17.0   # 차동구동 휠 베이스 (cm)
 
 # =========================================
@@ -54,22 +55,19 @@ DANGER_DIST      = 12
 # =========================================
 # GAP & INFLATION PARAMETER
 # =========================================
-SAFE_DIST          = 10
-INFLATION_MAX_DIST = 25
+# ★ 차체보다 살짝 넓은 틈새도 인식할 수 있도록 최소 갭 기준 완화
+SAFE_DIST          = 5
+# ★ 25cm 제한을 풀고 SCAN_LIMIT까지 부풀리기를 적용하여 좁은 길 진입 전 튕기는 현상 방지
+INFLATION_MAX_DIST = SCAN_LIMIT
 
-FRONT_CLEAR_DIST   = 23   # ★ 수정: 12 → 23 (CRITICAL_DIST=12와 달라야 3단계 정상 작동)
+FRONT_CLEAR_DIST   = 23   
 FRONT_CLEAR_RANGE  = 8
 
 # =========================================
-# ★ GOAL PARAMETER
+# GOAL PARAMETER
 # =========================================
-GOAL_ANGLE  = 0      # 목적지 방향 (정면 = 0°, 맵 구조상 골은 항상 정면)
+GOAL_ANGLE  = 0      # 목적지 방향 (정면 = 0°)
 GOAL_WEIGHT = 1.5    # 목적지 방향 가산점 가중치
-#
-# 효과:
-#   goal_bonus = (1 - gap방향과 골방향 차이 / FRONT_RANGE) * GOAL_WEIGHT
-#   → 골 방향에 가까운 Gap일수록 최대 1.5점 추가
-#   → 넓지만 측면인 Gap보다 좁아도 정면인 Gap을 우선 선택
 
 # =========================================
 # STATE MACHINE
@@ -117,9 +115,14 @@ def inflate_obstacles(dists):
     proc = dists.copy()
     for i in range(len(dists)):
         d = dists[i]
-        if d < 5 or d >= INFLATION_MAX_DIST:
+        # 원거리 벽면까지 정확하게 내 몸집만큼 부풀림
+        if d < 5.0 or d >= INFLATION_MAX_DIST:
             continue
-        alpha     = math.degrees(math.asin(min(ROBOT_RADIUS / d, 1.0)))
+        try:
+            alpha = math.degrees(math.asin(min(ROBOT_RADIUS / d, 1.0)))
+        except ValueError:
+            alpha = 45.0
+            
         start_idx = max(0, int(i - alpha))
         end_idx   = min(len(dists) - 1, int(i + alpha))
         proc[start_idx : end_idx + 1] = 0.0
@@ -149,39 +152,41 @@ def score_gap(gap, proc_dists, angles):
     center_angle = angles[int(center_i)]
     avg_dist     = np.mean(proc_dists[start : end + 1])
 
-    # ★ 목적지 방향 가산점
-    #   gap 중심이 GOAL_ANGLE(0°)에 가까울수록 최대 GOAL_WEIGHT(1.5)점 추가
-    #   goal_diff=0° → bonus=1.5 / goal_diff=65° → bonus=0.0
     goal_diff  = abs(center_angle - GOAL_ANGLE)
     goal_bonus = max(0.0, (FRONT_RANGE - goal_diff) / FRONT_RANGE) * GOAL_WEIGHT
 
     return (width    * 0.5
             + avg_dist * 1.2
             - abs(center_angle) * 0.6
-            + goal_bonus)                  # ★ 가산점 추가
+            + goal_bonus)
 
-def select_best_gap(gaps, proc_dists, angles):
-    best_gap, best_score = None, -1e9
-    for gap in gaps:
-        s = score_gap(gap, proc_dists, angles)
-        if s > best_score:
-            best_score, best_gap = s, gap
-    return best_gap
-
+# ★ 차체보다 살짝 넓은 길의 정확한 '중앙값'을 찾아 조향하도록 수정된 함수
 def find_best_index_in_gap(best_gap, proc_dists, angles):
-    start, end      = best_gap
-    best_idx        = int((start + end) / 2)
+    start, end = best_gap
+    
+    # 기본 타겟은 갭의 기하학적 정중앙 인덱스
+    center_idx = int((start + end) / 2)
+    
+    best_idx = center_idx
     max_local_score = -1e9
+    
     for i in range(start, end + 1):
-        dist         = proc_dists[i]
-        angle        = angles[i]
+        dist  = proc_dists[i]
+        angle = angles[i]
+        
+        # 좌우 양쪽 벽(0이 된 지점)으로부터 확보한 각도 마진 계산
         left_margin  = i - start
         right_margin = end - i
-        margin       = min(left_margin, right_margin)
-        local_score  = (dist * 1.0) + (margin * 0.8) - (abs(angle) * 1.5)
+        min_margin   = min(left_margin, right_margin)
+        
+        # [스코어링 밸런스 조정] 
+        # min_margin 가중치를 높여 벽 정중앙(중앙값)을 찌르도록 유도하고, 각도 불일치 단위 보정
+        local_score = (min_margin * 3.0) + (dist * 0.5) - (abs(angle) * 1.0)
+        
         if local_score > max_local_score:
             max_local_score = local_score
-            best_idx        = i
+            best_idx = i
+            
     return best_idx
 
 # =========================================
@@ -204,9 +209,7 @@ def find_best_direction(smoothing):
         scan_data[np.arange(-FRONT_CLEAR_RANGE, FRONT_CLEAR_RANGE + 1) % 360]
     ))
 
-    # ★ 수정: CRITICAL_DIST=12, FRONT_CLEAR_DIST=23 으로 분리
-    #         → 23~12cm 구간에서 GAP 단계 정상 작동
-    CRITICAL_DIST = EMERGENCY_DIST * 2   # 6×2 = 12cm
+    CRITICAL_DIST = EMERGENCY_DIST * 2   # 12cm
 
     if front_clear > FRONT_CLEAR_DIST:   # > 23cm : 직진 편향
         target     = gap_angle * 0.2
@@ -227,8 +230,7 @@ def find_best_direction(smoothing):
 # =========================================
 # CONTROL
 # =========================================
-ALIGN_THRESHOLD = 10
-
+# ★ 울컥거림을 유발하던 고정 임계값(ALIGN_THRESHOLD) 제거 후 선형 감속 적용
 def compute_cmd(target_angle):
     w = math.radians(target_angle) * TURN_GAIN
     w = float(np.clip(w, -MAX_W, MAX_W))
@@ -236,13 +238,17 @@ def compute_cmd(target_angle):
     search_indices = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     relevant_min   = float(np.min(scan_data[search_indices]))
 
-    if abs(target_angle) > ALIGN_THRESHOLD:
-        # 선회 중 항상 v=0.05 유지 (제자리 선회 시 뒷바퀴 충돌 방지)
-        return 0.05, w
-
+    # [선형 감속 알고리즘]
+    # 조향각이 커질수록(즉, 좁은 길을 통과하려고 핸들을 많이 꺾을수록) 선속도를 부드럽게 감속
+    angle_filter = max(0.0, 1.0 - (abs(target_angle) / FRONT_RANGE))
+    
     obstacle_scale = min(relevant_min / 25.0, 1.0)
-    speed          = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
-    return speed, w
+    base_speed     = max(MAX_SPEED * obstacle_scale, MIN_SPEED)
+    
+    # 정면 주행 시 고속, 급조향(좁은 문 진입 등) 시 안전하게 MIN_SPEED까지 선형 감속
+    speed = MIN_SPEED + (base_speed - MIN_SPEED) * angle_filter
+    
+    return float(speed), w
 
 def send_cmd(v, w):
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
