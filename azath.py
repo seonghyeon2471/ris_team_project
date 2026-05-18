@@ -25,7 +25,7 @@ print("LIDAR START")
 # ROBOT PHYSICAL PARAMETER
 # =========================================
 ROBOT_RADIUS     = 12.0   # 로봇 물리 반지름 (cm) — 건드리지 말 것
-INFLATION_RADIUS =  8.0   # ★ 팽창에만 쓰는 반지름 (cm) — 좁은 틈 조정 시 여기만 수정
+INFLATION_RADIUS =  10.0   # ★ 팽창에만 쓰는 반지름 (cm) — 좁은 틈 조정 시 여기만 수정
 
 # =========================================
 # DRIVE PARAMETER
