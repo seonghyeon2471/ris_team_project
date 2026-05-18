@@ -24,10 +24,10 @@ print("LIDAR START")
 # =========================================
 MAX_SPEED = 0.30
 MIN_SPEED = 0.09
-MAX_W = 1.1
+MAX_W = 0.9
 THRESH_30 = 25.0
-THRESH_20 = 20.0
-THRESH_10 = 10.0
+THRESH_20 = 21.0
+THRESH_10 = 12.0
 FRONT_CHECK_RANGE = 45
 
 # FILTER
