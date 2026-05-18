@@ -24,10 +24,10 @@ print("LIDAR START")
 # =========================================
 MAX_SPEED = 0.40
 MIN_SPEED = 0.09
-MAX_W = 1.6
+MAX_W = 1.5
 THRESH_30 = 25.0
 THRESH_20 = 20.0
-THRESH_10 = 10.0
+THRESH_10 = 14.0
 FRONT_CHECK_RANGE = 45
 
 # FILTER
@@ -41,7 +41,7 @@ scan_data = np.full(360, 150.0, dtype=np.float32)
 # =========================================
 def apply_ema(angle, new_dist_cm):
     if not isinstance(new_dist_cm, (int, float)) or new_dist_cm <= 0:
-        return  # 잘못된 값이면 무시
+        return
     scan_data[angle] = (1.0 - EMA_ALPHA) * scan_data[angle] + EMA_ALPHA * new_dist_cm
 
 def apply_median_filter():
@@ -75,7 +75,7 @@ def stop_robot():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("PURE FORWARD OBSTACLE AVOIDANCE START (후진 없음)")
+print("PURE FORWARD OBSTACLE AVOIDANCE START (?꾩쭊 ?놁쓬)")
 
 try:
     while True:
@@ -91,7 +91,7 @@ try:
         angle = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0) % 360
         dist_cm = (raw[3] | (raw[4] << 8)) / 40.0
 
-        # 안전장치 추가
+        # ?덉쟾?μ튂 異붽?
         if 3 < dist_cm < 150:
             apply_ema(angle, dist_cm)
 
@@ -100,24 +100,24 @@ try:
 
         apply_median_filter()
 
-        # =============== 회피 로직 ===============
+        # =============== ?뚰뵾 濡쒖쭅 ===============
         front_min = get_front_min()
 
         if front_min < THRESH_10:
             direction = choose_avoid_direction()
             v = MIN_SPEED
             w = direction * MAX_W
-            print(f"🚨 VERY CLOSE! front={front_min:.1f}cm → STRONG TURN (dir={direction})")
+            print(f"?슚 VERY CLOSE! front={front_min:.1f}cm ??STRONG TURN (dir={direction})")
         elif front_min < THRESH_20:
             direction = choose_avoid_direction()
             v = 0.12
-            w = direction * 1.4
-            print(f"⚠️ CRITICAL front={front_min:.1f}cm → STRONG TURN (dir={direction})")
+            w = direction * 1.35
+            print(f"?좑툘 CRITICAL front={front_min:.1f}cm ??STRONG TURN (dir={direction})")
         elif front_min < THRESH_30:
             direction = choose_avoid_direction()
             v = 0.15
-            w = direction * 1.2
-            print(f"⚡ WARNING front={front_min:.1f}cm → MEDIUM TURN (dir={direction})")
+            w = direction * 1.1
+            print(f"??WARNING front={front_min:.1f}cm ??MEDIUM TURN (dir={direction})")
         else:
             v = MAX_SPEED
             w = 0.0
