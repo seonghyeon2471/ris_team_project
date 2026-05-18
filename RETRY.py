@@ -25,9 +25,9 @@ print("LIDAR START")
 MAX_SPEED = 0.30
 MIN_SPEED = 0.09
 MAX_W = 0.9
-THRESH_30 = 25.0
-THRESH_20 = 18.0
-THRESH_10 = 8.0
+THRESH_30 = 32.0
+THRESH_20 = 22.0
+THRESH_10 = 12.0
 FRONT_CHECK_RANGE = 45
 
 # FILTER
@@ -111,12 +111,12 @@ try:
         elif front_min < THRESH_20:
             direction = choose_avoid_direction()
             v = 0.12
-            w = direction * 1.1
+            w = direction * 0.8
             print(f"⚠️ CRITICAL front={front_min:.1f}cm → STRONG TURN (dir={direction})")
         elif front_min < THRESH_30:
             direction = choose_avoid_direction()
             v = 0.15
-            w = direction * 0.9
+            w = direction * 0.7
             print(f"⚡ WARNING front={front_min:.1f}cm → MEDIUM TURN (dir={direction})")
         else:
             v = MAX_SPEED
