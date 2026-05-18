@@ -20,14 +20,16 @@ lidar_ser.read(7)
 print("LIDAR START")
 
 # =========================================
-# PARAMETERS
+# PARAMETERS - 회전 부드럽게 수정
 # =========================================
 MAX_SPEED = 0.40
-MIN_SPEED = 0.09
-MAX_W = 1.5
-THRESH_30 = 25.0
+MIN_SPEED = 0.12          # emergency에서도 너무 느려지지 않게
+MAX_W = 1.3               # ← 회전 강도 대폭 낮춤 (1.5 → 1.3)
+
+THRESH_30 = 28.0          # ← 조금 더 일찍 반응 시작
 THRESH_20 = 20.0
 THRESH_10 = 14.0
+
 FRONT_CHECK_RANGE = 45
 
 # FILTER
@@ -75,7 +77,7 @@ def stop_robot():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("PURE FORWARD OBSTACLE AVOIDANCE START (no back)")
+print("GENTLE TURN OBSTACLE AVOIDANCE START (회전 부드럽게)")
 
 try:
     while True:
@@ -83,7 +85,6 @@ try:
         if len(raw) != 5:
             continue
 
-        # LiDAR packet parsing
         s_flag = raw[0] & 0x01
         if ((raw[0] & 0x02) >> 1) != (1 - s_flag) or (raw[1] & 0x01) != 1 or (raw[0] >> 2) < 3:
             continue
@@ -99,24 +100,23 @@ try:
 
         apply_median_filter()
 
-        # =============== AVOID LOGIC ===============
         front_min = get_front_min()
 
         if front_min < THRESH_10:
             direction = choose_avoid_direction()
             v = MIN_SPEED
-            w = direction * MAX_W
-            print(f"VERY CLOSE! front={front_min:.1f}cm -> STRONG TURN (dir={direction})")
+            w = direction * MAX_W          # 1.3
+            print(f"🚨 VERY CLOSE! front={front_min:.1f}cm → STRONG TURN (dir={direction})")
         elif front_min < THRESH_20:
             direction = choose_avoid_direction()
-            v = 0.12
-            w = direction * 1.35
-            print(f"CRITICAL front={front_min:.1f}cm -> STRONG TURN (dir={direction})")
+            v = 0.18
+            w = direction * 1.15           # ← 부드럽게 조정
+            print(f"⚠️ CRITICAL front={front_min:.1f}cm → STRONG TURN (dir={direction})")
         elif front_min < THRESH_30:
             direction = choose_avoid_direction()
-            v = 0.15
-            w = direction * 1.1
-            print(f"WARNING front={front_min:.1f}cm -> MEDIUM TURN (dir={direction})")
+            v = 0.25
+            w = direction * 0.85           # ← 가장 부드럽게 (중간 구간)
+            print(f"⚡ WARNING front={front_min:.1f}cm → MEDIUM TURN (dir={direction})")
         else:
             v = MAX_SPEED
             w = 0.0
