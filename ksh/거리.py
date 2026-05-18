@@ -75,7 +75,7 @@ def stop_robot():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("PURE FORWARD OBSTACLE AVOIDANCE START (?꾩쭊 ?놁쓬)")
+print("PURE FORWARD OBSTACLE AVOIDANCE START (no back)")
 
 try:
     while True:
@@ -91,7 +91,6 @@ try:
         angle = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0) % 360
         dist_cm = (raw[3] | (raw[4] << 8)) / 40.0
 
-        # ?덉쟾?μ튂 異붽?
         if 3 < dist_cm < 150:
             apply_ema(angle, dist_cm)
 
@@ -100,24 +99,24 @@ try:
 
         apply_median_filter()
 
-        # =============== ?뚰뵾 濡쒖쭅 ===============
+        # =============== AVOID LOGIC ===============
         front_min = get_front_min()
 
         if front_min < THRESH_10:
             direction = choose_avoid_direction()
             v = MIN_SPEED
             w = direction * MAX_W
-            print(f"?슚 VERY CLOSE! front={front_min:.1f}cm ??STRONG TURN (dir={direction})")
+            print(f"VERY CLOSE! front={front_min:.1f}cm -> STRONG TURN (dir={direction})")
         elif front_min < THRESH_20:
             direction = choose_avoid_direction()
             v = 0.12
             w = direction * 1.35
-            print(f"?좑툘 CRITICAL front={front_min:.1f}cm ??STRONG TURN (dir={direction})")
+            print(f"CRITICAL front={front_min:.1f}cm -> STRONG TURN (dir={direction})")
         elif front_min < THRESH_30:
             direction = choose_avoid_direction()
             v = 0.15
             w = direction * 1.1
-            print(f"??WARNING front={front_min:.1f}cm ??MEDIUM TURN (dir={direction})")
+            print(f"WARNING front={front_min:.1f}cm -> MEDIUM TURN (dir={direction})")
         else:
             v = MAX_SPEED
             w = 0.0
