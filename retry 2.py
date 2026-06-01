@@ -1,4 +1,3 @@
-```python
 import cv2
 import serial
 import time
