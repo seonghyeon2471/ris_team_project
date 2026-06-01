@@ -1,0 +1,84 @@
+import cv2
+import serial
+import time
+import numpy as np
+
+# ==========================
+# SERIAL
+# ==========================
+arduino_ser = serial.Serial("/dev/serial0", 115200)
+time.sleep(2)
+
+# ==========================
+# MOTOR
+# ==========================
+def send_cmd(v, w):
+    arduino_ser.write(f"{v:.2f},{-w:.2f}\n".encode())
+
+def stop():
+    send_cmd(0,0)
+
+# ==========================
+# CAMERA
+# ==========================
+cap = cv2.VideoCapture(0)
+
+FORWARD_SPEED = 0.25
+TURN_SPEED = 0.7
+
+print("Camera obstacle avoidance start")
+
+try:
+    while True:
+
+        ret, frame = cap.read()
+
+        if not ret:
+            continue
+
+        # 크기 줄이기
+        frame = cv2.resize(frame, (320,240))
+
+        # 흑백 변환
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # threshold
+        _, binary = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY_INV)
+
+        # 중앙 부분만 검사
+        roi = binary[120:240, 100:220]
+
+        obstacle_pixels = np.sum(roi > 0)
+
+        # 장애물 판단
+        if obstacle_pixels > 5000:
+
+            v = 0.10
+            w = TURN_SPEED
+
+            print("Obstacle detected -> TURN")
+
+        else:
+
+            v = FORWARD_SPEED
+            w = 0
+
+            print("Forward")
+
+        send_cmd(v, w)
+
+        cv2.imshow("camera", binary)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+except KeyboardInterrupt:
+    pass
+
+finally:
+
+    stop()
+
+    cap.release()
+
+    cv2.destroyAllWindows()
