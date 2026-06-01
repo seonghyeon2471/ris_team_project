@@ -1,412 +1,110 @@
 import cv2
-import serial
-import time
 import numpy as np
 
-# =========================================
-# SERIAL
-# =========================================
-arduino_ser = serial.Serial(
-    "/dev/serial0",
-    115200,
-    timeout=0.1
-)
-
-lidar_ser = serial.Serial(
-    "/dev/ttyUSB0",
-    460800,
-    timeout=0.1
-)
-
-# =========================================
-# CAMERA
-# =========================================
 cap = cv2.VideoCapture(0)
 
-cap.set(cv2.CAP_PROP_FRAME_WIDTH,320)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT,240)
-cap.set(cv2.CAP_PROP_BUFFERSIZE,1)
+BOX_SIZE = 40
 
-# =========================================
-# LIDAR START
-# =========================================
-lidar_ser.write(bytes([0xA5,0x40]))
+while True:
 
-time.sleep(2)
+    ret, frame = cap.read()
 
-lidar_ser.reset_input_buffer()
+    if not ret:
+        continue
 
-lidar_ser.write(bytes([0xA5,0x20]))
+    h, w, _ = frame.shape
 
-lidar_ser.read(7)
+    cx = w // 2
+    cy = h // 2
 
-print("SYSTEM START")
+    x1 = cx - BOX_SIZE//2
+    y1 = cy - BOX_SIZE//2
 
-# =========================================
-# PARAMETERS
-# =========================================
-scan_data = np.full(
-    360,
-    150.0,
-    dtype=np.float32
-)
+    x2 = cx + BOX_SIZE//2
+    y2 = cy + BOX_SIZE//2
 
-EMA_ALPHA = 0.35
+    roi = frame[y1:y2, x1:x2]
 
-FRONT_CHECK_RANGE = 45
+    # 평균 BGR
+    avg_bgr = np.mean(
+        roi,
+        axis=(0,1)
+    ).astype(int)
 
-THRESH_30 = 35
-THRESH_20 = 25
-THRESH_10 = 15
-
-FORWARD_SPEED = 0.18
-SEARCH_SPEED = 0.10
-
-TURN_GAIN = 0.003
-
-STOP_AREA = 22000
-
-FRAME_W = 320
-
-MAX_LOST = 80
-
-CENTER_TOL = 20
-
-last_dir = 1
-lost_count = 0
-
-last_error = 0
-last_area = 0
-
-# =========================================
-# MOTOR
-# =========================================
-def send_cmd(v,w):
-
-    arduino_ser.write(
-        f"{v:.3f},{-w:.3f}\n".encode()
+    # HSV 변환
+    roi_hsv = cv2.cvtColor(
+        roi,
+        cv2.COLOR_BGR2HSV
     )
 
-def stop():
+    avg_hsv = np.mean(
+        roi_hsv,
+        axis=(0,1)
+    ).astype(int)
 
-    send_cmd(0,0)
+    b,g,r = avg_bgr
+    h_,s,v = avg_hsv
 
-# =========================================
-# LIDAR UTIL
-# =========================================
-def apply_ema(angle,dist):
+    text1 = f"BGR: {b},{g},{r}"
+    text2 = f"HSV: {h_},{s},{v}"
 
-    scan_data[angle] = \
-        (1-EMA_ALPHA)*scan_data[angle] \
-        + EMA_ALPHA*dist
-
-def get_front_min():
-
-    idx = np.arange(
-        -FRONT_CHECK_RANGE,
-        FRONT_CHECK_RANGE+1
-    ) % 360
-
-    return float(
-        np.min(scan_data[idx])
+    cv2.rectangle(
+        frame,
+        (x1,y1),
+        (x2,y2),
+        (0,255,0),
+        2
     )
 
-def choose_avoid_direction():
-
-    left = np.mean(
-        scan_data[1:90]
+    cv2.putText(
+        frame,
+        text1,
+        (10,30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0,255,0),
+        2
     )
 
-    right = np.mean(
-        scan_data[271:360]
+    cv2.putText(
+        frame,
+        text2,
+        (10,60),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0,255,0),
+        2
     )
 
-    return 1 if left >= right else -1
-
-# =========================================
-# MAIN LOOP
-# =========================================
-try:
-
-    while True:
-
-        # -------------------------
-        # LIDAR UPDATE
-        # -------------------------
-        raw = lidar_ser.read(5)
-
-        if len(raw)==5:
-
-            s_flag = raw[0] & 0x01
-
-            valid = (
-                ((raw[0]&0x02)>>1)
-                == (1-s_flag)
-            )
-
-            if valid:
-
-                angle = int(
-                    (
-                        (raw[1]>>1)
-                        |
-                        (raw[2]<<7)
-                    )/64.0
-                ) % 360
-
-                dist = (
-                    raw[3]
-                    |
-                    (raw[4]<<8)
-                ) / 40.0
-
-                if 3 < dist < 150:
-
-                    apply_ema(
-                        angle,
-                        dist
-                    )
-
-        front_min = get_front_min()
-
-        # -------------------------
-        # CAMERA ALWAYS RUN
-        # -------------------------
-        ret, frame = cap.read()
-
-        if not ret:
-            continue
-
-        frame = cv2.resize(
-            frame,
-            (320,240)
-        )
-
-        hsv = cv2.cvtColor(
-            frame,
-            cv2.COLOR_BGR2HSV
-        )
-
-        lower1 = np.array(
-            [0,150,120]
-        )
-
-        upper1 = np.array(
-            [8,255,255]
-        )
-
-        lower2 = np.array(
-            [172,150,120]
-        )
-
-        upper2 = np.array(
-            [180,255,255]
-        )
-
-        mask1 = cv2.inRange(
-            hsv,
-            lower1,
-            upper1
-        )
-
-        mask2 = cv2.inRange(
-            hsv,
-            lower2,
-            upper2
-        )
-
-        mask = mask1 + mask2
-
-        kernel = np.ones(
-            (5,5),
-            np.uint8
-        )
-
-        mask = cv2.morphologyEx(
-            mask,
-            cv2.MORPH_OPEN,
-            kernel
-        )
-
-        mask = cv2.morphologyEx(
-            mask,
-            cv2.MORPH_CLOSE,
-            kernel
-        )
-
-        contours,_ = cv2.findContours(
-            mask,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE
-        )
-
-        # =====================================
-        # OBSTACLE PRIORITY
-        # =====================================
-        if front_min < THRESH_10:
-
-            direction = choose_avoid_direction()
-
-            v = 0.07
-            w = direction * 0.9
-
-        elif front_min < THRESH_20:
-
-            direction = choose_avoid_direction()
-
-            v = 0.09
-            w = direction * 0.8
-
-        elif front_min < THRESH_30:
-
-            direction = choose_avoid_direction()
-
-            v = 0.12
-            w = direction * 0.6
-
-        else:
-
-            # ==========================
-            # RED FOUND
-            # ==========================
-            if len(contours) > 0:
-
-                biggest = max(
-                    contours,
-                    key=cv2.contourArea
-                )
-
-                area = cv2.contourArea(
-                    biggest
-                )
-
-                if area > 300:
-
-                    lost_count = 0
-
-                    x,y,w_box,h_box = \
-                        cv2.boundingRect(
-                            biggest
-                        )
-
-                    cx = x + w_box//2
-
-                    error = \
-                        cx - FRAME_W//2
-
-                    last_error = error
-                    last_area = area
-
-                    last_dir = \
-                        1 if error>=0 else -1
-
-                    cv2.rectangle(
-                        frame,
-                        (x,y),
-                        (x+w_box,y+h_box),
-                        (0,255,0),
-                        2
-                    )
-
-                    # ==================
-                    # STOP
-                    # ==================
-                    if area > STOP_AREA:
-
-                        if abs(error) < CENTER_TOL:
-
-                            v = 0
-                            w = 0
-
-                            print(
-                                "TARGET ARRIVED"
-                            )
-
-                        else:
-
-                            v = 0
-
-                            w = np.clip(
-                                TURN_GAIN*error,
-                                -0.35,
-                                0.35
-                            )
-
-                    else:
-
-                        v = FORWARD_SPEED
-
-                        w = np.clip(
-                            TURN_GAIN*error,
-                            -0.45,
-                            0.45
-                        )
-
-                else:
-
-                    lost_count += 1
-
-            # ==========================
-            # TARGET LOST
-            # ==========================
-            else:
-
-                lost_count += 1
-
-                if lost_count < MAX_LOST:
-
-                    if last_area > 15000:
-
-                        v = 0
-
-                    elif last_area > 6000:
-
-                        v = 0.03
-
-                    else:
-
-                        v = 0.06
-
-                    w = np.clip(
-                        TURN_GAIN * last_error,
-                        -0.35,
-                        0.35
-                    )
-
-                else:
-
-                    v = 0
-                    w = 0
-
-        send_cmd(v,w)
-
-        cv2.imshow(
-            "camera",
-            frame
-        )
-
-        cv2.imshow(
-            "mask",
-            mask
-        )
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-
-            break
-
-except KeyboardInterrupt:
-
-    print("STOP")
-
-finally:
-
-    stop()
-
-    cap.release()
-
-    cv2.destroyAllWindows()
-
-    lidar_ser.write(
-        bytes([0xA5,0x25])
+    cv2.imshow(
+        "Color Picker",
+        frame
     )
-```
+
+    key = cv2.waitKey(1)
+
+    if key == ord('s'):
+
+        print(
+            "\n====== SAVED ======"
+        )
+
+        print(
+            f"BGR = {avg_bgr}"
+        )
+
+        print(
+            f"RGB = [{r},{g},{b}]"
+        )
+
+        print(
+            f"HSV = {avg_hsv}"
+        )
+
+    elif key == ord('q'):
+
+        break
+
+cap.release()
+
+cv2.destroyAllWindows()
