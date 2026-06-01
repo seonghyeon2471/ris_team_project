@@ -3,142 +3,370 @@ import serial
 import time
 import numpy as np
 
-# ==========================
+# =========================================
 # SERIAL
-# ==========================
-arduino_ser = serial.Serial("/dev/serial0",115200)
-time.sleep(2)
+# =========================================
+arduino_ser = serial.Serial(
+    "/dev/serial0",
+    115200,
+    timeout=0.1
+)
 
-# ==========================
-# MOTOR
-# ==========================
-def send_cmd(v,w):
-    arduino_ser.write(f"{v:.2f},{-w:.2f}\n".encode())
+lidar_ser = serial.Serial(
+    "/dev/ttyUSB0",
+    460800,
+    timeout=0.1
+)
 
-def stop():
-    send_cmd(0,0)
-
-# ==========================
+# =========================================
 # CAMERA
-# ==========================
+# =========================================
 cap = cv2.VideoCapture(0)
 
-FORWARD_SPEED = 0.20
+# =========================================
+# LIDAR START
+# =========================================
+lidar_ser.write(bytes([0xA5,0x40]))
+
+time.sleep(2)
+
+lidar_ser.reset_input_buffer()
+
+lidar_ser.write(bytes([0xA5,0x20]))
+
+lidar_ser.read(7)
+
+print("SYSTEM START")
+
+# =========================================
+# PARAMETERS
+# =========================================
+scan_data = np.full(
+    360,
+    150.0,
+    dtype=np.float32
+)
+
+EMA_ALPHA = 0.35
+
+FRONT_CHECK_RANGE = 45
+
+THRESH_30 = 35
+THRESH_20 = 25
+THRESH_10 = 15
+
+FORWARD_SPEED = 0.18
+SEARCH_SPEED = 0.10
+
 TURN_GAIN = 0.004
-STOP_AREA = 25000     # 가까워졌다고 판단할 면적
+
+STOP_AREA = 22000
 
 FRAME_W = 320
-CENTER_TOL = 25
 
-print("RED FOLLOW START")
+MAX_LOST = 80
 
+last_dir = 1
+lost_count = 0
+
+# =========================================
+# MOTOR
+# =========================================
+def send_cmd(v,w):
+
+    arduino_ser.write(
+        f"{v:.3f},{-w:.3f}\n".encode()
+    )
+
+def stop():
+
+    send_cmd(0,0)
+
+# =========================================
+# LIDAR UTIL
+# =========================================
+def apply_ema(angle,dist):
+
+    scan_data[angle] = \
+        (1-EMA_ALPHA)*scan_data[angle] \
+        + EMA_ALPHA*dist
+
+def get_front_min():
+
+    idx = np.arange(
+        -FRONT_CHECK_RANGE,
+        FRONT_CHECK_RANGE+1
+    ) % 360
+
+    return float(
+        np.min(scan_data[idx])
+    )
+
+def choose_avoid_direction():
+
+    left = np.mean(
+        scan_data[1:90]
+    )
+
+    right = np.mean(
+        scan_data[271:360]
+    )
+
+    return 1 if left >= right else -1
+
+# =========================================
+# MAIN LOOP
+# =========================================
 try:
 
     while True:
 
-        ret, frame = cap.read()
+        # -------------------------
+        # LIDAR UPDATE
+        # -------------------------
+        raw = lidar_ser.read(5)
 
-        if not ret:
-            continue
+        if len(raw)==5:
 
-        frame = cv2.resize(frame,(320,240))
+            s_flag = raw[0] & 0x01
 
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            valid = (
+                ((raw[0]&0x02)>>1)
+                == (1-s_flag)
+            )
 
-        # 빨간색 범위 (빨강은 두 구간 필요)
-        lower1 = np.array([0,120,70])
-        upper1 = np.array([10,255,255])
+            if valid:
 
-        lower2 = np.array([170,120,70])
-        upper2 = np.array([180,255,255])
+                angle = int(
+                    (
+                        (raw[1]>>1)
+                        |
+                        (raw[2]<<7)
+                    )/64.0
+                ) % 360
 
-        mask1 = cv2.inRange(hsv, lower1, upper1)
-        mask2 = cv2.inRange(hsv, lower2, upper2)
+                dist = (
+                    raw[3]
+                    |
+                    (raw[4]<<8)
+                ) / 40.0
 
-        mask = mask1 + mask2
+                if 3 < dist < 150:
 
-        contours, _ = cv2.findContours(
-            mask,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE
-        )
+                    apply_ema(
+                        angle,
+                        dist
+                    )
 
-        v = 0
-        w = 0
+        front_min = get_front_min()
 
-        if len(contours) > 0:
+        # =====================================
+        # 장애물 회피 (최우선)
+        # =====================================
+        if front_min < THRESH_10:
 
-            biggest = max(contours, key=cv2.contourArea)
+            direction = choose_avoid_direction()
 
-            area = cv2.contourArea(biggest)
+            v = 0.07
 
-            if area > 300:
+            w = direction * 0.9
 
-                x,y,width,height = cv2.boundingRect(biggest)
+            print(
+                "VERY CLOSE"
+            )
 
-                cx = x + width//2
-                error = cx - FRAME_W//2
+        elif front_min < THRESH_20:
 
-                cv2.rectangle(
-                    frame,
-                    (x,y),
-                    (x+width,y+height),
-                    (0,255,0),
-                    2
+            direction = choose_avoid_direction()
+
+            v = 0.09
+
+            w = direction * 0.8
+
+            print(
+                "AVOID"
+            )
+
+        elif front_min < THRESH_30:
+
+            direction = choose_avoid_direction()
+
+            v = 0.12
+
+            w = direction * 0.6
+
+            print(
+                "WARNING"
+            )
+
+        # =====================================
+        # CAMERA FOLLOW
+        # =====================================
+        else:
+
+            ret, frame = cap.read()
+
+            if not ret:
+
+                continue
+
+            frame = cv2.resize(
+                frame,
+                (320,240)
+            )
+
+            hsv = cv2.cvtColor(
+                frame,
+                cv2.COLOR_BGR2HSV
+            )
+
+            lower1 = np.array(
+                [0,120,70]
+            )
+
+            upper1 = np.array(
+                [10,255,255]
+            )
+
+            lower2 = np.array(
+                [170,120,70]
+            )
+
+            upper2 = np.array(
+                [180,255,255]
+            )
+
+            mask1 = cv2.inRange(
+                hsv,
+                lower1,
+                upper1
+            )
+
+            mask2 = cv2.inRange(
+                hsv,
+                lower2,
+                upper2
+            )
+
+            mask = mask1 + mask2
+
+            contours,_ = cv2.findContours(
+                mask,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE
+            )
+
+            # ---------------------
+            # RED FOUND
+            # ---------------------
+            if len(contours) > 0:
+
+                biggest = max(
+                    contours,
+                    key=cv2.contourArea
                 )
 
-                cv2.circle(
-                    frame,
-                    (cx,y+height//2),
-                    5,
-                    (255,0,0),
-                    -1
+                area = cv2.contourArea(
+                    biggest
                 )
 
-                # ===== STOP =====
-                if area > STOP_AREA:
+                if area > 300:
+
+                    lost_count = 0
+
+                    x,y,w_box,h_box = \
+                        cv2.boundingRect(
+                            biggest
+                        )
+
+                    cx = x + w_box//2
+
+                    error = \
+                        cx - FRAME_W//2
+
+                    last_dir = \
+                        1 if error>=0 else -1
+
+                    cv2.rectangle(
+                        frame,
+                        (x,y),
+                        (x+w_box,y+h_box),
+                        (0,255,0),
+                        2
+                    )
+
+                    if area > STOP_AREA:
+
+                        v = 0
+                        w = 0
+
+                        print(
+                            "TARGET ARRIVED"
+                        )
+
+                    else:
+
+                        w = np.clip(
+                            TURN_GAIN*error,
+                            -0.5,
+                            0.5
+                        )
+
+                        v = FORWARD_SPEED
+
+                        print(
+                            "FOLLOW"
+                        )
+
+                else:
+
+                    lost_count += 1
+
+            # ---------------------
+            # RED LOST
+            # ---------------------
+            else:
+
+                lost_count += 1
+
+                if lost_count < MAX_LOST:
+
+                    v = SEARCH_SPEED
+
+                    w = last_dir * 0.35
+
+                    print(
+                        "SEARCH"
+                    )
+
+                else:
 
                     v = 0
                     w = 0
 
-                    print("TARGET REACHED -> STOP")
-
-                else:
-
-                    # ===== 좌우 조향 =====
-                    if abs(error) > CENTER_TOL:
-
-                        w = TURN_GAIN * error
-                        w = np.clip(w,-0.6,0.6)
-
-                    else:
-                        w = 0
-
-                    v = FORWARD_SPEED
-
                     print(
-                        f"FOLLOW area={area:.0f} "
-                        f"err={error}"
+                        "TARGET LOST"
                     )
 
-        else:
+            cv2.imshow(
+                "camera",
+                frame
+            )
 
-            # 빨강 못 찾으면 정지
-            v = 0
-            w = 0
+            cv2.imshow(
+                "mask",
+                mask
+            )
 
-            print("NO TARGET")
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+
+                break
 
         send_cmd(v,w)
 
-        cv2.imshow("camera",frame)
-        cv2.imshow("mask",mask)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
 except KeyboardInterrupt:
-    pass
+
+    print("STOP")
 
 finally:
 
@@ -147,3 +375,7 @@ finally:
     cap.release()
 
     cv2.destroyAllWindows()
+
+    lidar_ser.write(
+        bytes([0xA5,0x25])
+    )
