@@ -75,6 +75,9 @@ CENTER_TOL = 20
 last_dir = 1
 lost_count = 0
 
+last_error = 0
+last_area = 0
+
 # =========================================
 # MOTOR
 # =========================================
@@ -247,16 +250,12 @@ try:
             v = 0.07
             w = direction * 0.9
 
-            print("VERY CLOSE")
-
         elif front_min < THRESH_20:
 
             direction = choose_avoid_direction()
 
             v = 0.09
             w = direction * 0.8
-
-            print("AVOID")
 
         elif front_min < THRESH_30:
 
@@ -265,10 +264,11 @@ try:
             v = 0.12
             w = direction * 0.6
 
-            print("WARNING")
-
         else:
 
+            # ==========================
+            # RED FOUND
+            # ==========================
             if len(contours) > 0:
 
                 biggest = max(
@@ -294,6 +294,9 @@ try:
                     error = \
                         cx - FRAME_W//2
 
+                    last_error = error
+                    last_area = area
+
                     last_dir = \
                         1 if error>=0 else -1
 
@@ -305,6 +308,9 @@ try:
                         2
                     )
 
+                    # ==================
+                    # STOP
+                    # ==================
                     if area > STOP_AREA:
 
                         if abs(error) < CENTER_TOL:
@@ -326,10 +332,6 @@ try:
                                 0.35
                             )
 
-                            print(
-                                "CENTERING"
-                            )
-
                     else:
 
                         v = FORWARD_SPEED
@@ -340,36 +342,41 @@ try:
                             0.45
                         )
 
-                        print(
-                            "FOLLOW"
-                        )
-
                 else:
 
                     lost_count += 1
 
+            # ==========================
+            # TARGET LOST
+            # ==========================
             else:
 
                 lost_count += 1
 
                 if lost_count < MAX_LOST:
 
-                    v = SEARCH_SPEED
+                    if last_area > 15000:
 
-                    w = last_dir * 0.30
+                        v = 0
 
-                    print(
-                        "SEARCH"
+                    elif last_area > 6000:
+
+                        v = 0.03
+
+                    else:
+
+                        v = 0.06
+
+                    w = np.clip(
+                        TURN_GAIN * last_error,
+                        -0.35,
+                        0.35
                     )
 
                 else:
 
                     v = 0
                     w = 0
-
-                    print(
-                        "TARGET LOST"
-                    )
 
         send_cmd(v,w)
 
