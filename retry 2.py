@@ -23,10 +23,14 @@ def stop():
 # ==========================
 cap = cv2.VideoCapture(0)
 
-FORWARD_SPEED = 0.25
-TURN_SPEED = 0.7
+FORWARD_SPEED = 0.20
+TURN_GAIN = 0.004
+STOP_AREA = 25000     # 가까워졌다고 판단할 면적
 
-print("Camera avoidance start")
+FRAME_W = 320
+CENTER_TOL = 25
+
+print("RED FOLLOW START")
 
 try:
 
@@ -39,44 +43,96 @@ try:
 
         frame = cv2.resize(frame,(320,240))
 
-        # BGR -> HSV
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-        # 검은색 범위
-        lower = np.array([0,0,0])
-        upper = np.array([180,255,60])
+        # 빨간색 범위 (빨강은 두 구간 필요)
+        lower1 = np.array([0,120,70])
+        upper1 = np.array([10,255,255])
 
-        mask = cv2.inRange(hsv, lower, upper)
+        lower2 = np.array([170,120,70])
+        upper2 = np.array([180,255,255])
 
-        # 중앙 ROI
-        roi = mask[120:240,100:220]
+        mask1 = cv2.inRange(hsv, lower1, upper1)
+        mask2 = cv2.inRange(hsv, lower2, upper2)
 
-        obstacle_pixels = np.sum(roi > 0)
+        mask = mask1 + mask2
 
-        # ROI 표시
-        cv2.rectangle(frame,(100,120),(220,240),(0,255,0),2)
+        contours, _ = cv2.findContours(
+            mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
 
-        if obstacle_pixels > 5000:
+        v = 0
+        w = 0
 
-            v = 0.10
-            w = TURN_SPEED
+        if len(contours) > 0:
 
-            print("TURN")
+            biggest = max(contours, key=cv2.contourArea)
+
+            area = cv2.contourArea(biggest)
+
+            if area > 300:
+
+                x,y,width,height = cv2.boundingRect(biggest)
+
+                cx = x + width//2
+                error = cx - FRAME_W//2
+
+                cv2.rectangle(
+                    frame,
+                    (x,y),
+                    (x+width,y+height),
+                    (0,255,0),
+                    2
+                )
+
+                cv2.circle(
+                    frame,
+                    (cx,y+height//2),
+                    5,
+                    (255,0,0),
+                    -1
+                )
+
+                # ===== STOP =====
+                if area > STOP_AREA:
+
+                    v = 0
+                    w = 0
+
+                    print("TARGET REACHED -> STOP")
+
+                else:
+
+                    # ===== 좌우 조향 =====
+                    if abs(error) > CENTER_TOL:
+
+                        w = TURN_GAIN * error
+                        w = np.clip(w,-0.6,0.6)
+
+                    else:
+                        w = 0
+
+                    v = FORWARD_SPEED
+
+                    print(
+                        f"FOLLOW area={area:.0f} "
+                        f"err={error}"
+                    )
 
         else:
 
-            v = FORWARD_SPEED
+            # 빨강 못 찾으면 정지
+            v = 0
             w = 0
 
-            print("FORWARD")
+            print("NO TARGET")
 
         send_cmd(v,w)
 
-        # 컬러 화면 출력
-        cv2.imshow("camera", frame)
-
-        # 마스크도 확인 가능
-        cv2.imshow("mask", mask)
+        cv2.imshow("camera",frame)
+        cv2.imshow("mask",mask)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
