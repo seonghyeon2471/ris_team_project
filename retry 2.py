@@ -1,3 +1,4 @@
+```python
 import cv2
 import serial
 import time
@@ -22,6 +23,10 @@ lidar_ser = serial.Serial(
 # CAMERA
 # =========================================
 cap = cv2.VideoCapture(0)
+
+cap.set(cv2.CAP_PROP_FRAME_WIDTH,320)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT,240)
+cap.set(cv2.CAP_PROP_BUFFERSIZE,1)
 
 # =========================================
 # LIDAR START
@@ -58,13 +63,15 @@ THRESH_10 = 15
 FORWARD_SPEED = 0.18
 SEARCH_SPEED = 0.10
 
-TURN_GAIN = 0.004
+TURN_GAIN = 0.003
 
 STOP_AREA = 22000
 
 FRAME_W = 320
 
 MAX_LOST = 80
+
+CENTER_TOL = 20
 
 last_dir = 1
 lost_count = 0
@@ -160,105 +167,109 @@ try:
 
         front_min = get_front_min()
 
+        # -------------------------
+        # CAMERA ALWAYS RUN
+        # -------------------------
+        ret, frame = cap.read()
+
+        if not ret:
+            continue
+
+        frame = cv2.resize(
+            frame,
+            (320,240)
+        )
+
+        hsv = cv2.cvtColor(
+            frame,
+            cv2.COLOR_BGR2HSV
+        )
+
+        lower1 = np.array(
+            [0,150,120]
+        )
+
+        upper1 = np.array(
+            [8,255,255]
+        )
+
+        lower2 = np.array(
+            [172,150,120]
+        )
+
+        upper2 = np.array(
+            [180,255,255]
+        )
+
+        mask1 = cv2.inRange(
+            hsv,
+            lower1,
+            upper1
+        )
+
+        mask2 = cv2.inRange(
+            hsv,
+            lower2,
+            upper2
+        )
+
+        mask = mask1 + mask2
+
+        kernel = np.ones(
+            (5,5),
+            np.uint8
+        )
+
+        mask = cv2.morphologyEx(
+            mask,
+            cv2.MORPH_OPEN,
+            kernel
+        )
+
+        mask = cv2.morphologyEx(
+            mask,
+            cv2.MORPH_CLOSE,
+            kernel
+        )
+
+        contours,_ = cv2.findContours(
+            mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+
         # =====================================
-        # 장애물 회피 (최우선)
+        # OBSTACLE PRIORITY
         # =====================================
         if front_min < THRESH_10:
 
             direction = choose_avoid_direction()
 
             v = 0.07
-
             w = direction * 0.9
 
-            print(
-                "VERY CLOSE"
-            )
+            print("VERY CLOSE")
 
         elif front_min < THRESH_20:
 
             direction = choose_avoid_direction()
 
             v = 0.09
-
             w = direction * 0.8
 
-            print(
-                "AVOID"
-            )
+            print("AVOID")
 
         elif front_min < THRESH_30:
 
             direction = choose_avoid_direction()
 
             v = 0.12
-
             w = direction * 0.6
 
-            print(
-                "WARNING"
-            )
+            print("WARNING")
 
-        # =====================================
-        # CAMERA FOLLOW
-        # =====================================
         else:
 
-            ret, frame = cap.read()
-
-            if not ret:
-
-                continue
-
-            frame = cv2.resize(
-                frame,
-                (320,240)
-            )
-
-            hsv = cv2.cvtColor(
-                frame,
-                cv2.COLOR_BGR2HSV
-            )
-
-            lower1 = np.array(
-                [0,120,70]
-            )
-
-            upper1 = np.array(
-                [10,255,255]
-            )
-
-            lower2 = np.array(
-                [170,120,70]
-            )
-
-            upper2 = np.array(
-                [180,255,255]
-            )
-
-            mask1 = cv2.inRange(
-                hsv,
-                lower1,
-                upper1
-            )
-
-            mask2 = cv2.inRange(
-                hsv,
-                lower2,
-                upper2
-            )
-
-            mask = mask1 + mask2
-
-            contours,_ = cv2.findContours(
-                mask,
-                cv2.RETR_EXTERNAL,
-                cv2.CHAIN_APPROX_SIMPLE
-            )
-
-            # ---------------------
-            # RED FOUND
-            # ---------------------
             if len(contours) > 0:
 
                 biggest = max(
@@ -297,22 +308,38 @@ try:
 
                     if area > STOP_AREA:
 
-                        v = 0
-                        w = 0
+                        if abs(error) < CENTER_TOL:
 
-                        print(
-                            "TARGET ARRIVED"
-                        )
+                            v = 0
+                            w = 0
+
+                            print(
+                                "TARGET ARRIVED"
+                            )
+
+                        else:
+
+                            v = 0
+
+                            w = np.clip(
+                                TURN_GAIN*error,
+                                -0.35,
+                                0.35
+                            )
+
+                            print(
+                                "CENTERING"
+                            )
 
                     else:
 
+                        v = FORWARD_SPEED
+
                         w = np.clip(
                             TURN_GAIN*error,
-                            -0.5,
-                            0.5
+                            -0.45,
+                            0.45
                         )
-
-                        v = FORWARD_SPEED
 
                         print(
                             "FOLLOW"
@@ -322,9 +349,6 @@ try:
 
                     lost_count += 1
 
-            # ---------------------
-            # RED LOST
-            # ---------------------
             else:
 
                 lost_count += 1
@@ -333,7 +357,7 @@ try:
 
                     v = SEARCH_SPEED
 
-                    w = last_dir * 0.35
+                    w = last_dir * 0.30
 
                     print(
                         "SEARCH"
@@ -348,21 +372,21 @@ try:
                         "TARGET LOST"
                     )
 
-            cv2.imshow(
-                "camera",
-                frame
-            )
-
-            cv2.imshow(
-                "mask",
-                mask
-            )
-
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-
-                break
-
         send_cmd(v,w)
+
+        cv2.imshow(
+            "camera",
+            frame
+        )
+
+        cv2.imshow(
+            "mask",
+            mask
+        )
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+
+            break
 
 except KeyboardInterrupt:
 
@@ -379,3 +403,4 @@ finally:
     lidar_ser.write(
         bytes([0xA5,0x25])
     )
+```
