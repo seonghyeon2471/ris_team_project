@@ -12,15 +12,46 @@ arduino_ser = serial.Serial(
     timeout=0.1
 )
 
+lidar_ser = serial.Serial(
+    "/dev/ttyUSB0",
+    460800,
+    timeout=0.1
+)
+
+# =========================================
+# LIDAR START
+# =========================================
+lidar_ser.write(bytes([0xA5,0x40]))
+
+time.sleep(2)
+
+lidar_ser.reset_input_buffer()
+
+lidar_ser.write(
+    bytes([0xA5,0x20])
+)
+
+lidar_ser.read(7)
+
 # =========================================
 # CAMERA
 # =========================================
 cap = cv2.VideoCapture(0)
 
-cap.set(cv2.CAP_PROP_FRAME_WIDTH,320)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT,240)
+cap.set(
+    cv2.CAP_PROP_FRAME_WIDTH,
+    320
+)
 
-cap.set(cv2.CAP_PROP_BUFFERSIZE,1)
+cap.set(
+    cv2.CAP_PROP_FRAME_HEIGHT,
+    240
+)
+
+cap.set(
+    cv2.CAP_PROP_BUFFERSIZE,
+    1
+)
 
 cap.set(
     cv2.CAP_PROP_FOURCC,
@@ -28,32 +59,44 @@ cap.set(
 )
 
 # =========================================
-# CONTROL
+# LIDAR PARAM
 # =========================================
-MAX_V = 0.22
+MAX_SPEED = 0.30
+MIN_SPEED = 0.09
 
-MIN_FORWARD = 0.05
-MIN_BACKWARD = -0.10
+MAX_W = 0.9
 
+THRESH_30 = 32.0
+THRESH_20 = 22.0
+THRESH_10 = 12.0
+
+FRONT_CHECK_RANGE = 45
+
+EMA_ALPHA = 0.35
+MEDIAN_K = 2
+
+scan_data = np.full(
+    360,
+    150.0,
+    dtype=np.float32
+)
+
+# =========================================
+# TRACK PARAM
+# =========================================
 KP_ROT = 0.0045
+
+TRACK_SPEED = 0.10
 
 X_TOL = 15
 
+CENTER_HOLD_TIME = 8
+
+FORWARD_AFTER_CENTER = 0.18
+
+FORWARD_3CM_TIME = 0.45
+
 MIN_AREA = 500
-
-TARGET_AREA = 23000
-ARRIVE_MARGIN = 1200
-
-# =========================================
-# BLIND SPOT
-# =========================================
-BLIND_THRESHOLD = 0.75
-
-BLIND_FORWARD_TIME = 20
-
-last_area = 0
-
-blind_counter = 0
 
 # =========================================
 # STATE
@@ -63,12 +106,15 @@ target_color = "RED"
 found_once = False
 
 search_dir = 1
+
 search_timer = 0
 
 last_seen_x = 160
 
+center_counter = 0
+
 # =========================================
-# RED RANGE
+# RED
 # =========================================
 lower_red1=np.array([0,70,70])
 upper_red1=np.array([12,255,255])
@@ -80,7 +126,7 @@ lower_red_bgr=np.array([40,20,120])
 upper_red_bgr=np.array([210,170,255])
 
 # =========================================
-# YELLOW RANGE
+# YELLOW
 # =========================================
 lower_yellow_hsv=np.array([15,80,80])
 upper_yellow_hsv=np.array([40,255,255])
@@ -89,12 +135,81 @@ lower_yellow_bgr=np.array([0,120,120])
 upper_yellow_bgr=np.array([170,255,255])
 
 # =========================================
-# MOTOR
+# UTIL
 # =========================================
-def send_cmd(v,w):
+def apply_ema(angle,new_dist):
 
-    v=np.clip(v,-0.30,0.30)
-    w=np.clip(w,-0.80,0.80)
+    scan_data[angle] = (
+
+        (1-EMA_ALPHA)
+        *
+        scan_data[angle]
+
+        +
+
+        EMA_ALPHA
+        *
+        new_dist
+
+    )
+
+def apply_median_filter():
+
+    k = MEDIAN_K
+
+    filtered=np.empty(
+        360,
+        dtype=np.float32
+    )
+
+    for i in range(360):
+
+        idx=[
+
+            (i+d)%360
+
+            for d in range(
+                -k,
+                k+1
+            )
+
+        ]
+
+        filtered[i]=np.median(
+            scan_data[idx]
+        )
+
+    scan_data[:] = filtered
+
+def get_front_min():
+
+    idx=np.arange(
+
+        -FRONT_CHECK_RANGE,
+
+        FRONT_CHECK_RANGE+1
+
+    ) % 360
+
+    return float(
+        np.min(
+            scan_data[idx]
+        )
+    )
+
+def choose_avoid_direction():
+
+    left=np.mean(
+        scan_data[1:90]
+    )
+
+    right=np.mean(
+        scan_data[271:360]
+    )
+
+    return 1 if left>=right else -1
+
+def send_cmd(v,w):
 
     arduino_ser.write(
         f"{v:.3f},{-w:.3f}\n".encode()
@@ -104,31 +219,128 @@ def stop_robot():
 
     send_cmd(0,0)
 
-print("MISSION START")
-
+# =========================================
+# MAIN
+# =========================================
 try:
 
     while True:
 
+        # =========================
+        # LIDAR UPDATE
+        # =========================
+        raw=lidar_ser.read(5)
+
+        if len(raw)==5:
+
+            s_flag = raw[0] & 0x01
+
+            if (
+
+                ((raw[0]&0x02)>>1)
+
+                ==
+
+                (1-s_flag)
+
+                and
+
+                (raw[1]&0x01)==1
+
+            ):
+
+                angle=int(
+
+                    (
+                        (raw[1]>>1)
+
+                        |
+
+                        (raw[2]<<7)
+
+                    ) / 64.0
+
+                ) % 360
+
+                dist=(
+
+                    raw[3]
+
+                    |
+
+                    (raw[4]<<8)
+
+                ) / 40.0
+
+                if 3 < dist < 150:
+
+                    apply_ema(
+                        angle,
+                        dist
+                    )
+
+        if s_flag == 1:
+
+            apply_median_filter()
+
+        front_min=get_front_min()
+
+        # =========================
+        # OBSTACLE AVOID
+        # =========================
+        if front_min < THRESH_10:
+
+            d=choose_avoid_direction()
+
+            send_cmd(
+                MIN_SPEED,
+                d*MAX_W
+            )
+
+            continue
+
+        elif front_min < THRESH_20:
+
+            d=choose_avoid_direction()
+
+            send_cmd(
+                0.12,
+                d*0.8
+            )
+
+            continue
+
+        elif front_min < THRESH_30:
+
+            d=choose_avoid_direction()
+
+            send_cmd(
+                0.15,
+                d*0.7
+            )
+
+            continue
+
+        # =========================
+        # CAMERA
+        # =========================
         ret,frame=cap.read()
 
         if not ret:
             continue
 
-        frame=cv2.flip(frame,1)
+        frame=cv2.flip(
+            frame,
+            1
+        )
 
-        HEIGHT,WIDTH=frame.shape[:2]
-
-        frame_cx=WIDTH//2
+        frame_cx = frame.shape[1]//2
 
         hsv=cv2.cvtColor(
             frame,
             cv2.COLOR_BGR2HSV
         )
 
-        # =====================================
-        # MASK
-        # =====================================
         if target_color=="RED":
 
             mask1=cv2.inRange(
@@ -173,32 +385,13 @@ try:
             bgr_mask
         )
 
-        kernel=np.ones((3,3),np.uint8)
-
-        mask=cv2.morphologyEx(
-            mask,
-            cv2.MORPH_OPEN,
-            kernel
-        )
-
         contours,_=cv2.findContours(
             mask,
             cv2.RETR_EXTERNAL,
             cv2.CHAIN_APPROX_SIMPLE
         )
 
-        state="SEARCH"
-
-        # =====================================
-        # TARGET FOUND
-        # =====================================
         if contours:
-
-            blind_counter = 0
-
-            found_once=True
-
-            search_timer=0
 
             c=max(
                 contours,
@@ -207,194 +400,74 @@ try:
 
             area=cv2.contourArea(c)
 
-            last_area = area
-
             if area > MIN_AREA:
 
                 rect=cv2.minAreaRect(c)
 
-                (cx,cy),(rw,rh),angle=rect
+                (cx,cy),_,_=rect
 
                 cx=int(cx)
 
-                last_seen_x=cx
+                error_x = cx-frame_cx
 
-                error_x=cx-frame_cx
+                if abs(error_x)<X_TOL:
 
-                w=-KP_ROT*error_x
-
-                distance_error=(
-                    TARGET_AREA-area
-                )
-
-                v=distance_error*0.000025
-
-                if v>0:
-
-                    v=max(
-                        v,
-                        MIN_FORWARD
-                    )
+                    center_counter += 1
 
                 else:
 
-                    v=min(
-                        v,
-                        MIN_BACKWARD
-                    )
+                    center_counter = 0
 
-                # ==================
-                # ARRIVED
-                # ==================
-                if (
-
-                    abs(error_x)<X_TOL and
-                    abs(distance_error)<ARRIVE_MARGIN
-
-                ):
+                if center_counter > CENTER_HOLD_TIME:
 
                     stop_robot()
 
-                    if target_color=="RED":
+                    time.sleep(0.2)
 
-                        time.sleep(1)
+                    send_cmd(
+                        FORWARD_AFTER_CENTER,
+                        0
+                    )
+
+                    time.sleep(
+                        FORWARD_3CM_TIME
+                    )
+
+                    stop_robot()
+
+                    time.sleep(1)
+
+                    if target_color=="RED":
 
                         target_color="YELLOW"
 
-                        found_once=False
-                        search_timer=0
-                        search_dir=1
-                        last_seen_x=frame_cx
+                        center_counter=0
 
                         continue
 
                     else:
 
-                        print(
-                            "MISSION COMPLETE"
-                        )
-
                         break
 
                 else:
 
-                    send_cmd(v,w)
-
-                    state="TRACK"
-
-        # =====================================
-        # LOST TARGET
-        # =====================================
-        else:
-
-            blind_counter += 1
-
-            # -------------------------
-            # 사각지대 가능
-            # -------------------------
-            if (
-
-                last_area >
-                TARGET_AREA *
-                BLIND_THRESHOLD
-
-            ):
-
-                if blind_counter < BLIND_FORWARD_TIME:
+                    w=-KP_ROT*error_x
 
                     send_cmd(
-                        0.05,
-                        0
+                        TRACK_SPEED,
+                        w
                     )
-
-                    state="BLIND FORWARD"
-
-                else:
-
-                    stop_robot()
-
-                    state="ASSUME ARRIVED"
-
-            # -------------------------
-            # 처음부터 못 찾음
-            # -------------------------
-            elif not found_once:
-
-                send_cmd(
-                    0.06,
-                    0.60*search_dir
-                )
-
-                state="INIT SEARCH"
-
-                if search_timer>120:
-
-                    search_dir*=-1
-
-                    search_timer=0
-
-                search_timer += 1
-
-            # -------------------------
-            # 찾다가 놓침
-            # -------------------------
-            else:
-
-                if last_seen_x > frame_cx:
-
-                    send_cmd(
-                        0.05,
-                        -0.45
-                    )
-
-                    state="SEARCH RIGHT"
-
-                else:
-
-                    send_cmd(
-                        0.05,
-                        0.45
-                    )
-
-                    state="SEARCH LEFT"
-
-        cv2.putText(
-            frame,
-            state,
-            (20,40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0,255,0),
-            2
-        )
-
-        cv2.putText(
-            frame,
-            f"TARGET:{target_color}",
-            (20,80),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (0,255,255),
-            2
-        )
-
-        cv2.imshow(
-            "frame",
-            frame
-        )
-
-        if cv2.waitKey(1)==27:
-
-            break
-
-except KeyboardInterrupt:
-
-    pass
 
 finally:
 
     stop_robot()
 
+    lidar_ser.write(
+        bytes([0xA5,0x25])
+    )
+
     cap.release()
+
+    lidar_ser.close()
 
     cv2.destroyAllWindows()
