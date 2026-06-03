@@ -85,7 +85,7 @@ try:
         elif key == 27:      # ESC
             break
 
-        send_cmd(v, w)
+        send_cmd(v*5, w*10)
 
         cv2.putText(
             frame,
