@@ -31,8 +31,8 @@ LIDAR_BAUD     = 460800
 
 # ── Camera ────────────────────────────────────────────────────────────────────
 CAMERA_INDEX   = 0
-FRAME_W        = 640
-FRAME_H        = 480
+FRAME_W        = 320
+FRAME_H        = 240
 MIN_BLOB_AREA  = 1500      # 최소 contour 면적 (practice6 스타일)
 PASS_AREA_THR  = 40000     # 통과 판정 blob 면적 (px²)
 CENTER_DEAD    = 30        # 중앙 dead-zone (±px)
@@ -77,15 +77,18 @@ AVOID_FULL    = 12          # cm
 
 # ── HSV 색상 프로파일 (practice6/7 기반) ──────────────────────────────────────
 COLOR_PROFILES = {
+    # 실측 H≈175~176 (wrap-around) → 165~180 + 0~5 로 넉넉히
     "red": [
-        (np.array([0,   120,  70]), np.array([10,  255, 255])),
-        (np.array([170, 120,  70]), np.array([180, 255, 255])),
+        (np.array([0,   100, 150]), np.array([5,   255, 255])),
+        (np.array([165, 100, 150]), np.array([180, 255, 255])),
     ],
+    # 실측 H≈26, S≈120~135, V≈215~240
     "yellow": [
-        (np.array([20, 100, 100]), np.array([40, 255, 255])),
+        (np.array([20, 80, 150]), np.array([35, 255, 255])),
     ],
+    # 실측 H≈112, S≈130~155, V≈230~255
     "blue": [
-        (np.array([100, 150,  50]), np.array([130, 255, 255])),
+        (np.array([105, 90, 150]), np.array([120, 255, 255])),
     ],
     "green": [
         (np.array([40,  80,  80]), np.array([80,  255, 255])),
@@ -256,10 +259,11 @@ class CameraThread(threading.Thread):
         super().__init__(name="CameraThread", daemon=True)
 
     def run(self):
-        cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_V4L2)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  FRAME_W)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
-        cap.set(cv2.CAP_PROP_FPS, 30)
+        cap = cv2.VideoCapture(CAMERA_INDEX)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  320)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         if not cap.isOpened():
             log.error("Camera open failed!")
             return
