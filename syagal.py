@@ -11,7 +11,7 @@ arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
 lidar_ser   = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)
 
 # =========================================
-# CAMERA & HARDWARE FIX (★빛 번짐 및 자동 제어 오작동 해결)
+# CAMERA & HARDWARE FIX
 # =========================================
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH,  320)
@@ -19,8 +19,8 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 
-time.sleep(1.0)  # 카메라 안정화 대기
-cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)        # 1: 수동(Manual), 3: 자동(Auto)
+time.sleep(1.0)  
+cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)        # 1: 수동(Manual)
 cap.set(cv2.CAP_PROP_AUTO_WB, 0)              # 0: 자동 화이트 밸런스 비활성화
 
 # =========================================
@@ -52,34 +52,36 @@ _scan_shared = np.full(360, 150.0, dtype=np.float32)
 scan_lock    = threading.Lock()
 
 # =========================================
-# CAMERA PARAMETERS (★초고속 탐색 및 내부 정지 필수 튜닝)
+# CAMERA PARAMETERS
 # =========================================
 MAX_V       = 0.24      
 MIN_V       = 0.10      
 KP_ROT      = 0.003     
 X_TOL       = 35        
 MIN_AREA    = 500
-TARGET_AREA = 15000     # 진입(APPROACH)을 시작할 기준 면적
-PARK_SEC    = 3.0       # 정차 유지 시간
+TARGET_AREA = 14000     # 진입(APPROACH) 시작 면적 살짝 하향 (안정적 진입 목적)
+PARK_SEC    = 3.0       
 
-# [벽 없는 환경 핵심] 객체가 카메라에서 아예 사라진 후 내부 중심까지 파고들 추가 직진 시간 (초)
-APPROACH_DRIVE_SEC = 1.0  
+# [1번 문제 해결 핵심] 시야 유실 후 정중앙까지 도달하기 위한 직진 시간
+APPROACH_DRIVE_SEC = 1.2  
 
-# [고속화 핵심] 제자리 탐색은 짧고 굵게! 2.2초 동안 빠르게 돌고 없으면 바로 탈출 공간주행
+# [고속화] 탐색 타임아웃
 SEARCH_TIMEOUT = 2.2    
 
 # =========================================
-# 색상별 HSV 범위 (★과노출/빛 바램 대응 채도 하한선 튜닝)
+# 색상별 HSV 범위 (★2번 문제: 노란색 화이트아웃 초정밀 반영)
 # =========================================
 COLOR_CFG = {
     "red": {
         "hsv1": ([0,   45,  50], [15,  255, 255]),
         "hsv2": ([160, 45,  50], [179, 255, 255]),
-        "bgr":  ([0, 0, 0], [255, 255, 255]), # BGR 왜곡 간섭 차단
+        "bgr":  ([0, 0, 0], [255, 255, 255]), 
         "draw": (0, 0, 255),
     },
     "yellow": {
-        "hsv1": ([15,  40,  50], [42,  255, 255]), 
+        # [화이트아웃 대책] H(색상) 범위를 좁히고, S(채도) 하한선을 15로 대폭 낮춰 
+        # 조명에 바랜 연한 노란색까지 인식. V(명도) 하한선은 70으로 올려 어두운 노이즈 차단.
+        "hsv1": ([18,  15,  70], [38,  255, 255]), 
         "hsv2": None,
         "bgr":  ([0, 0, 0], [255, 255, 255]),
         "draw": (0, 200, 255),
@@ -92,7 +94,6 @@ COLOR_CFG = {
     },
 }
 
-# 미션 순서
 MISSION = ["red", "yellow", "blue"]
 
 # =========================================
@@ -103,7 +104,7 @@ state               = "SEARCH"
 last_seen_x         = 160
 park_start          = None
 search_start_time   = None  
-approach_start_time = None  # 내부 진입 타이머 변수
+approach_start_time = None  
 
 # =========================================
 # LIDAR UTIL
@@ -136,9 +137,6 @@ def choose_avoid_direction():
         right_avg = float(np.mean(_scan_shared[271:360]))
     return 1 if left_avg >= right_avg else -1
 
-# =========================================
-# LIDAR 스레드
-# =========================================
 def lidar_loop():
     while True:
         raw = lidar_ser.read(5)
@@ -159,10 +157,9 @@ def lidar_loop():
 
 lidar_thread = threading.Thread(target=lidar_loop, daemon=True)
 lidar_thread.start()
-print("LIDAR THREAD START")
 
 # =========================================
-# MOTOR
+# MOTOR WHEEL CONTROL
 # =========================================
 def send_cmd(v, w):
     v = np.clip(v, -0.3, 0.3)
@@ -172,9 +169,6 @@ def send_cmd(v, w):
 def stop_robot():
     send_cmd(0.0, 0.0)
 
-# =========================================
-# 마스크 생성
-# =========================================
 def make_mask(frame, hsv, color_name):
     cfg    = COLOR_CFG[color_name]
     kernel = np.ones((5, 5), np.uint8) 
@@ -185,65 +179,41 @@ def make_mask(frame, hsv, color_name):
         lo2, hi2 = np.array(cfg["hsv2"][0]), np.array(cfg["hsv2"][1])
         hsv_mask = cv2.bitwise_or(hsv_mask, cv2.inRange(hsv, lo2, hi2))
 
-    bgr_mask = cv2.inRange(frame,
-                           np.array(cfg["bgr"][0]),
-                           np.array(cfg["bgr"][1]))
+    bgr_mask = cv2.inRange(frame, np.array(cfg["bgr"][0]), np.array(cfg["bgr"][1]))
 
     mask = cv2.bitwise_and(hsv_mask, bgr_mask)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     return mask
 
-# =========================================
-# 동작 우선순위 (장애물 회피용)
-# =========================================
 def decide_cmd(cam_v, cam_w, front_min):
     if front_min < THRESH_10:
         direction = choose_avoid_direction()
         return MIN_SPEED, direction * MAX_W, True
-
     elif front_min < THRESH_20:
         direction = choose_avoid_direction()
         avoid_w   = direction * 0.8
-        if direction * cam_w >= 0:
-            blended_w = 0.3 * cam_w + 0.7 * avoid_w
-        else:
-            blended_w = avoid_w
+        blended_w = 0.3 * cam_w + 0.7 * avoid_w if direction * cam_w >= 0 else avoid_w
         return 0.12, blended_w, True
-
     elif front_min < THRESH_30:
         direction = choose_avoid_direction()
         avoid_w   = direction * 0.7
-        if direction * cam_w >= 0:
-            blended_w = 0.5 * cam_w + 0.5 * avoid_w
-        else:
-            blended_w = avoid_w
-        v = min(cam_v, 0.15)
-        return v, blended_w, True
-
+        blended_w = 0.5 * cam_w + 0.5 * avoid_w if direction * cam_w >= 0 else avoid_w
+        return min(cam_v, 0.15), blended_w, True
     else:
         return cam_v, cam_w, False
 
-# =========================================
-# 카메라 버퍼 flush (★고속 반응 핵심)
-# =========================================
 def flush_camera_buffer(n=8):  
     for _ in range(n):
         cap.grab()
 
 # =========================================
-# START MAIN LOOP
+# MAIN LOOP
 # =========================================
-print("=" * 45)
-print(f"   주차 미션 시작: {MISSION}")
-print(f"   첫 번째 목표  : [{MISSION[0]}]")
-print("   ESC 키로 종료")
-print("=" * 45)
-time.sleep(1.0)
+print("🏁 MISSION CONTROL START")
 
 try:
     while True:
-
         ret, frame = cap.read()
         if not ret:
             continue
@@ -256,203 +226,154 @@ try:
         hsv       = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         front_min = get_front_min()
 
-        cv2.circle(frame, (frame_cx, frame_cy), 5, (0, 255, 255), -1)
-
-        lidar_color = (0, 255, 255) if front_min > THRESH_30 else (0, 0, 255)
-        cv2.putText(frame, f"LIDAR:{front_min:.0f}cm",
-                    (WIDTH - 110, HEIGHT - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, lidar_color, 1)
-
-        # ── 미션 완료 상태 제어 ──────────────────
+        # 미션 핸들러 종료 판정
         if mission_index >= len(MISSION):
             stop_robot()
-            cv2.putText(frame, "MISSION COMPLETE!",
-                        (20, HEIGHT // 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+            cv2.putText(frame, "ALL MISSION COMPLETE!", (20, HEIGHT // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
             cv2.imshow("frame", frame)
-            if cv2.waitKey(1) & 0xFF == 27:
-                break
+            if cv2.waitKey(1) & 0xFF == 27: break
             continue
 
         target = MISSION[mission_index]
         draw   = COLOR_CFG[target]["draw"]
 
         mask = make_mask(frame, hsv, target)
-        contours, _ = cv2.findContours(
-            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # ── PARKING (주차 중) 상태 제어 ─────────────
+        # ── [PARKING 상태 블록] ──────────────────
         if state == "PARKING":
             stop_robot()
-
             elapsed = time.time() - park_start
             remain   = max(0.0, PARK_SEC - elapsed)
 
-            cv2.putText(frame, f"PARKING [{target}] {remain:.1f}s",
-                        (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, draw, 2)
-            cv2.putText(frame, f"MISSION {mission_index+1}/{len(MISSION)}",
-                        (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
-
+            cv2.putText(frame, f"PARKING [{target}] {remain:.1f}s", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, draw, 2)
+            
             if elapsed >= PARK_SEC:
-                print(f"✅ [{target}] 정차 완료!")
+                print(f"✅ [{target}] 미션 석세스! 다음 타겟 전환 준비.")
                 mission_index += 1
-                if mission_index >= len(MISSION):
-                    print("🏁 미션 전체 완료!")
-                else:
-                    # [고속화] 다음 타겟 찾기 전 카메라 잔상 버퍼 제거
-                    flush_camera_buffer(n=8) 
-                    
+                if mission_index < len(MISSION):
+                    flush_camera_buffer(n=10) # 넉넉히 비워 잔상 완전 파괴
                     state = "FORCED_SEARCH" 
                     search_start_time = time.time()  
-                    last_seen_x = 160  # 센터 리셋
-                    print(f"➡️  다음 목표: [{MISSION[mission_index]}] 초고속 탐색 시작")
-
+                    last_seen_x = 160  
+                    print(f"➡️  NEXT TARGET: [{MISSION[mission_index]}] 고속 턴 스캔 개시")
+                else:
+                    print("🏁 모든 미션을 클리어했습니다.")
+            
             cv2.imshow("frame", frame)
             cv2.imshow("mask",  mask)
-            if cv2.waitKey(1) & 0xFF == 27:
-                break
+            if cv2.waitKey(1) & 0xFF == 27: break
             continue
 
-        cam_v     = 0.0
-        cam_w     = 0.0
+        # 명령 제어 초기화
+        cam_v, cam_w = 0.0, 0.0
         cam_state = state
 
-        # ── 객체 감지 및 주행 제어 ──────────────────────────
+        # ── [객체 인지 구역] ──────────────────────
         if contours:
             c    = max(contours, key=cv2.contourArea)
             area = cv2.contourArea(c)
 
             if area > MIN_AREA:
-                # 탐색 상태에서 객체 포착 시 즉시 TRACK 상태로 연계
                 if state in ["FORCED_SEARCH", "WANDERING", "SEARCH"]:
-                    print(f"🎯 [{target}] 객체 발견! 즉시 추적 상태 돌입.")
                     state = "TRACK"
+                    print(f"🎯 [{target}] 포착 -> TRACK 모드 체인지")
 
                 rect = cv2.minAreaRect(c)
-                (cx, cy), (rw, rh), angle = rect
-                cx = int(cx)
-                cy = int(cy)
+                (cx, cy), _, _ = rect
+                cx, cy = int(cx), int(cy)
                 last_seen_x = cx
 
-                box = np.int32(cv2.boxPoints(rect))
-                cv2.drawContours(frame, [box], 0, draw, 2)
+                cv2.drawContours(frame, [np.int32(cv2.boxPoints(rect))], 0, draw, 2)
                 cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)
-
                 error_x = cx - frame_cx
 
-                # ── [핵심 수정: 객체 내부 진입 및 정지 판단 조건문 구역] ──
-                # 이미 APPROACH 상태이거나, 면적이 기준(TARGET_AREA)을 넘어 돌입해야 하는 경우
+                # Approach 상태 진입 판정 구조 개선
                 if state == "APPROACH" or (area > TARGET_AREA and state == "TRACK"):
-                    
-                    # 최초 상태 진입할 때만 타이머 시작 시점 기록
                     if state != "APPROACH":
                         state = "APPROACH"
                         approach_start_time = time.time()
-                        print(f"📥 [{target}] 객체 내부 진입 시작 (Area:{int(area)})")
+                        print(f"📥 [{target}] 내부 진입 (Area 크기 만족: {int(area)})")
 
-                    # 내부 진입 속도 고정 및 부드러운 조향
                     cam_w = -KP_ROT * error_x * 0.5 
                     cam_v = 0.12  
                     cam_state = "APPROACH"
 
-                    # [정지 조건 1] 벽이 없어도 객체 정중앙 부근까지 와서 카메라 면적이 
-                    # 꽉 차는 폭발적 근삿값(26000) 이상이 되면 즉시 정지 후 주차(PARKING)
-                    if area > 26000: 
+                    # 면적이 극도로 커져서 정지하는 케이스 보강 (25000)
+                    if area > 25000: 
                         stop_robot()
                         state      = "PARKING"
                         park_start = time.time()
-                        print(f"🅿️  [{target}] 내부 면적 포화 근삿값 충족 -> 정지 (Area:{int(area)})")
+                        print(f"🅿️  [{target}] 내부 면적 포화 정지 판정 완료")
                         continue
                 else:
-                    # 일반 원거리 추적 주행 (TRACK)
+                    # 일반 추적 주행 (TRACK)
                     cam_w     = -KP_ROT * error_x
                     rem_area  = max(0.0, TARGET_AREA - area)
                     cam_v     = MIN_V + (MAX_V - MIN_V) * (rem_area / TARGET_AREA)
                     cam_v     = np.clip(cam_v, MIN_V, MAX_V)
                     cam_state = "TRACK"
 
-                cv2.putText(frame, f"A:{int(area)}",
-                            (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
+                cv2.putText(frame, f"Area: {int(area)}", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             else:
-                cam_state = "SMALL"
                 stop_robot()
-
+        
+        # ── [객체 유실(아래로 사라짐 포함) 구역] ─────────
         else:
-            # ── [핵심 수정: 객체가 카메라 시야에서 사라졌을 때 (Blind 처리) 구역] ──
+            # 1번 문제 핵심 해결: APPROACH 도중 아래로 깎여서 안보이게 된 상황 처리
             if state == "APPROACH":
-                cv2.putText(frame, "APPROACH (INSIDE BLIND)", (20, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
-                
-                # 완전히 객체 밑바닥/내부로 밀고 들어가 카메라 시야가 끊기면 핸들을 고정하고 직진
-                cam_v, cam_w = 0.12, 0.0 
-                cam_state    = "APPROACH"
+                cam_v, cam_w = 0.12, 0.0  # 핸들 꺾지 말고 정면 그대로 진입
+                cam_state    = "APPROACH_BLIND"
 
-                # [정지 조건 2] 객체 시야 상실(Blind) 시점부터 정밀하게 설정한 시간(1.0초) 동안 
-                # 더 밀고 들어가 완벽한 객체 중앙 내부에서 브레이크 및 주차(PARKING)
+                # 진입 시작 시점으로부터 설정한 초(APPROACH_DRIVE_SEC)가 지나면 확실히 주차로 천명
                 if time.time() - approach_start_time > APPROACH_DRIVE_SEC:
                     stop_robot()
                     state      = "PARKING"
                     park_start = time.time()
-                    print(f"🅿️  [{target}] 내부 진입 성공 (Blind 시간 제어 정지 완료)")
+                    print(f"🅿️  [{target}] 사각지대 내부 진입에 따른 시간 제한 정지 완료 -> 주차 상태 강제 진입")
+                    
+                    # 루프가 꼬이지 않도록 이 시점에서 주차 상태 가동 후 즉시 루프 리프레시
+                    cv2.imshow("frame", frame)
+                    cv2.imshow("mask",  mask)
+                    cv2.waitKey(1)
                     continue
 
-            # ── [초고속 탐색 구역] 타겟 미감지 시 타임아웃 회전 제어 ──
             elif state == "FORCED_SEARCH":
-                # 2.2초 동안 엄청 빠르고 강하게(w=0.75) 제자리 스캔 턴
                 if time.time() - search_start_time > SEARCH_TIMEOUT:
                     state = "WANDERING"
-                    print(f"⚠️ 컷! [{target}] 안 보임 -> 맵 넓게 쓰러 전진 순항 시작")
-                    cam_v, cam_w = 0.20, 0.0  # 순항 전진 속도 상향
-                    cam_state    = "WANDERING"
+                    print(f"⚠️ 타임아웃 -> 맵 전체 탐색(WANDERING) 기동")
+                    cam_v, cam_w = 0.20, 0.0  
                 else:
                     cam_v, cam_w = 0.0, 0.75  
-                    cam_state    = "FORCED_SEARCH"
             
             elif state == "WANDERING":
                 cam_v, cam_w = 0.20, 0.0  
-                cam_state    = "WANDERING"
                 
             else:
-                # 일반 유실 상황에서도 탐색 선회 속도 향상
                 cam_state = "SEARCH LEFT" if last_seen_x <= frame_cx else "SEARCH RIGHT"
-                if last_seen_x > frame_cx:
-                    cam_v, cam_w = 0.02, -0.55  
-                else:
-                    cam_v, cam_w = 0.02,  0.55
+                cam_v, cam_w = (0.02, -0.55) if last_seen_x > frame_cx else (0.02,  0.55)
 
-        # ── LiDAR 회피 간섭 차단 분기 ─────────────────────
-        # 객체 내부로 정밀하게 진입(APPROACH) 하거나 멈춰 있는(PARKING) 특수 상태일 때는 
-        # 라이다가 타겟 구조물을 장애물로 오인해 회피하지 않도록 회피 기능을 예외(Bypass) 처리합니다.
-        if state in ["APPROACH", "PARKING"]:
-            final_v, final_w, avoid_on = cam_v, cam_w, False
+        # ── [라이다 예외 처리 및 최종 명령 송신] ─────────
+        if state in ["APPROACH", "APPROACH_BLIND", "PARKING"]:
+            final_v, final_w = cam_v, cam_w
         else:
-            final_v, final_w, avoid_on = decide_cmd(cam_v, cam_w, front_min)
+            final_v, final_w, _ = decide_cmd(cam_v, cam_w, front_min)
             
         send_cmd(final_v, final_w)
 
-        # 디버깅 화면 제어 상태 명시
-        disp_state = f"AVOID {front_min:.0f}cm" if avoid_on else cam_state
-
-        # ── HUD 그래픽 출력 ───────────────────────────
-        cv2.putText(frame, disp_state,
-                    (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(frame,
-                    f"TARGET:{target} ({mission_index+1}/{len(MISSION)})",
-                    (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.55, draw, 2)
-
+        # HUD 시각화
+        cv2.putText(frame, f"STATE: {cam_state}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(frame, f"TARGET: {target}", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, draw, 2)
         cv2.imshow("frame", frame)
         cv2.imshow("mask",  mask)
 
-        if cv2.waitKey(1) & 0xFF == 27:
-            break
+        if cv2.waitKey(1) & 0xFF == 27: break
 
 except KeyboardInterrupt:
-    print("STOP")
-
+    print("USER INTERRUPT")
 finally:
     stop_robot()
     cap.release()
     lidar_ser.write(bytes([0xA5, 0x25]))
     cv2.destroyAllWindows()
-    print("SHUTDOWN COMPLETE")
+    print("SYSTEM SHUTDOWN")
