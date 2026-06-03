@@ -4,9 +4,9 @@ import numpy as np
 import time
 import threading
 
-# ======================================
+# ====================================
 # SERIAL
-# ======================================
+# ====================================
 arduino_ser = serial.Serial(
     "/dev/serial0",
     115200,
@@ -19,9 +19,9 @@ lidar_ser = serial.Serial(
     timeout=0.001
 )
 
-# ======================================
+# ====================================
 # CAMERA
-# ======================================
+# ====================================
 cap = cv2.VideoCapture(
     0,
     cv2.CAP_V4L2
@@ -29,7 +29,6 @@ cap = cv2.VideoCapture(
 
 cap.set(cv2.CAP_PROP_FRAME_WIDTH,320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT,240)
-cap.set(cv2.CAP_PROP_BUFFERSIZE,1)
 
 if not cap.isOpened():
 
@@ -37,9 +36,9 @@ if not cap.isOpened():
 
     exit()
 
-# ======================================
+# ====================================
 # LIDAR START
-# ======================================
+# ====================================
 lidar_ser.write(bytes([0xA5,0x40]))
 
 time.sleep(2)
@@ -52,32 +51,10 @@ lidar_ser.write(
 
 lidar_ser.read(7)
 
-# ======================================
+# ====================================
 # PARAM
-# ======================================
-EMA_ALPHA=0.35
-
-scan=np.full(
-    360,
-    150.0,
-    dtype=np.float32
-)
-
-KP_ROT=0.0035
-
-MIN_V=0.08
-MAX_V=0.18
-
-TARGET_AREA=24000
-MIN_AREA=900
-
-SEARCH_V=0.12
-SEARCH_W=0.42
-
-FORWARD_3CM_SPEED=0.10
-FORWARD_3CM_TIME=0.32
-
-MISSION=[
+# ====================================
+MISSION = [
 
     "red",
 
@@ -85,135 +62,69 @@ MISSION=[
 
 ]
 
-COLOR_CFG={
+mission_idx = 0
 
-"red":{
+KP_ROT = 0.004
 
-"hsv1":([0,45,50],[15,255,255]),
+MIN_V = 0.08
+MAX_V = 0.18
 
-"hsv2":([160,45,50],[179,255,255])
+TARGET_AREA = 22000
+MIN_AREA = 800
 
-},
+FORWARD_3CM_SPEED = 0.10
+FORWARD_3CM_TIME = 0.32
 
-"yellow":{
+SEARCH_V = 0.12
+SEARCH_W = 0.35
 
-"hsv1":([15,30,60],[40,255,255]),
+last_seen_x = 160
 
-"hsv2":None
+search_dir = 1
 
-}
+search_start = time.time()
 
-}
+# ====================================
+# COLOR
+# ====================================
+def make_mask(hsv,target):
 
-# ======================================
-# STATE
-# ======================================
-mission_index=0
+    if target=="red":
 
-state="SEARCH"
+        mask1=cv2.inRange(
 
-last_seen_x=160
+            hsv,
 
-wander_start=time.time()
+            np.array([0,45,50]),
 
-wander_dir=1
+            np.array([15,255,255])
 
-# ======================================
-# MOTOR
-# ======================================
-def send_cmd(v,w):
+        )
 
-    arduino_ser.write(
+        mask2=cv2.inRange(
 
-        f"{v:.3f},{-w:.3f}\n".encode()
+            hsv,
 
-    )
+            np.array([160,45,50]),
 
-def stop_robot():
+            np.array([179,255,255])
 
-    send_cmd(0,0)
-
-# ======================================
-# MISSION CHANGE
-# ======================================
-def next_target():
-
-    global mission_index
-    global state
-    global last_seen_x
-    global wander_start
-    global wander_dir
-
-    mission_index += 1
-
-    if mission_index >= len(MISSION):
-
-        return False
-
-    state="SEARCH"
-
-    last_seen_x=160
-
-    wander_start=time.time()
-
-    wander_dir*=-1
-
-    stop_robot()
-
-    time.sleep(1)
-
-    # 카메라 버퍼 비우기
-    for _ in range(15):
-
-        cap.grab()
-
-    print(
-        "NEXT TARGET:",
-        MISSION[mission_index]
-    )
-
-    return True
-
-# ======================================
-# MASK
-# ======================================
-def make_mask(hsv,color):
-
-    cfg=COLOR_CFG[color]
-
-    lo1=np.array(cfg["hsv1"][0])
-
-    hi1=np.array(cfg["hsv1"][1])
-
-    mask=cv2.inRange(
-
-        hsv,
-
-        lo1,
-
-        hi1
-
-    )
-
-    if cfg["hsv2"]:
-
-        lo2=np.array(cfg["hsv2"][0])
-
-        hi2=np.array(cfg["hsv2"][1])
+        )
 
         mask=cv2.bitwise_or(
+            mask1,
+            mask2
+        )
 
-            mask,
+    else:
 
-            cv2.inRange(
+        mask=cv2.inRange(
 
-                hsv,
+            hsv,
 
-                lo2,
+            np.array([15,40,60]),
 
-                hi2
-
-            )
+            np.array([40,255,255])
 
         )
 
@@ -234,9 +145,92 @@ def make_mask(hsv,color):
 
     return mask
 
-# ======================================
+# ====================================
+# MOTOR
+# ====================================
+def send_cmd(v,w):
+
+    arduino_ser.write(
+
+        f"{v:.3f},{-w:.3f}\n".encode()
+
+    )
+
+def stop_robot():
+
+    send_cmd(0,0)
+
+# ====================================
+# LIDAR THREAD
+# ====================================
+front_min = 150
+
+def lidar_loop():
+
+    global front_min
+
+    scan=np.full(
+        360,
+        150,
+        dtype=np.float32
+    )
+
+    while True:
+
+        raw=lidar_ser.read(5)
+
+        if len(raw)!=5:
+
+            continue
+
+        angle=int(
+
+            (
+
+                (raw[1]>>1)
+
+                |
+
+                (raw[2]<<7)
+
+            )/64
+
+        )%360
+
+        dist=(
+
+            raw[3]
+
+            |
+
+            (raw[4]<<8)
+
+        )/40
+
+        if 3<dist<150:
+
+            scan[angle]=dist
+
+            idx=np.arange(
+                -45,
+                46
+            )%360
+
+            front_min=np.min(
+                scan[idx]
+            )
+
+threading.Thread(
+
+target=lidar_loop,
+
+daemon=True
+
+).start()
+
+# ====================================
 # MAIN
-# ======================================
+# ====================================
 try:
 
     while True:
@@ -261,7 +255,7 @@ try:
         )
 
         target=MISSION[
-            mission_index
+            mission_idx
         ]
 
         mask=make_mask(
@@ -282,55 +276,63 @@ try:
         v=0
         w=0
 
+        # ========= obstacle =========
+        if front_min<15:
+
+            send_cmd(
+                0.05,
+                0.7
+            )
+
+            continue
+
+        # ========= target =========
         if contours:
 
             c=max(
-
                 contours,
-
                 key=cv2.contourArea
-
             )
 
             area=cv2.contourArea(c)
 
             if area>MIN_AREA:
 
-                rect=cv2.minAreaRect(c)
+                x,y,w_box,h=cv2.boundingRect(c)
 
-                (cx,cy),_,_=rect
-
-                cx=int(cx)
+                cx=x+w_box//2
 
                 last_seen_x=cx
 
                 err=cx-160
 
+                # 목표 도착
                 if area>TARGET_AREA:
 
                     stop_robot()
 
-                    time.sleep(0.2)
-
                     send_cmd(
-
                         FORWARD_3CM_SPEED,
-
                         0
-
                     )
 
                     time.sleep(
-
                         FORWARD_3CM_TIME
-
                     )
 
                     stop_robot()
 
-                    if not next_target():
+                    mission_idx += 1
+
+                    if mission_idx>=len(MISSION):
 
                         break
+
+                    # 즉시 노랑으로 전환
+
+                    last_seen_x=160
+
+                    search_start=time.time()
 
                     continue
 
@@ -346,21 +348,25 @@ try:
 
                 w=-KP_ROT*err
 
-                state="TRACK"
-
         else:
 
-            elapsed=time.time()-wander_start
+            # 원운동 탐색
+            elapsed=time.time()-search_start
 
-            if elapsed>4:
+            if elapsed>5:
 
-                wander_start=time.time()
+                search_start=time.time()
 
-                wander_dir*=-1
+                search_dir*=-1
 
             v=SEARCH_V
 
-            w=SEARCH_W*wander_dir
+            w=SEARCH_W*search_dir
+
+            # 원 반경 약 1m
+            # r = v / w
+            # 0.12 / 0.35 ≈ 0.34m
+            # 실제 미끄럼 고려시 ~1m 근처
 
         send_cmd(
             v,
@@ -371,13 +377,13 @@ try:
 
             frame,
 
-            f"TARGET:{target}",
+            target,
 
-            (10,30),
+            (20,40),
 
             cv2.FONT_HERSHEY_SIMPLEX,
 
-            0.7,
+            1,
 
             (0,255,0),
 
@@ -404,9 +410,7 @@ finally:
     stop_robot()
 
     lidar_ser.write(
-
         bytes([0xA5,0x25])
-
     )
 
     cap.release()
