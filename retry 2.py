@@ -38,20 +38,9 @@ lidar_ser.read(7)
 # =========================================
 cap = cv2.VideoCapture(0)
 
-cap.set(
-    cv2.CAP_PROP_FRAME_WIDTH,
-    320
-)
-
-cap.set(
-    cv2.CAP_PROP_FRAME_HEIGHT,
-    240
-)
-
-cap.set(
-    cv2.CAP_PROP_BUFFERSIZE,
-    1
-)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH,320)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT,240)
+cap.set(cv2.CAP_PROP_BUFFERSIZE,1)
 
 cap.set(
     cv2.CAP_PROP_FOURCC,
@@ -98,6 +87,8 @@ FORWARD_3CM_TIME = 0.45
 
 MIN_AREA = 500
 
+SEARCH_W = 0.35
+
 # =========================================
 # STATE
 # =========================================
@@ -112,6 +103,8 @@ search_timer = 0
 last_seen_x = 160
 
 center_counter = 0
+
+s_flag = 0
 
 # =========================================
 # RED
@@ -142,20 +135,18 @@ def apply_ema(angle,new_dist):
     scan_data[angle] = (
 
         (1-EMA_ALPHA)
-        *
-        scan_data[angle]
+
+        * scan_data[angle]
 
         +
 
         EMA_ALPHA
-        *
-        new_dist
+
+        * new_dist
 
     )
 
 def apply_median_filter():
-
-    k = MEDIAN_K
 
     filtered=np.empty(
         360,
@@ -169,8 +160,8 @@ def apply_median_filter():
             (i+d)%360
 
             for d in range(
-                -k,
-                k+1
+                -MEDIAN_K,
+                MEDIAN_K+1
             )
 
         ]
@@ -192,9 +183,7 @@ def get_front_min():
     ) % 360
 
     return float(
-        np.min(
-            scan_data[idx]
-        )
+        np.min(scan_data[idx])
     )
 
 def choose_avoid_direction():
@@ -229,7 +218,9 @@ try:
         # =========================
         # LIDAR UPDATE
         # =========================
-        raw=lidar_ser.read(5)
+        raw = lidar_ser.read(5)
+
+        s_flag = 0
 
         if len(raw)==5:
 
@@ -252,6 +243,7 @@ try:
                 angle=int(
 
                     (
+
                         (raw[1]>>1)
 
                         |
@@ -283,7 +275,7 @@ try:
 
             apply_median_filter()
 
-        front_min=get_front_min()
+        front_min = get_front_min()
 
         # =========================
         # OBSTACLE AVOID
@@ -408,6 +400,8 @@ try:
 
                 cx=int(cx)
 
+                last_seen_x = cx
+
                 error_x = cx-frame_cx
 
                 if abs(error_x)<X_TOL:
@@ -457,6 +451,28 @@ try:
                         TRACK_SPEED,
                         w
                     )
+
+            else:
+
+                center_counter = 0
+
+        else:
+
+            center_counter = 0
+
+            if last_seen_x < frame_cx:
+
+                send_cmd(
+                    0,
+                    SEARCH_W
+                )
+
+            else:
+
+                send_cmd(
+                    0,
+                    -SEARCH_W
+                )
 
 finally:
 
