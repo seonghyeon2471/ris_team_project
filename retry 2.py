@@ -41,18 +41,23 @@ X_TOL = 15
 
 MIN_AREA = 500
 
-# 카메라보다 조금 더 전진 보정
 TARGET_AREA = 23000
-
 ARRIVE_MARGIN = 1200
 
 # =========================================
-# COLOR STATE
+# STATE
 # =========================================
 target_color = "RED"
 
+found_once = False
+
+search_dir = 1
+search_timer = 0
+
+last_seen_x = 160
+
 # =========================================
-# RED RANGE
+# RED
 # =========================================
 lower_red1 = np.array([0,70,70])
 upper_red1 = np.array([12,255,255])
@@ -64,18 +69,13 @@ lower_red_bgr = np.array([40,20,120])
 upper_red_bgr = np.array([210,170,255])
 
 # =========================================
-# YELLOW RANGE
+# YELLOW
 # =========================================
 lower_yellow_hsv = np.array([15,80,80])
 upper_yellow_hsv = np.array([40,255,255])
 
 lower_yellow_bgr = np.array([0,120,120])
 upper_yellow_bgr = np.array([170,255,255])
-
-# =========================================
-# MEMORY
-# =========================================
-last_seen_x = 160
 
 # =========================================
 # MOTOR
@@ -93,23 +93,20 @@ def stop_robot():
 
     send_cmd(0,0)
 
-# =========================================
-# START
-# =========================================
 print("MISSION START")
 
 try:
 
     while True:
 
-        ret, frame = cap.read()
+        ret,frame = cap.read()
 
         if not ret:
             continue
 
         frame = cv2.flip(frame,1)
 
-        HEIGHT, WIDTH = frame.shape[:2]
+        HEIGHT,WIDTH = frame.shape[:2]
 
         frame_cx = WIDTH//2
 
@@ -165,10 +162,7 @@ try:
             bgr_mask
         )
 
-        kernel=np.ones(
-            (3,3),
-            np.uint8
-        )
+        kernel=np.ones((3,3),np.uint8)
 
         mask=cv2.morphologyEx(
             mask,
@@ -176,7 +170,7 @@ try:
             kernel
         )
 
-        contours,_=cv2.findContours(
+        contours,_ = cv2.findContours(
             mask,
             cv2.RETR_EXTERNAL,
             cv2.CHAIN_APPROX_SIMPLE
@@ -185,9 +179,12 @@ try:
         state="SEARCH"
 
         # =====================================
-        # OBJECT FOUND
+        # TARGET FOUND
         # =====================================
         if contours:
+
+            found_once = True
+            search_timer = 0
 
             c=max(
                 contours,
@@ -220,13 +217,16 @@ try:
                     2
                 )
 
+                # 회전
                 w = -KP_ROT * error_x
 
-                distance_error = TARGET_AREA - area
+                # 거리
+                distance_error = (
+                    TARGET_AREA - area
+                )
 
                 v = distance_error * 0.000025
 
-                # 후진 허용
                 if v > 0:
 
                     v=max(
@@ -241,9 +241,9 @@ try:
                         MIN_BACKWARD
                     )
 
-                # ==========================
+                # =====================
                 # ARRIVED
-                # ==========================
+                # =====================
                 if (
 
                     abs(error_x) < X_TOL and
@@ -253,17 +253,20 @@ try:
 
                     stop_robot()
 
-                    if target_color == "RED":
+                    if target_color=="RED":
 
-                        print(
-                            "RED COMPLETE"
+                        state="RED ARRIVED"
+
+                        cv2.imshow(
+                            "frame",
+                            frame
                         )
 
-                        state="NEXT YELLOW"
-
-                        target_color="YELLOW"
+                        cv2.waitKey(1)
 
                         time.sleep(1)
+
+                        target_color="YELLOW"
 
                     else:
 
@@ -288,38 +291,49 @@ try:
 
                         state="TRACK"
 
-                cv2.putText(
-                    frame,
-                    f"AREA:{int(area)}",
-                    (20,80),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0,255,0),
-                    2
-                )
-
         # =====================================
         # LOST TARGET
         # =====================================
         else:
 
-            if last_seen_x > frame_cx:
+            search_timer += 1
+
+            # 처음부터 못찾음
+            if not found_once:
 
                 send_cmd(
-                    0.04,
-                    -0.30
+                    0,
+                    0.35 * search_dir
                 )
 
-                state="SEARCH RIGHT"
+                state="INIT SEARCH"
 
+                if search_timer > 70:
+
+                    search_dir *= -1
+
+                    search_timer = 0
+
+            # 찾다가 놓침
             else:
 
-                send_cmd(
-                    0.04,
-                    0.30
-                )
+                if last_seen_x > frame_cx:
 
-                state="SEARCH LEFT"
+                    send_cmd(
+                        0.03,
+                        -0.30
+                    )
+
+                    state="SEARCH RIGHT"
+
+                else:
+
+                    send_cmd(
+                        0.03,
+                        0.30
+                    )
+
+                    state="SEARCH LEFT"
 
         cv2.putText(
             frame,
@@ -334,7 +348,7 @@ try:
         cv2.putText(
             frame,
             f"TARGET:{target_color}",
-            (20,120),
+            (20,80),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8,
             (0,255,255),
