@@ -43,22 +43,19 @@ FRONT_CHECK_RANGE = 45
 EMA_ALPHA = 0.35
 MEDIAN_K  = 2
 
-# ── 수정①: scan_data 를 두 벌 분리
-#    _buf  : lidar_loop 단독 쓰기 (락 불필요)
-#    _shared: 메인루프가 읽는 복사본 (scan_lock 으로 보호)
 _scan_buf    = np.full(360, 150.0, dtype=np.float32)
 _scan_shared = np.full(360, 150.0, dtype=np.float32)
 scan_lock    = threading.Lock()
 
 # =========================================
-# CAMERA PARAMETERS
+# CAMERA PARAMETERS (★면적 판정 완화 및 튜닝 적용)
 # =========================================
 MAX_V       = 0.22
 MIN_V       = 0.06
-KP_ROT      = 0.004
-X_TOL       = 15
+KP_ROT      = 0.0025    # 회전 오버슈트 방지
+X_TOL       = 22        # 조준 조건 완화
 MIN_AREA    = 500
-TARGET_AREA = 18000
+TARGET_AREA = 15500     # ★ 면적 판정 완화 (기존 18000 -> 15500으로 하향)
 PARK_SEC    = 3.0
 
 # =========================================
@@ -88,7 +85,7 @@ COLOR_CFG = {
 MISSION = ["red", "yellow", "blue"]
 
 # =========================================
-# 상태 변수 (메인루프 단독 소유 — ② 수정)
+# 상태 변수
 # =========================================
 mission_index = 0
 state         = "SEARCH"
@@ -97,7 +94,6 @@ park_start    = None
 
 # =========================================
 # LIDAR UTIL
-# ── 수정①: _scan_buf 에만 쓰고 락 없음
 # =========================================
 def _apply_ema(angle, dist_cm):
     if dist_cm <= 0:
@@ -113,11 +109,9 @@ def _apply_median_filter():
     _scan_buf[:] = filtered
 
 def _publish_scan():
-    """한 스캔 완료 시 _shared 에 원자적으로 복사"""
     with scan_lock:
         _scan_shared[:] = _scan_buf
 
-# 메인루프용 읽기 함수 — 항상 _shared 만 읽음
 def get_front_min():
     with scan_lock:
         indices = np.arange(-FRONT_CHECK_RANGE, FRONT_CHECK_RANGE + 1) % 360
@@ -131,7 +125,6 @@ def choose_avoid_direction():
 
 # =========================================
 # LIDAR 스레드
-# ── 수정①: 내부 함수는 락 없이, 스캔 완료 시에만 publish
 # =========================================
 def lidar_loop():
     while True:
@@ -146,10 +139,10 @@ def lidar_loop():
         angle   = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0) % 360
         dist_cm = (raw[3] | (raw[4] << 8)) / 40.0
         if 3 < dist_cm < 150:
-            _apply_ema(angle, dist_cm)      # 락 없이 buf 에만 기록
+            _apply_ema(angle, dist_cm)
         if s_flag == 1:
-            _apply_median_filter()          # 락 없이 buf 에서 계산
-            _publish_scan()                 # 완성 후 shared 에 복사
+            _apply_median_filter()
+            _publish_scan()
 
 lidar_thread = threading.Thread(target=lidar_loop, daemon=True)
 lidar_thread.start()
@@ -189,7 +182,6 @@ def make_mask(frame, hsv, color_name):
 
 # =========================================
 # 동작 우선순위
-# ── 수정⑤: 회피 방향과 카메라 방향 부호 체크 후 블렌딩
 # =========================================
 def decide_cmd(cam_v, cam_w, front_min):
     if front_min < THRESH_10:
@@ -199,7 +191,6 @@ def decide_cmd(cam_v, cam_w, front_min):
     elif front_min < THRESH_20:
         direction = choose_avoid_direction()
         avoid_w   = direction * 0.8
-        # 수정⑤: 방향 같으면 블렌딩, 반대면 회피 단독
         if direction * cam_w >= 0:
             blended_w = 0.3 * cam_w + 0.7 * avoid_w
         else:
@@ -220,7 +211,7 @@ def decide_cmd(cam_v, cam_w, front_min):
         return cam_v, cam_w, False
 
 # =========================================
-# 카메라 버퍼 flush (수정⑦)
+# 카메라 버퍼 flush
 # =========================================
 def flush_camera_buffer(n=3):
     for _ in range(n):
@@ -230,9 +221,9 @@ def flush_camera_buffer(n=3):
 # START
 # =========================================
 print("=" * 45)
-print(f"  주차 미션 시작: {MISSION}")
-print(f"  첫 번째 목표  : [{MISSION[0]}]")
-print("  ESC 키로 종료")
+print(f"   주차 미션 시작: {MISSION}")
+print(f"   첫 번째 목표  : [{MISSION[0]}]")
+print("   ESC 키로 종료")
 print("=" * 45)
 time.sleep(1.0)
 
@@ -251,10 +242,8 @@ try:
         hsv       = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         front_min = get_front_min()
 
-        # 화면 중심 표시
         cv2.circle(frame, (frame_cx, frame_cy), 5, (0, 255, 255), -1)
 
-        # LiDAR 전방 거리 표시
         lidar_color = (0, 255, 255) if front_min > THRESH_30 else (0, 0, 255)
         cv2.putText(frame, f"LIDAR:{front_min:.0f}cm",
                     (WIDTH - 110, HEIGHT - 8),
@@ -274,22 +263,17 @@ try:
         target = MISSION[mission_index]
         draw   = COLOR_CFG[target]["draw"]
 
-        # ── 수정⑦: PARKING 아닐 때만 일반 마스크 생성
         mask = make_mask(frame, hsv, target)
         contours, _ = cv2.findContours(
             mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
 
-        # ── PARKING 상태 ── 수정③: 긴급정지 추가 ──
+        # ── PARKING 상태 ──────────────────────────
         if state == "PARKING":
-            # 긴급정지: 정차 중 장애물 접근 시 멈춤 유지
-            if front_min < THRESH_10:
-                stop_robot()
-            else:
-                stop_robot()    # 어차피 정차 중
+            stop_robot()
 
             elapsed = time.time() - park_start
-            remain  = max(0.0, PARK_SEC - elapsed)
+            remain   = max(0.0, PARK_SEC - elapsed)
 
             cv2.putText(frame, f"PARKING [{target}] {remain:.1f}s",
                         (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, draw, 2)
@@ -308,7 +292,7 @@ try:
                 else:
                     state = "SEARCH"
                     last_seen_x = frame_cx
-                    flush_camera_buffer()   # 수정⑦: 버퍼 flush
+                    flush_camera_buffer()
                     print(f"➡️  다음 목표: [{MISSION[mission_index]}]")
 
             cv2.imshow("frame", frame)
@@ -317,13 +301,11 @@ try:
                 break
             continue
 
-        # ── 수정②+④: cam_state, cam_v, cam_w 루프 상단 초기화
         cam_v     = 0.0
         cam_w     = 0.0
-        # 수정④: flip 된 frame 기준으로 last_seen_x 방향 일관성 유지
         cam_state = "SEARCH LEFT" if last_seen_x <= frame_cx else "SEARCH RIGHT"
 
-        # ── 객체 감지 ──────────────────────────
+        # ── 객체 감지 및 주행 제어 ──────────────────────────
         if contours:
             c    = max(contours, key=cv2.contourArea)
             area = cv2.contourArea(c)
@@ -334,7 +316,6 @@ try:
                 cx = int(cx)
                 cy = int(cy)
 
-                # 수정④: flip 된 좌표 그대로 사용 (일관성 유지)
                 last_seen_x = cx
 
                 box = np.int32(cv2.boxPoints(rect))
@@ -343,31 +324,39 @@ try:
 
                 error_x = cx - frame_cx
 
-                # ARRIVED → 정차
-                if abs(error_x) < X_TOL and area > TARGET_AREA:
-                    stop_robot()
-                    state      = "PARKING"
-                    park_start = time.time()
-                    print(f"🅿️  [{target}] 도착 → 정차 시작")
-                    cv2.imshow("frame", frame)
-                    cv2.imshow("mask",  mask)
-                    cv2.waitKey(1)
-                    continue
-
-                cam_w     = -KP_ROT * error_x
-                cam_v     = np.clip((TARGET_AREA - area) * 0.00003, MIN_V, MAX_V)
-                cam_state = "TRACK"
+                # ★ ARRIVED 판정 로직 고도화 (면적 조건 완화 및 안전 정렬 분리)
+                if area > TARGET_AREA:
+                    if abs(error_x) < X_TOL:
+                        # 면적도 차고 중심도 맞았을 때 최종 정차
+                        stop_robot()
+                        state      = "PARKING"
+                        park_start = time.time()
+                        print(f"🅿️  [{target}] 도착(A:{int(area)}) → 정차 시작")
+                        cv2.imshow("frame", frame)
+                        cv2.imshow("mask",  mask)
+                        cv2.waitKey(1)
+                        continue
+                    else:
+                        # 면적은 충분한데 중심이 아직 안 맞았다면 전진을 멈추고 제자리 회전 조준
+                        cam_v = 0.0
+                        cam_w = -KP_ROT * error_x
+                        cam_state = "ALIGNING"
+                else:
+                    # 일반 추적 상태 및 부드러운 선형 감속 수식
+                    cam_w     = -KP_ROT * error_x
+                    rem_area  = max(0.0, TARGET_AREA - area)
+                    cam_v     = MIN_V + (MAX_V - MIN_V) * (rem_area / TARGET_AREA)
+                    cam_v     = np.clip(cam_v, MIN_V, MAX_V)
+                    cam_state = "TRACK"
 
                 cv2.putText(frame, f"A:{int(area)}",
                             (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
             else:
-                # 수정②: cam_state 명시적 할당 (NameError 방지)
                 cam_state = "SMALL"
                 stop_robot()
 
         else:
-            # 색상 못 찾음 — 탐색 회전
             if last_seen_x > frame_cx:
                 cam_v, cam_w = 0.04, -0.32
                 cam_state    = "SEARCH RIGHT"
@@ -379,7 +368,6 @@ try:
         final_v, final_w, avoid_on = decide_cmd(cam_v, cam_w, front_min)
         send_cmd(final_v, final_w)
 
-        # 상태 결정
         state = f"AVOID {front_min:.0f}cm" if avoid_on else cam_state
 
         # ── HUD ────────────────────────────────
