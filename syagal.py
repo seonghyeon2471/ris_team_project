@@ -1,280 +1,278 @@
-import serial
-import math
-import time
-import threading
-import numpy as np
 import cv2
+import serial
+import numpy as np
+import time
 
 # =========================================
 # SERIAL
 # =========================================
-arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
-lidar_ser   = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)
+arduino_ser = serial.Serial(
+    "/dev/serial0",
+    115200,
+    timeout=0.1
+)
 
 # =========================================
-# CAMERA
+# CAMERA (HBVCAMERA V55)
 # =========================================
+WIDTH  = 640
+HEIGHT = 480
+
 cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH,  WIDTH)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
 
 # =========================================
-# LIDAR START
+# CONTROL PARAMETER
 # =========================================
-lidar_ser.write(bytes([0xA5, 0x40]))
-time.sleep(2)
-lidar_ser.reset_input_buffer()
-lidar_ser.write(bytes([0xA5, 0x20]))
-lidar_ser.read(7)
-print("LIDAR START")
+MAX_V      = 0.22
+MIN_V      = 0.08
+MAX_W      = 0.55
+
+KP_ROT     = 0.0018
+KP_FORWARD = 0.0012
+
+X_TOL      = 20     # 중심 X 허용 오차 (px)
+Y_TOL      = 20     # 중심 Y 허용 오차 (px)
+MIN_AREA   = 700    # 인식 최소 면적
+
+PARK_SEC   = 3.0    # 정차 시간 (초)
 
 # =========================================
-# PARAMETERS — LiDAR / 회피
+# 색상별 HSV + BGR 범위
+# 조명 환경에 따라 조정 필요
 # =========================================
-MAX_SPEED      = 0.30
-MIN_SPEED      = 0.09
-MAX_W          = 0.9
-THRESH_30      = 32.0
-THRESH_20      = 22.0
-THRESH_10      = 12.0
-FRONT_CHECK_RANGE = 45
-
-EMA_ALPHA = 0.35
-MEDIAN_K  = 2
-scan_data = np.full(360, 150.0, dtype=np.float32)
-
-# =========================================
-# PARAMETERS — 색상 인식
-# =========================================
-# HSV 범위: [lower, upper]
-COLOR_RANGES = {
-    "black":  ([0,   0,   0  ], [180, 60,  60 ]),
-    "red":    ([0,   120, 70 ], [10,  255, 255]),
-    "yellow": ([20,  100, 100], [35,  255, 255]),
-    "blue":   ([100, 120, 70 ], [130, 255, 255]),
+COLOR_CFG = {
+    "red": {
+        "hsv": ([160, 130, 150], [179, 255, 255]),
+        "bgr": ([80,  30,  170], [150, 100, 255]),
+        "display_bgr": (0, 0, 255),
+    },
+    "yellow": {
+        "hsv": ([18,  80,  80],  [38,  255, 255]),
+        "bgr": ([0,   150, 150], [100, 255, 255]),
+        "display_bgr": (0, 200, 255),
+    },
+    "blue": {
+        "hsv": ([95,  80,  60],  [135, 255, 255]),
+        "bgr": ([100, 50,  0],   [255, 150, 80]),
+        "display_bgr": (255, 100, 0),
+    },
 }
 
-# 주차 순서: 검정(출발) → 빨강 → 노랑 → 파랑
-MISSION_SEQUENCE = ["red", "yellow", "blue"]
-MIN_CONTOUR_AREA = 3000   # 주차구역으로 인정할 최소 픽셀 면적
-PARK_CONFIRM_COUNT = 15   # 연속 N프레임 인식 시 정차 확정
-PARK_DIST_THRESH   = 20.0 # 정차 판단용 전방 거리 임계값 (cm)
-PARK_DURATION      = 2.0  # 정차 유지 시간 (초)
+# 주차 순서
+MISSION = ["red", "yellow", "blue"]
 
 # =========================================
-# 상태 머신
+# 상태
 # =========================================
-STATE_NAVIGATE = "NAVIGATE"   # 다음 주차구역으로 이동 중
-STATE_PARK     = "PARK"       # 주차구역 진입 · 정차 중
-STATE_DONE     = "DONE"       # 미션 완료
+STATE_TRACK    = "TRACK"
+STATE_CENTERED = "CENTERED"
+STATE_PARKING  = "PARKING"
+STATE_SEARCH   = "SEARCH"
+STATE_DONE     = "DONE"
 
-state          = STATE_NAVIGATE
-mission_index  = 0            # 현재 목표 인덱스 (0=red, 1=yellow, 2=blue)
-confirm_count  = 0            # 색상 연속 인식 카운터
-detected_color = None         # 카메라가 감지한 현재 색상
-color_lock     = threading.Lock()
-
-# =========================================
-# UTIL — LiDAR 필터
-# =========================================
-def apply_ema(angle, new_dist_cm):
-    if not isinstance(new_dist_cm, (int, float)) or new_dist_cm <= 0:
-        return
-    scan_data[angle] = (1.0 - EMA_ALPHA) * scan_data[angle] + EMA_ALPHA * new_dist_cm
-
-def apply_median_filter():
-    k = MEDIAN_K
-    window = 2 * k + 1
-    filtered = np.empty(360, dtype=np.float32)
-    for i in range(360):
-        indices = [(i + d) % 360 for d in range(-k, k + 1)]
-        values  = np.sort(scan_data[indices])
-        filtered[i] = values[window // 2]
-    scan_data[:] = filtered
-
-def get_front_min():
-    indices = np.arange(-FRONT_CHECK_RANGE, FRONT_CHECK_RANGE + 1) % 360
-    return float(np.min(scan_data[indices]))
-
-def choose_avoid_direction():
-    left_avg  = float(np.mean(scan_data[1:90]))
-    right_avg = float(np.mean(scan_data[271:360]))
-    return 1 if left_avg >= right_avg else -1
-
-# =========================================
-# UTIL — 색상 인식 (카메라 스레드)
-# =========================================
-def color_detect_loop():
-    """별도 스레드에서 카메라 프레임을 계속 읽고 detected_color 갱신"""
-    global detected_color
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            time.sleep(0.03)
-            continue
-
-        # 하단 1/3 영역만 사용 (바닥 주차구역 집중)
-        h = frame.shape[0]
-        roi = frame[int(h * 2 / 3):, :]
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-
-        found = None
-        max_area = 0
-        for color_name, (lower, upper) in COLOR_RANGES.items():
-            mask = cv2.inRange(hsv, np.array(lower), np.array(upper))
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  np.ones((5, 5)))
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7, 7)))
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
-                                           cv2.CHAIN_APPROX_SIMPLE)
-            if contours:
-                area = cv2.contourArea(max(contours, key=cv2.contourArea))
-                if area > MIN_CONTOUR_AREA and area > max_area:
-                    max_area = area
-                    found    = color_name
-
-        with color_lock:
-            detected_color = found
-
-        time.sleep(0.03)  # ~30 fps
+mission_index = 0
+state         = STATE_SEARCH
+last_seen_x   = WIDTH // 2
+park_start    = None
 
 # =========================================
 # MOTOR
 # =========================================
 def send_cmd(v, w):
+    v = np.clip(v, -0.3,  0.3)
+    w = np.clip(w, -0.8,  0.8)
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
 def stop_robot():
-    send_cmd(0.0, 0.0)
+    send_cmd(0, 0)
 
 # =========================================
-# 주차 동작
+# 마스크 생성 (HSV AND BGR 이중 필터)
 # =========================================
-def do_park():
-    """천천히 전진하며 주차구역 중앙 진입 후 정차"""
-    print("  >> 주차 진입 — 천천히 전진")
-    send_cmd(0.08, 0.0)
-    time.sleep(0.8)
-    stop_robot()
-    print(f"  >> 정차 완료 ({PARK_DURATION}초 대기)")
-    time.sleep(PARK_DURATION)
+def make_mask(frame, hsv, color_name):
+    cfg = COLOR_CFG[color_name]
+
+    # 빨강은 HSV 0도/180도 양쪽 처리
+    if color_name == "red":
+        lo1 = np.array([0,   100, 60])
+        hi1 = np.array([10,  255, 255])
+        lo2 = np.array([160, 100, 60])
+        hi2 = np.array([180, 255, 255])
+        hsv_mask = cv2.bitwise_or(
+            cv2.inRange(hsv, lo1, hi1),
+            cv2.inRange(hsv, lo2, hi2)
+        )
+    else:
+        lo = np.array(cfg["hsv"][0])
+        hi = np.array(cfg["hsv"][1])
+        hsv_mask = cv2.inRange(hsv, lo, hi)
+
+    bgr_mask = cv2.inRange(
+        frame,
+        np.array(cfg["bgr"][0]),
+        np.array(cfg["bgr"][1])
+    )
+
+    mask = cv2.bitwise_and(hsv_mask, bgr_mask)
+
+    kernel = np.ones((5, 5), np.uint8)
+    mask   = cv2.erode( mask, kernel, iterations=1)
+    mask   = cv2.dilate(mask, kernel, iterations=2)
+
+    return mask
 
 # =========================================
-# 메인 루프
+# START
 # =========================================
-# 카메라 스레드 시작
-cam_thread = threading.Thread(target=color_detect_loop, daemon=True)
-cam_thread.start()
-print("CAMERA THREAD START")
-print(f"MISSION START: {MISSION_SEQUENCE}")
+print("=" * 45)
+print(f"  주차 미션 시작: {MISSION}")
+print(f"  첫 번째 목표: [{MISSION[0]}]")
+print("  ESC 키로 종료")
+print("=" * 45)
 
 try:
     while True:
-        # ── LiDAR 패킷 파싱 ──────────────────────
-        raw = lidar_ser.read(5)
-        if len(raw) != 5:
+
+        ret, frame = cap.read()
+        if not ret:
             continue
 
-        s_flag = raw[0] & 0x01
-        if ((raw[0] & 0x02) >> 1) != (1 - s_flag) \
-                or (raw[1] & 0x01) != 1 \
-                or (raw[0] >> 2) < 3:
-            continue
+        frame = cv2.flip(frame, 1)
+        hsv   = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-        angle   = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0) % 360
-        dist_cm = (raw[3] | (raw[4] << 8)) / 40.0
-
-        if 3 < dist_cm < 150:
-            apply_ema(angle, dist_cm)
-
-        if s_flag != 1:
-            continue
-
-        apply_median_filter()
-
-        # ── 미션 완료 ─────────────────────────────
-        if state == STATE_DONE:
+        # ── 미션 완료 ──────────────────────────
+        if state == STATE_DONE or mission_index >= len(MISSION):
             stop_robot()
-            print("✅ 모든 주차구역 완료! 정지.")
-            break
+            cv2.putText(frame, "MISSION COMPLETE!", (80, HEIGHT//2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+            cv2.imshow("frame", frame)
+            if cv2.waitKey(1) & 0xFF == 27:
+                break
+            continue
 
-        front_min = get_front_min()
+        target = MISSION[mission_index]
+        cfg    = COLOR_CFG[target]
+        disp   = cfg["display_bgr"]
 
-        # ── PARK 상태: 색상 확인 후 정차 ─────────
-        if state == STATE_PARK:
-            target_color = MISSION_SEQUENCE[mission_index]
+        mask      = make_mask(frame, hsv, target)
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
 
-            with color_lock:
-                cur_color = detected_color
+        # 십자선 + 중심점
+        frame_cx = WIDTH  // 2
+        frame_cy = HEIGHT // 2
+        cv2.circle(frame, (frame_cx, frame_cy), 7, (0, 255, 255), -1)
+        cv2.line(frame, (frame_cx, 0),     (frame_cx, HEIGHT), (0,255,255), 1)
+        cv2.line(frame, (0, frame_cy),     (WIDTH, frame_cy),  (0,255,255), 1)
 
-            if cur_color == target_color:
-                confirm_count += 1
-                print(f"  [{target_color}] 감지 중... ({confirm_count}/{PARK_CONFIRM_COUNT})")
-            else:
-                confirm_count = max(0, confirm_count - 1)
+        # ── PARKING 상태: 정차 타이머 ──────────
+        if state == STATE_PARKING:
+            stop_robot()
+            elapsed = time.time() - park_start
+            remain  = max(0.0, PARK_SEC - elapsed)
+            cv2.putText(frame,
+                        f"PARKING [{target}]  {remain:.1f}s",
+                        (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, disp, 2)
+            cv2.putText(frame,
+                        f"MISSION {mission_index+1}/{len(MISSION)}",
+                        (20, 75),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200,200,200), 2)
 
-            if confirm_count >= PARK_CONFIRM_COUNT:
-                # 정차 실행
-                stop_robot()
-                do_park()
-                print(f"✅ [{target_color}] 주차 완료!")
-                confirm_count = 0
+            if elapsed >= PARK_SEC:
+                print(f"✅ [{target}] 정차 완료!")
                 mission_index += 1
-
-                if mission_index >= len(MISSION_SEQUENCE):
+                if mission_index >= len(MISSION):
                     state = STATE_DONE
                     print("🏁 미션 전체 완료!")
                 else:
-                    next_target = MISSION_SEQUENCE[mission_index]
-                    print(f"➡️  다음 목표: [{next_target}]")
-                    state = STATE_NAVIGATE
-                continue
+                    next_t = MISSION[mission_index]
+                    state  = STATE_SEARCH
+                    last_seen_x = WIDTH // 2
+                    print(f"➡️  다음 목표: [{next_t}]")
 
-            # 주차구역 탐색 중 — 천천히 전진 (장애물 회피 유지)
-            if front_min < THRESH_10:
-                direction = choose_avoid_direction()
-                send_cmd(MIN_SPEED, direction * MAX_W)
-            elif front_min < THRESH_20:
-                direction = choose_avoid_direction()
-                send_cmd(0.10, direction * 0.7)
+            cv2.imshow("frame", frame)
+            cv2.imshow("mask",  mask)
+            if cv2.waitKey(1) & 0xFF == 27:
+                break
+            continue
+
+        # ── 객체 감지 ──────────────────────────
+        if contours:
+            c    = max(contours, key=cv2.contourArea)
+            area = cv2.contourArea(c)
+
+            if area > MIN_AREA:
+                rect         = cv2.minAreaRect(c)
+                (cx, cy), (rw, rh), angle = rect
+                cx = int(cx)
+                cy = int(cy)
+                last_seen_x  = cx
+
+                box = np.int32(cv2.boxPoints(rect))
+                cv2.drawContours(frame, [box], 0, disp, 2)
+                cv2.circle(frame, (cx, cy), 6, (255, 0, 0), -1)
+
+                error_x = cx - frame_cx
+                error_y = frame_cy - cy
+
+                # ── CENTERED → 정차 시작 ───────
+                if abs(error_x) < X_TOL and abs(error_y) < Y_TOL:
+                    stop_robot()
+                    state      = STATE_PARKING
+                    park_start = time.time()
+                    print(f"🅿️  [{target}] 중심 정렬 완료 → 정차 시작")
+
+                # ── TRACK: 중심으로 이동 ────────
+                else:
+                    w = -KP_ROT * error_x
+                    if abs(error_x) < 80:
+                        v = np.clip(
+                            KP_FORWARD * abs(error_y),
+                            MIN_V, MAX_V
+                        )
+                    else:
+                        v = MIN_V
+
+                    send_cmd(v, w)
+                    state = STATE_TRACK
+
             else:
-                send_cmd(0.12, 0.0)   # 주차 탐색 중엔 느리게
-            continue
+                stop_robot()
+                state = "SMALL"
 
-        # ── NAVIGATE 상태: 장애물 회피하며 이동 ──
-        target_color = MISSION_SEQUENCE[mission_index]
-
-        # 목표 색상이 보이기 시작하면 PARK 상태로 전환
-        with color_lock:
-            cur_color = detected_color
-
-        if cur_color == target_color and front_min < THRESH_30:
-            print(f"🔍 [{target_color}] 발견! PARK 모드 전환")
-            state         = STATE_PARK
-            confirm_count = 0
-            continue
-
-        # 일반 장애물 회피 (기존 로직 유지)
-        if front_min < THRESH_10:
-            direction = choose_avoid_direction()
-            v, w = MIN_SPEED, direction * MAX_W
-            print(f"🚨 VERY CLOSE! front={front_min:.1f}cm → STRONG TURN")
-        elif front_min < THRESH_20:
-            direction = choose_avoid_direction()
-            v, w = 0.12, direction * 0.8
-            print(f"⚠️  CRITICAL front={front_min:.1f}cm → STRONG TURN")
-        elif front_min < THRESH_30:
-            direction = choose_avoid_direction()
-            v, w = 0.15, direction * 0.7
-            print(f"⚡ WARNING front={front_min:.1f}cm → MEDIUM TURN")
+        # ── LOST: 마지막으로 본 방향으로 탐색 ──
         else:
-            v, w = MAX_SPEED, 0.0
+            if last_seen_x > frame_cx:
+                send_cmd(0.05, -0.35)
+                state = "SEARCH RIGHT"
+            else:
+                send_cmd(0.05,  0.35)
+                state = "SEARCH LEFT"
 
-        send_cmd(v, w)
+        # ── HUD 오버레이 ───────────────────────
+        cv2.putText(frame, state,
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
+        cv2.putText(frame,
+                    f"TARGET: {target}  ({mission_index+1}/{len(MISSION)})",
+                    (20, 75),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, disp, 2)
+
+        cv2.imshow("frame", frame)
+        cv2.imshow("mask",  mask)
+
+        if cv2.waitKey(1) & 0xFF == 27:
+            break
 
 except KeyboardInterrupt:
-    print("STOP by user")
+    pass
+
 finally:
     stop_robot()
     cap.release()
-    lidar_ser.write(bytes([0xA5, 0x25]))
-    print("SHUTDOWN COMPLETE")
+    cv2.destroyAllWindows()
+    print("SHUTDOWN")
