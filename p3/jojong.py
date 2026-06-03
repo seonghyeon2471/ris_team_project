@@ -79,12 +79,12 @@ try:
 
         elif key == ord('a'):
             v = TURN_V
-            w = TURN_W
+            w = -TURN_W
             state = "LEFT"
 
         elif key == ord('d'):
             v = TURN_V
-            w = -TURN_W
+            w = TURN_W
             state = "RIGHT"
 
         elif key == 32:  # Space
