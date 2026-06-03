@@ -63,7 +63,11 @@ TARGET_AREA = 14000
 PARK_SEC    = 3.0       
 
 APPROACH_DRIVE_SEC = 1.2  
-SEARCH_TIMEOUT = 2.2    
+
+# ── ★ [화각 외 탐색 및 모터 회전력 강화 변수] ──
+SEARCH_TIMEOUT = 3.0       # 회전 스캔 시간 확보 (3초)
+HIGH_TURN_W = 0.80         # ★ 모터 데드존 극복을 위한 고속 회전값 상향
+WANDERING_W_SPEED = 0.40   # 맵 순항 선회 속도 상향
 
 # =========================================
 # 색상별 HSV 범위
@@ -77,7 +81,7 @@ COLOR_CFG = {
     },
     "yellow": {
         "hsv1": ([15,  30,  60], [40,  255, 255]), 
-        "hsv2": ([10,  0,   190], [45,  45,  255]), # 화이트아웃 구원 필터 유지
+        "hsv2": ([10,  0,   190], [45,  45,  255]), 
         "bgr":  ([0, 0, 0], [255, 255, 255]),
         "draw": (0, 200, 255),
     },
@@ -222,7 +226,6 @@ try:
         hsv       = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         front_min = get_front_min()
 
-        # 전체 미션 완료 핸들러
         if mission_index >= len(MISSION):
             stop_robot()
             cv2.putText(frame, "ALL MISSION COMPLETE!", (20, HEIGHT // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
@@ -233,36 +236,33 @@ try:
         target = MISSION[mission_index]
         draw   = COLOR_CFG[target]["draw"]
 
-        # ── [★ 핵심 수정: PARKING 최상단 격리 레이어] ──────────────────
-        # 인식 결과나 유실 여부와 무관하게 주차 상태면 무조건 여기서 카운트다운하고 루프를 탈출(continue)시킴
+        # ── [PARKING 격리 레이어] ──────────────────
         if state == "PARKING":
-            send_cmd(0.0, 0.0) # 강제 정지 신호 지속 송신
+            send_cmd(0.0, 0.0) 
             
             elapsed = time.time() - park_start
             remain   = max(0.0, PARK_SEC - elapsed)
             
-            # 주차 화면 강제 렌더링
             cv2.putText(frame, f"STATE: PARKING", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             cv2.putText(frame, f"WAIT [{target}]: {remain:.1f}s", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, draw, 2)
             cv2.imshow("frame", frame)
             
             if elapsed >= PARK_SEC:
-                print(f"✅ [{target}] 주차 시간 완료! 다음 타겟 전환.")
+                print(f"✅ [{target}] 미션 시간 종료 -> 타겟 인덱스 상승")
                 mission_index += 1
                 
                 if mission_index < len(MISSION):
-                    flush_camera_buffer(n=15)         # 이전 타겟 잔상 파괴
+                    flush_camera_buffer(n=15)         
                     state = "FORCED_SEARCH" 
-                    search_start_time = time.time()  
-                    last_seen_x = 160                 
-                    print(f"➡️  NEXT TARGET: [{MISSION[mission_index]}] 탐색 개시")
+                    search_start_time = time.time()  # ★ 타이머 기점 명확히 재동기화
+                    print(f"➡️  NEXT TARGET: [{MISSION[mission_index]}] 고속 분출 스캔 개시")
                 else:
                     print("🏁 모든 미션 클리어")
             
             if cv2.waitKey(1) & 0xFF == 27: break
-            continue  # ★ 중요: 주차 중일 때는 하단의 이미지 처리/주행 코드를 완전히 무시하고 다음 프레임으로 통과
+            continue  
 
-        # ── 일반 주행 시퀀스 (PARKING이 아닐 때만 도달함) ──
+        # 주행 연산 레이어
         mask = make_mask(frame, hsv, target)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -277,7 +277,7 @@ try:
             if area > MIN_AREA:
                 if state in ["FORCED_SEARCH", "WANDERING", "SEARCH"]:
                     state = "TRACK"
-                    print(f"🎯 [{target}] 포착 -> TRACK 모드 체인지")
+                    print(f"🎯 [{target}] 신규 포착 완료! 추적 전환.")
 
                 rect = cv2.minAreaRect(c)
                 (cx, cy), _, _ = rect
@@ -288,7 +288,7 @@ try:
                 cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)
                 error_x = cx - frame_cx
 
-                # APPROACH 진입 판정
+                # APPROACH 진입
                 if state == "APPROACH" or (area > TARGET_AREA and state == "TRACK"):
                     if state != "APPROACH":
                         state = "APPROACH"
@@ -299,7 +299,6 @@ try:
                     cam_v = 0.12  
                     cam_state = "APPROACH"
 
-                    # 면적 극대화로 정지하는 경우
                     if area > 25000: 
                         state      = "PARKING"
                         park_start = time.time()
@@ -316,32 +315,37 @@ try:
                 if state in ["FORCED_SEARCH", "WANDERING"]: pass
                 else: cam_v, cam_w = 0.0, 0.0
         
-        # ── [객체 유실 구역] ──────────────────────
+        # ── [객체 유실 구역 - 선회력 극대화] ──
         else:
             if state == "APPROACH":
                 cam_v, cam_w = 0.12, 0.0  
                 cam_state    = "APPROACH_BLIND"
-
-                # 아래로 사라진 뒤 직진 타임아웃 도달 시 주차 전환
                 if time.time() - approach_start_time > APPROACH_DRIVE_SEC:
                     state      = "PARKING"
                     park_start = time.time()
                     print(f"🅿️  [{target}] 사각지대 시간 완료 -> 주차 가동")
 
+            # 1단계: 미션 전환 직후 제자리 강제 회전 스캔 (데드존 파괴 세팅)
             elif state == "FORCED_SEARCH":
-                if time.time() - search_start_time > SEARCH_TIMEOUT:
+                elapsed_search = time.time() - search_start_time
+                if elapsed_search > SEARCH_TIMEOUT:
                     state = "WANDERING"
-                    print(f"⚠️ 타임아웃 -> 맵 전체 탐색(WANDERING) 기동")
-                    cam_v, cam_w = 0.20, 0.0  
+                    print(f"⚠️ 화각 내 타겟 부재 -> 2단계: 맵 순항 탐색(WANDERING) 돌입")
                 else:
-                    cam_v, cam_w = 0.0, 0.75  
+                    search_dir = -HIGH_TURN_W if last_seen_x > frame_cx else HIGH_TURN_W
+                    # ★ 데드존 탈출 팁: v에 미세 전압(0.03)을 주어 기어가 맞물려 돌아가도록 유도
+                    cam_v, cam_w = 0.03, search_dir  
+                    cam_state    = f"F_SEARCH ({SEARCH_TIMEOUT - elapsed_search:.1f}s)"
             
+            # 2단계: 크게 전진 선회 (위치 이동)
             elif state == "WANDERING":
-                cam_v, cam_w = 0.20, 0.0  
+                cam_v = 0.18
+                cam_w = WANDERING_W_SPEED if last_seen_x <= frame_cx else -WANDERING_W_SPEED
+                cam_state = "WANDERING (CRUISE)"
                 
             else:
                 cam_state = "SEARCH LEFT" if last_seen_x <= frame_cx else "SEARCH RIGHT"
-                cam_v, cam_w = (0.02, -0.55) if last_seen_x > frame_cx else (0.02,  0.55)
+                cam_v, cam_w = (0.03, -HIGH_TURN_W) if last_seen_x > frame_cx else (0.03, HIGH_TURN_W)
 
         # ── [라이다 제어 분기 및 명령 최종 전달] ──────────────────
         if state in ["APPROACH", "APPROACH_BLIND", "PARKING"]:
