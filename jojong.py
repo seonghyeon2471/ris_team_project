@@ -37,7 +37,7 @@ def stop_robot():
 # =========================================
 FORWARD_V = 0.15
 BACKWARD_V = -0.15
-TURN_W = 0.45
+TURN_W = 1.45
 
 print("=================================")
 print("W : Forward")
