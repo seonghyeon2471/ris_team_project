@@ -48,15 +48,16 @@ _scan_shared = np.full(360, 150.0, dtype=np.float32)
 scan_lock    = threading.Lock()
 
 # =========================================
-# CAMERA PARAMETERS (★면적 판정 완화 및 튜닝 적용)
+# CAMERA PARAMETERS
 # =========================================
-MAX_V       = 0.22
-MIN_V       = 0.06
-KP_ROT      = 0.0025    # 회전 오버슈트 방지
-X_TOL       = 22        # 조준 조건 완화
+MAX_V       = 0.24      
+MIN_V       = 0.10      
+KP_ROT      = 0.003     
+X_TOL       = 35        
 MIN_AREA    = 500
-TARGET_AREA = 15500     # ★ 면적 판정 완화 (기존 18000 -> 15500으로 하향)
+TARGET_AREA = 15000     
 PARK_SEC    = 3.0
+SEARCH_TIMEOUT = 4.5    # ★ 제자리 강제 회전 제한 시간 (4.5초 돌고 안 보이면 출발)
 
 # =========================================
 # 색상별 HSV + BGR 범위
@@ -91,6 +92,7 @@ mission_index = 0
 state         = "SEARCH"
 last_seen_x   = 160
 park_start    = None
+search_start_time = None  # ★ 강제 회전 시작 시간 측정용 변수
 
 # =========================================
 # LIDAR UTIL
@@ -290,10 +292,12 @@ try:
                 if mission_index >= len(MISSION):
                     print("🏁 미션 전체 완료!")
                 else:
-                    state = "SEARCH"
-                    last_seen_x = frame_cx
+                    # 다음 미션 전환 및 강제 탐색 시작 시간 마킹
+                    state = "FORCED_SEARCH" 
+                    search_start_time = time.time()  # ★ 타이머 기동
+                    last_seen_x = 0  
                     flush_camera_buffer()
-                    print(f"➡️  다음 목표: [{MISSION[mission_index]}]")
+                    print(f"➡️  다음 목표: [{MISSION[mission_index]}] 탐색 (강제 회전 시작)")
 
             cv2.imshow("frame", frame)
             cv2.imshow("mask",  mask)
@@ -303,7 +307,6 @@ try:
 
         cam_v     = 0.0
         cam_w     = 0.0
-        cam_state = "SEARCH LEFT" if last_seen_x <= frame_cx else "SEARCH RIGHT"
 
         # ── 객체 감지 및 주행 제어 ──────────────────────────
         if contours:
@@ -311,6 +314,11 @@ try:
             area = cv2.contourArea(c)
 
             if area > MIN_AREA:
+                # 타겟 발견 시 강제 회전이나 시야 개척 상태 즉시 해제
+                if state in ["FORCED_SEARCH", "WANDERING"]:
+                    print(f"🎯 [{target}] 객체 발견! 추적 모드로 전환합니다.")
+                    state = "TRACK"
+
                 rect = cv2.minAreaRect(c)
                 (cx, cy), (rw, rh), angle = rect
                 cx = int(cx)
@@ -324,10 +332,8 @@ try:
 
                 error_x = cx - frame_cx
 
-                # ★ ARRIVED 판정 로직 고도화 (면적 조건 완화 및 안전 정렬 분리)
                 if area > TARGET_AREA:
                     if abs(error_x) < X_TOL:
-                        # 면적도 차고 중심도 맞았을 때 최종 정차
                         stop_robot()
                         state      = "PARKING"
                         park_start = time.time()
@@ -337,12 +343,10 @@ try:
                         cv2.waitKey(1)
                         continue
                     else:
-                        # 면적은 충분한데 중심이 아직 안 맞았다면 전진을 멈추고 제자리 회전 조준
-                        cam_v = 0.0
+                        cam_v = 0.08
                         cam_w = -KP_ROT * error_x
                         cam_state = "ALIGNING"
                 else:
-                    # 일반 추적 상태 및 부드러운 선형 감속 수식
                     cam_w     = -KP_ROT * error_x
                     rem_area  = max(0.0, TARGET_AREA - area)
                     cam_v     = MIN_V + (MAX_V - MIN_V) * (rem_area / TARGET_AREA)
@@ -357,14 +361,34 @@ try:
                 stop_robot()
 
         else:
-            if last_seen_x > frame_cx:
-                cam_v, cam_w = 0.04, -0.32
-                cam_state    = "SEARCH RIGHT"
+            # ── 타겟이 아예 안 보일 때의 상태 기계 (★핵심 수정부) ──
+            if state == "FORCED_SEARCH":
+                # 제자리 회전 시간 체크
+                if time.time() - search_start_time > SEARCH_TIMEOUT:
+                    # 지정 시간(4.5초) 동안 제자리 도는데 안 보이면 랜덤 주행으로 시야 개척
+                    state = "WANDERING"
+                    print(f"⚠️ [{target}] 제자리 회전 내 발견 실패 -> LiDAR 기반 시야 개척 주행 시작")
+                    cam_v, cam_w = 0.15, 0.0
+                    cam_state    = "WANDERING"
+                else:
+                    # 시간 안 끝났으면 계속 제자리 피벗 턴
+                    cam_v, cam_w = 0.0, 0.55  
+                    cam_state    = "FORCED_SEARCH"
+            
+            elif state == "WANDERING":
+                # 목표가 안 보여서 넓은 곳으로 순항 중 (라이다 회피가 대신 조향해줌)
+                cam_v, cam_w = 0.15, 0.0
+                cam_state    = "WANDERING"
+                
             else:
-                cam_v, cam_w = 0.04,  0.32
-                cam_state    = "SEARCH LEFT"
+                # 일반 탐색 상황
+                cam_state = "SEARCH LEFT" if last_seen_x <= frame_cx else "SEARCH RIGHT"
+                if last_seen_x > frame_cx:
+                    cam_v, cam_w = 0.04, -0.38  
+                else:
+                    cam_v, cam_w = 0.04,  0.38
 
-        # ── LiDAR 우선순위 적용 ────────────────
+        # ── LiDAR 우선순위 적용 (WANDERING 상태일 때 이 친구가 벽을 다 피해줍니다) ──
         final_v, final_w, avoid_on = decide_cmd(cam_v, cam_w, front_min)
         send_cmd(final_v, final_w)
 
