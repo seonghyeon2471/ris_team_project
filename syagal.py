@@ -11,13 +11,20 @@ arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
 lidar_ser   = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)
 
 # =========================================
-# CAMERA
+# CAMERA & HARDWARE FIX (★빛 번짐/오동작 해결의 핵심)
 # =========================================
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH,  320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+
+# [★ 중요] 자동 노출 및 자동 화이트 밸런스 비활성화 설정
+# 환경에 따라 값이 너무 어둡거나 밝으면 고정 수치(주석 부분)를 조절하세요.
+time.sleep(1.0) # 카메라 안정화 대기
+cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)        # 1: 수동(Manual), 3: 자동(Auto)
+# cap.set(cv2.CAP_PROP_EXPOSURE, 150)         # 필요 시 노출값 수동 고정 (라즈파이 카메라 환경 맞춤 필요)
+cap.set(cv2.CAP_PROP_AUTO_WB, 0)              # 0: 자동 화이트 밸런스 끄기
 
 # =========================================
 # LIDAR START
@@ -57,28 +64,31 @@ X_TOL       = 35
 MIN_AREA    = 500
 TARGET_AREA = 15000     
 PARK_SEC    = 3.0
-SEARCH_TIMEOUT = 4.5    # ★ 제자리 강제 회전 제한 시간 (4.5초 돌고 안 보이면 출발)
+SEARCH_TIMEOUT = 4.5    
 
 # =========================================
-# 색상별 HSV + BGR 범위
+# 색상별 HSV 범위 (★과노출/빛 바램 대응 튜닝)
 # =========================================
 COLOR_CFG = {
     "red": {
-        "hsv1": ([0,   70, 70], [12,  255, 255]),
-        "hsv2": ([160, 70, 70], [179, 255, 255]),
-        "bgr":  ([40,  20, 120], [210, 170, 255]),
+        # 빛을 받아 색이 희끗해져도 잡을 수 있도록 채도(S) 하한선을 70 -> 45로 낮춤
+        "hsv1": ([0,   45,  50], [15,  255, 255]),
+        "hsv2": ([160, 45,  50], [179, 255, 255]),
+        # BGR 필터 범위를 최대로 넓혀 사실상 HSV 단독으로 정밀 제어되도록 수정 (빛 왜곡 간섭 차단)
+        "bgr":  ([0, 0, 0], [255, 255, 255]), 
         "draw": (0, 0, 255),
     },
     "yellow": {
-        "hsv1": ([18,  80, 80], [38,  255, 255]),
+        # 노란색이 강한 조명으로 인해 연해지거나 흰색/초록색 기운이 섞이는 것을 방지
+        "hsv1": ([15,  40,  50], [42,  255, 255]), 
         "hsv2": None,
-        "bgr":  ([0,  150, 150], [100, 255, 255]),
+        "bgr":  ([0, 0, 0], [255, 255, 255]),
         "draw": (0, 200, 255),
     },
     "blue": {
-        "hsv1": ([95,  80, 60], [135, 255, 255]),
+        "hsv1": ([90,  45,  40], [140, 255, 255]),
         "hsv2": None,
-        "bgr":  ([100, 50,  0], [255, 150,  80]),
+        "bgr":  ([0, 0, 0], [255, 255, 255]),
         "draw": (255, 80, 0),
     },
 }
@@ -92,7 +102,7 @@ mission_index = 0
 state         = "SEARCH"
 last_seen_x   = 160
 park_start    = None
-search_start_time = None  # ★ 강제 회전 시작 시간 측정용 변수
+search_start_time = None  
 
 # =========================================
 # LIDAR UTIL
@@ -166,7 +176,8 @@ def stop_robot():
 # =========================================
 def make_mask(frame, hsv, color_name):
     cfg    = COLOR_CFG[color_name]
-    kernel = np.ones((3, 3), np.uint8)
+    # 모폴로지 커널을 5x5로 확장하여 빛 노이즈 억제력 향상
+    kernel = np.ones((5, 5), np.uint8) 
 
     lo1, hi1 = np.array(cfg["hsv1"][0]), np.array(cfg["hsv1"][1])
     hsv_mask = cv2.inRange(hsv, lo1, hi1)
@@ -179,7 +190,9 @@ def make_mask(frame, hsv, color_name):
                            np.array(cfg["bgr"][1]))
 
     mask = cv2.bitwise_and(hsv_mask, bgr_mask)
+    # OPEN(노이즈 제거) 후 CLOSE(구멍 메우기) 연산을 추가해 과노출로 쪼개진 블롭을 하나로 결합
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     return mask
 
 # =========================================
@@ -292,9 +305,8 @@ try:
                 if mission_index >= len(MISSION):
                     print("🏁 미션 전체 완료!")
                 else:
-                    # 다음 미션 전환 및 강제 탐색 시작 시간 마킹
                     state = "FORCED_SEARCH" 
-                    search_start_time = time.time()  # ★ 타이머 기동
+                    search_start_time = time.time()  
                     last_seen_x = 0  
                     flush_camera_buffer()
                     print(f"➡️  다음 목표: [{MISSION[mission_index]}] 탐색 (강제 회전 시작)")
@@ -314,7 +326,6 @@ try:
             area = cv2.contourArea(c)
 
             if area > MIN_AREA:
-                # 타겟 발견 시 강제 회전이나 시야 개척 상태 즉시 해제
                 if state in ["FORCED_SEARCH", "WANDERING"]:
                     print(f"🎯 [{target}] 객체 발견! 추적 모드로 전환합니다.")
                     state = "TRACK"
@@ -361,40 +372,32 @@ try:
                 stop_robot()
 
         else:
-            # ── 타겟이 아예 안 보일 때의 상태 기계 (★핵심 수정부) ──
             if state == "FORCED_SEARCH":
-                # 제자리 회전 시간 체크
                 if time.time() - search_start_time > SEARCH_TIMEOUT:
-                    # 지정 시간(4.5초) 동안 제자리 도는데 안 보이면 랜덤 주행으로 시야 개척
                     state = "WANDERING"
                     print(f"⚠️ [{target}] 제자리 회전 내 발견 실패 -> LiDAR 기반 시야 개척 주행 시작")
                     cam_v, cam_w = 0.15, 0.0
                     cam_state    = "WANDERING"
                 else:
-                    # 시간 안 끝났으면 계속 제자리 피벗 턴
                     cam_v, cam_w = 0.0, 0.55  
                     cam_state    = "FORCED_SEARCH"
             
             elif state == "WANDERING":
-                # 목표가 안 보여서 넓은 곳으로 순항 중 (라이다 회피가 대신 조향해줌)
                 cam_v, cam_w = 0.15, 0.0
                 cam_state    = "WANDERING"
                 
             else:
-                # 일반 탐색 상황
                 cam_state = "SEARCH LEFT" if last_seen_x <= frame_cx else "SEARCH RIGHT"
                 if last_seen_x > frame_cx:
                     cam_v, cam_w = 0.04, -0.38  
                 else:
                     cam_v, cam_w = 0.04,  0.38
 
-        # ── LiDAR 우선순위 적용 (WANDERING 상태일 때 이 친구가 벽을 다 피해줍니다) ──
         final_v, final_w, avoid_on = decide_cmd(cam_v, cam_w, front_min)
         send_cmd(final_v, final_w)
 
         state = f"AVOID {front_min:.0f}cm" if avoid_on else cam_state
 
-        # ── HUD ────────────────────────────────
         cv2.putText(frame, state,
                     (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
         cv2.putText(frame,
