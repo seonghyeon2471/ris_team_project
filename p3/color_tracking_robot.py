@@ -107,6 +107,57 @@ logging.basicConfig(
 log = logging.getLogger("robot")
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  Camera 공유 데이터 (스레드 → 메인)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class CameraThread(threading.Thread):
+    def __init__(self):
+        super().__init__(daemon=True)
+
+        self.cap = cv2.VideoCapture(
+            CAMERA_INDEX,
+            cv2.CAP_V4L2
+        )
+
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
+
+        self.cap.set(
+            cv2.CAP_PROP_FOURCC,
+            cv2.VideoWriter_fourcc(*'MJPG')
+        )
+
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        self.frame = None
+        self.lock = threading.Lock()
+
+    def run(self):
+
+        while not stop_event.is_set():
+
+            for _ in range(3):
+                self.cap.grab()
+
+            ret, frame = self.cap.retrieve()
+
+            if ret:
+                with self.lock:
+                    self.frame = frame
+
+    def get(self):
+
+        with self.lock:
+
+            if self.frame is None:
+                return None
+
+            return self.frame.copy()
+
+    def release(self):
+        self.cap.release()
+
+# ═════════════════════════════════════════════════════════════════════════════
 #  LiDAR 공유 데이터 (스레드 → 메인)
 # ═════════════════════════════════════════════════════════════════════════════
 scan_lock = threading.Lock()
@@ -326,15 +377,9 @@ def main():
     lidar_thread.start()
     time.sleep(2.0)   # LiDAR 워밍업
 
-    # 카메라 (메인 스레드에서 직접)
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  FRAME_W)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-    if not cap.isOpened():
-        log.error("카메라 열기 실패")
-        return
+    camera_thread = CameraThread()
+    camera_thread.start()
+    time.sleep(1.0)
 
     # ── 상태 변수 ──────────────────────────────────────────────────────────
     color_idx       = 0
@@ -355,8 +400,9 @@ def main():
 
     try:
         while True:
+            frame = camera_thread.get()
             ret, frame = cap.read()
-            if not ret:
+            if frame is None:
                 continue
 
             # 버퍼 비우기 – 항상 최신 프레임 사용
@@ -485,7 +531,7 @@ def main():
     finally:
         stop_event.set()
         motor.cleanup()
-        cap.release()
+        camera_thread.release()
         if SHOW_DISPLAY:
             cv2.destroyAllWindows()
         log.info("=== 종료 ===")
