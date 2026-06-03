@@ -31,31 +31,46 @@ cap.set(
 # CONTROL
 # =========================================
 MAX_V = 0.22
-MIN_V = 0.06
 
-KP_ROT = 0.004
-MAX_W = 0.55
+MIN_FORWARD = 0.05
+MIN_BACKWARD = -0.10
+
+KP_ROT = 0.0045
 
 X_TOL = 15
 
 MIN_AREA = 500
-TARGET_AREA = 18000
+
+# 카메라보다 조금 더 전진 보정
+TARGET_AREA = 23000
+
+ARRIVE_MARGIN = 1200
+
+# =========================================
+# COLOR STATE
+# =========================================
+target_color = "RED"
 
 # =========================================
 # RED RANGE
 # =========================================
-
-# HSV red lower region
 lower_red1 = np.array([0,70,70])
 upper_red1 = np.array([12,255,255])
 
-# HSV red upper region
 lower_red2 = np.array([160,70,70])
 upper_red2 = np.array([179,255,255])
 
-# BGR filter
-lower_bgr = np.array([40,20,120])
-upper_bgr = np.array([210,170,255])
+lower_red_bgr = np.array([40,20,120])
+upper_red_bgr = np.array([210,170,255])
+
+# =========================================
+# YELLOW RANGE
+# =========================================
+lower_yellow_hsv = np.array([15,80,80])
+upper_yellow_hsv = np.array([40,255,255])
+
+lower_yellow_bgr = np.array([0,120,120])
+upper_yellow_bgr = np.array([170,255,255])
 
 # =========================================
 # MEMORY
@@ -67,8 +82,8 @@ last_seen_x = 160
 # =========================================
 def send_cmd(v,w):
 
-    v=np.clip(v,-0.3,0.3)
-    w=np.clip(w,-0.8,0.8)
+    v=np.clip(v,-0.30,0.30)
+    w=np.clip(w,-0.80,0.80)
 
     arduino_ser.write(
         f"{v:.3f},{-w:.3f}\n".encode()
@@ -81,26 +96,22 @@ def stop_robot():
 # =========================================
 # START
 # =========================================
-print("RED CENTER TRACK START")
+print("MISSION START")
 
 try:
 
     while True:
 
-        ret,frame = cap.read()
+        ret, frame = cap.read()
 
         if not ret:
             continue
 
-        frame = cv2.flip(
-            frame,
-            1
-        )
+        frame = cv2.flip(frame,1)
 
         HEIGHT, WIDTH = frame.shape[:2]
 
         frame_cx = WIDTH//2
-        frame_cy = HEIGHT//2
 
         hsv = cv2.cvtColor(
             frame,
@@ -108,61 +119,67 @@ try:
         )
 
         # =====================================
-        # MASK
+        # COLOR MASK
         # =====================================
+        if target_color == "RED":
 
-        mask1 = cv2.inRange(
-            hsv,
-            lower_red1,
-            upper_red1
-        )
+            mask1 = cv2.inRange(
+                hsv,
+                lower_red1,
+                upper_red1
+            )
 
-        mask2 = cv2.inRange(
-            hsv,
-            lower_red2,
-            upper_red2
-        )
+            mask2 = cv2.inRange(
+                hsv,
+                lower_red2,
+                upper_red2
+            )
 
-        hsv_mask = cv2.bitwise_or(
-            mask1,
-            mask2
-        )
+            hsv_mask = cv2.bitwise_or(
+                mask1,
+                mask2
+            )
 
-        bgr_mask = cv2.inRange(
-            frame,
-            lower_bgr,
-            upper_bgr
-        )
+            bgr_mask = cv2.inRange(
+                frame,
+                lower_red_bgr,
+                upper_red_bgr
+            )
+
+        else:
+
+            hsv_mask = cv2.inRange(
+                hsv,
+                lower_yellow_hsv,
+                upper_yellow_hsv
+            )
+
+            bgr_mask = cv2.inRange(
+                frame,
+                lower_yellow_bgr,
+                upper_yellow_bgr
+            )
 
         mask = cv2.bitwise_and(
             hsv_mask,
             bgr_mask
         )
 
-        kernel = np.ones(
+        kernel=np.ones(
             (3,3),
             np.uint8
         )
 
-        mask = cv2.morphologyEx(
+        mask=cv2.morphologyEx(
             mask,
             cv2.MORPH_OPEN,
             kernel
         )
 
-        contours,_ = cv2.findContours(
+        contours,_=cv2.findContours(
             mask,
             cv2.RETR_EXTERNAL,
             cv2.CHAIN_APPROX_SIMPLE
-        )
-
-        # 화면 중심 표시
-        cv2.circle(
-            frame,
-            (frame_cx,frame_cy),
-            5,
-            (0,255,255),
-            -1
         )
 
         state="SEARCH"
@@ -177,20 +194,22 @@ try:
                 key=cv2.contourArea
             )
 
-            area = cv2.contourArea(c)
+            area=cv2.contourArea(c)
 
             if area > MIN_AREA:
 
-                rect = cv2.minAreaRect(c)
+                rect=cv2.minAreaRect(c)
 
-                (cx,cy),(rw,rh),angle = rect
+                (cx,cy),(rw,rh),angle=rect
 
                 cx=int(cx)
-                cy=int(cy)
 
                 last_seen_x = cx
 
-                box = cv2.boxPoints(rect)
+                error_x = cx - frame_cx
+
+                box=cv2.boxPoints(rect)
+
                 box=np.int32(box)
 
                 cv2.drawContours(
@@ -201,62 +220,83 @@ try:
                     2
                 )
 
-                cv2.circle(
-                    frame,
-                    (cx,cy),
-                    5,
-                    (255,0,0),
-                    -1
-                )
+                w = -KP_ROT * error_x
 
-                error_x = cx - frame_cx
+                distance_error = TARGET_AREA - area
 
-                # =====================
-                # ARRIVED
-                # =====================
-                if (
-                    abs(error_x) < X_TOL and
-                    area > TARGET_AREA
-                ):
+                v = distance_error * 0.000025
 
-                    v=0
-                    w=0
+                # 후진 허용
+                if v > 0:
 
-                    state="ARRIVED"
+                    v=max(
+                        v,
+                        MIN_FORWARD
+                    )
 
                 else:
 
-                    w = -KP_ROT * error_x
-
-                    distance_error = TARGET_AREA - area
-
-                    v = distance_error * 0.00003
-
-                    v = np.clip(
+                    v=min(
                         v,
-                        MIN_V,
-                        MAX_V
+                        MIN_BACKWARD
                     )
 
-                    state="TRACK"
+                # ==========================
+                # ARRIVED
+                # ==========================
+                if (
 
-                send_cmd(v,w)
+                    abs(error_x) < X_TOL and
+                    abs(distance_error) < ARRIVE_MARGIN
+
+                ):
+
+                    stop_robot()
+
+                    if target_color == "RED":
+
+                        print(
+                            "RED COMPLETE"
+                        )
+
+                        state="NEXT YELLOW"
+
+                        target_color="YELLOW"
+
+                        time.sleep(1)
+
+                    else:
+
+                        print(
+                            "MISSION COMPLETE"
+                        )
+
+                        break
+
+                else:
+
+                    send_cmd(
+                        v,
+                        w
+                    )
+
+                    if distance_error < 0:
+
+                        state="BACKWARD"
+
+                    else:
+
+                        state="TRACK"
 
                 cv2.putText(
                     frame,
-                    f"A:{int(area)}",
+                    f"AREA:{int(area)}",
                     (20,80),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
+                    0.7,
                     (0,255,0),
                     2
                 )
-
-            else:
-
-                stop_robot()
-
-                state="SMALL"
 
         # =====================================
         # LOST TARGET
@@ -267,7 +307,7 @@ try:
 
                 send_cmd(
                     0.04,
-                    -0.32
+                    -0.30
                 )
 
                 state="SEARCH RIGHT"
@@ -276,7 +316,7 @@ try:
 
                 send_cmd(
                     0.04,
-                    0.32
+                    0.30
                 )
 
                 state="SEARCH LEFT"
@@ -291,14 +331,23 @@ try:
             2
         )
 
+        cv2.putText(
+            frame,
+            f"TARGET:{target_color}",
+            (20,120),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0,255,255),
+            2
+        )
+
         cv2.imshow(
             "frame",
             frame
         )
 
-        key = cv2.waitKey(1)
+        if cv2.waitKey(1)==27:
 
-        if key == 27:
             break
 
 except KeyboardInterrupt:
