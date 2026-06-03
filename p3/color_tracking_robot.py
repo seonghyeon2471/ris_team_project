@@ -30,6 +30,9 @@ CAMERA_INDEX  = 0
 FRAME_W       = 320
 FRAME_H       = 240
 
+cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
+cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+
 # ── Color detection ───────────────────────────────────────────────────────────
 MIN_AREA      = 500
 CENTER_DEAD   = 15       # px, dead-zone
