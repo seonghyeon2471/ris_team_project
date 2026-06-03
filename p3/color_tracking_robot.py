@@ -401,12 +401,8 @@ def main():
     try:
         while True:
             frame = camera_thread.get()
-            ret, frame = cap.read()
             if frame is None:
                 continue
-
-            # 버퍼 비우기 – 항상 최신 프레임 사용
-            cap.grab()
 
             frame = cv2.flip(frame, 1)
             now   = time.time()
