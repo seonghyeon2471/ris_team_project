@@ -1,7 +1,7 @@
-import cv2
 import serial
-import numpy as np
+import math
 import time
+import numpy as np
 
 # =========================================
 # SERIAL
@@ -21,58 +21,44 @@ lidar_ser = serial.Serial(
 # =========================================
 # LIDAR START
 # =========================================
-lidar_ser.write(bytes([0xA5,0x40]))
+lidar_ser.write(
+    bytes([0xA5, 0x40])
+)
 
 time.sleep(2)
 
 lidar_ser.reset_input_buffer()
 
 lidar_ser.write(
-    bytes([0xA5,0x20])
+    bytes([0xA5, 0x20])
 )
 
 lidar_ser.read(7)
 
-# =========================================
-# CAMERA
-# =========================================
-cap = cv2.VideoCapture(0)
-
-cap.set(
-    cv2.CAP_PROP_FRAME_WIDTH,
-    320
-)
-
-cap.set(
-    cv2.CAP_PROP_FRAME_HEIGHT,
-    240
-)
-
-cap.set(
-    cv2.CAP_PROP_BUFFERSIZE,
-    1
-)
-
-cap.set(
-    cv2.CAP_PROP_FOURCC,
-    cv2.VideoWriter_fourcc(*'MJPG')
-)
+print("LIDAR START")
 
 # =========================================
-# LIDAR PARAM
+# PARAMETERS
 # =========================================
 MAX_SPEED = 0.30
+
 MIN_SPEED = 0.09
 
 MAX_W = 0.9
 
 THRESH_30 = 32.0
+
 THRESH_20 = 22.0
+
 THRESH_10 = 12.0
 
 FRONT_CHECK_RANGE = 45
 
+# =========================================
+# FILTER
+# =========================================
 EMA_ALPHA = 0.35
+
 MEDIAN_K = 2
 
 scan_data = np.full(
@@ -82,74 +68,43 @@ scan_data = np.full(
 )
 
 # =========================================
-# TRACK PARAM
-# =========================================
-KP_ROT = 0.0045
-
-TRACK_SPEED = 0.10
-
-X_TOL = 15
-
-CENTER_HOLD_TIME = 8
-
-FORWARD_AFTER_CENTER = 0.18
-
-FORWARD_3CM_TIME = 0.45
-
-MIN_AREA = 500
-
-# =========================================
-# STATE
-# =========================================
-target_color = "RED"
-
-found_once = False
-
-search_dir = 1
-
-search_timer = 0
-
-last_seen_x = 160
-
-center_counter = 0
-
-# =========================================
-# RED
-# =========================================
-lower_red1=np.array([0,70,70])
-upper_red1=np.array([12,255,255])
-
-lower_red2=np.array([160,70,70])
-upper_red2=np.array([179,255,255])
-
-lower_red_bgr=np.array([40,20,120])
-upper_red_bgr=np.array([210,170,255])
-
-# =========================================
-# YELLOW
-# =========================================
-lower_yellow_hsv=np.array([15,80,80])
-upper_yellow_hsv=np.array([40,255,255])
-
-lower_yellow_bgr=np.array([0,120,120])
-upper_yellow_bgr=np.array([170,255,255])
-
-# =========================================
 # UTIL
 # =========================================
-def apply_ema(angle,new_dist):
+def apply_ema(
+    angle,
+    new_dist_cm
+):
+
+    if (
+
+        not isinstance(
+            new_dist_cm,
+            (int,float)
+        )
+
+        or
+
+        new_dist_cm <= 0
+
+    ):
+
+        return
 
     scan_data[angle] = (
 
-        (1-EMA_ALPHA)
+        (1.0-EMA_ALPHA)
+
         *
+
         scan_data[angle]
 
         +
 
         EMA_ALPHA
+
         *
-        new_dist
+
+        new_dist_cm
 
     )
 
@@ -157,7 +112,9 @@ def apply_median_filter():
 
     k = MEDIAN_K
 
-    filtered=np.empty(
+    window = 2*k + 1
+
+    filtered = np.empty(
         360,
         dtype=np.float32
     )
@@ -175,9 +132,13 @@ def apply_median_filter():
 
         ]
 
-        filtered[i]=np.median(
+        values=np.sort(
             scan_data[idx]
         )
+
+        filtered[i]=values[
+            window//2
+        ]
 
     scan_data[:] = filtered
 
@@ -192,271 +153,209 @@ def get_front_min():
     ) % 360
 
     return float(
+
         np.min(
             scan_data[idx]
         )
+
     )
 
 def choose_avoid_direction():
 
-    left=np.mean(
-        scan_data[1:90]
+    left_avg=float(
+
+        np.mean(
+            scan_data[1:90]
+        )
+
     )
 
-    right=np.mean(
-        scan_data[271:360]
+    right_avg=float(
+
+        np.mean(
+            scan_data[271:360]
+        )
+
     )
 
-    return 1 if left>=right else -1
+    return (
 
+        1
+
+        if left_avg >= right_avg
+
+        else -1
+
+    )
+
+# =========================================
+# MOTOR
+# =========================================
 def send_cmd(v,w):
 
     arduino_ser.write(
+
         f"{v:.3f},{-w:.3f}\n".encode()
+
     )
 
 def stop_robot():
 
-    send_cmd(0,0)
+    send_cmd(
+        0.0,
+        0.0
+    )
 
 # =========================================
-# MAIN
+# MAIN LOOP
 # =========================================
+print(
+
+    "PURE FORWARD OBSTACLE AVOIDANCE START"
+
+)
+
 try:
 
     while True:
 
-        # =========================
-        # LIDAR UPDATE
-        # =========================
-        raw=lidar_ser.read(5)
+        raw = lidar_ser.read(5)
 
-        if len(raw)==5:
-
-            s_flag = raw[0] & 0x01
-
-            if (
-
-                ((raw[0]&0x02)>>1)
-
-                ==
-
-                (1-s_flag)
-
-                and
-
-                (raw[1]&0x01)==1
-
-            ):
-
-                angle=int(
-
-                    (
-                        (raw[1]>>1)
-
-                        |
-
-                        (raw[2]<<7)
-
-                    ) / 64.0
-
-                ) % 360
-
-                dist=(
-
-                    raw[3]
-
-                    |
-
-                    (raw[4]<<8)
-
-                ) / 40.0
-
-                if 3 < dist < 150:
-
-                    apply_ema(
-                        angle,
-                        dist
-                    )
-
-        if s_flag == 1:
-
-            apply_median_filter()
-
-        front_min=get_front_min()
-
-        # =========================
-        # OBSTACLE AVOID
-        # =========================
-        if front_min < THRESH_10:
-
-            d=choose_avoid_direction()
-
-            send_cmd(
-                MIN_SPEED,
-                d*MAX_W
-            )
+        if len(raw) != 5:
 
             continue
+
+        # ==========================
+        # LIDAR PARSE
+        # ==========================
+        s_flag = raw[0] & 0x01
+
+        if (
+
+            ((raw[0]&0x02)>>1)
+
+            !=
+
+            (1-s_flag)
+
+            or
+
+            (raw[1]&0x01)!=1
+
+            or
+
+            (raw[0]>>2)<3
+
+        ):
+
+            continue
+
+        angle=int(
+
+            (
+
+                (raw[1]>>1)
+
+                |
+
+                (raw[2]<<7)
+
+            )
+
+            /64.0
+
+        ) % 360
+
+        dist_cm=(
+
+            raw[3]
+
+            |
+
+            (raw[4]<<8)
+
+        ) / 40.0
+
+        # ==========================
+        # VALID DISTANCE
+        # ==========================
+        if 3 < dist_cm < 150:
+
+            apply_ema(
+
+                angle,
+
+                dist_cm
+
+            )
+
+        if s_flag != 1:
+
+            continue
+
+        apply_median_filter()
+
+        # ==========================
+        # AVOID LOGIC
+        # ==========================
+        front_min = get_front_min()
+
+        if front_min < THRESH_10:
+
+            direction = choose_avoid_direction()
+
+            v = MIN_SPEED
+
+            w = direction * MAX_W
+
+            print(
+
+                f"VERY CLOSE {front_min:.1f}"
+
+            )
 
         elif front_min < THRESH_20:
 
-            d=choose_avoid_direction()
+            direction = choose_avoid_direction()
 
-            send_cmd(
-                0.12,
-                d*0.8
+            v = 0.12
+
+            w = direction * 0.8
+
+            print(
+
+                f"CRITICAL {front_min:.1f}"
+
             )
-
-            continue
 
         elif front_min < THRESH_30:
 
-            d=choose_avoid_direction()
+            direction = choose_avoid_direction()
 
-            send_cmd(
-                0.15,
-                d*0.7
-            )
+            v = 0.15
 
-            continue
+            w = direction * 0.7
 
-        # =========================
-        # CAMERA
-        # =========================
-        ret,frame=cap.read()
+            print(
 
-        if not ret:
-            continue
+                f"WARNING {front_min:.1f}"
 
-        frame=cv2.flip(
-            frame,
-            1
-        )
-
-        frame_cx = frame.shape[1]//2
-
-        hsv=cv2.cvtColor(
-            frame,
-            cv2.COLOR_BGR2HSV
-        )
-
-        if target_color=="RED":
-
-            mask1=cv2.inRange(
-                hsv,
-                lower_red1,
-                upper_red1
-            )
-
-            mask2=cv2.inRange(
-                hsv,
-                lower_red2,
-                upper_red2
-            )
-
-            hsv_mask=cv2.bitwise_or(
-                mask1,
-                mask2
-            )
-
-            bgr_mask=cv2.inRange(
-                frame,
-                lower_red_bgr,
-                upper_red_bgr
             )
 
         else:
 
-            hsv_mask=cv2.inRange(
-                hsv,
-                lower_yellow_hsv,
-                upper_yellow_hsv
-            )
+            v = MAX_SPEED
 
-            bgr_mask=cv2.inRange(
-                frame,
-                lower_yellow_bgr,
-                upper_yellow_bgr
-            )
+            w = 0.0
 
-        mask=cv2.bitwise_and(
-            hsv_mask,
-            bgr_mask
+        send_cmd(
+            v,
+            w
         )
 
-        contours,_=cv2.findContours(
-            mask,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE
-        )
+except KeyboardInterrupt:
 
-        if contours:
-
-            c=max(
-                contours,
-                key=cv2.contourArea
-            )
-
-            area=cv2.contourArea(c)
-
-            if area > MIN_AREA:
-
-                rect=cv2.minAreaRect(c)
-
-                (cx,cy),_,_=rect
-
-                cx=int(cx)
-
-                error_x = cx-frame_cx
-
-                if abs(error_x)<X_TOL:
-
-                    center_counter += 1
-
-                else:
-
-                    center_counter = 0
-
-                if center_counter > CENTER_HOLD_TIME:
-
-                    stop_robot()
-
-                    time.sleep(0.2)
-
-                    send_cmd(
-                        FORWARD_AFTER_CENTER,
-                        0
-                    )
-
-                    time.sleep(
-                        FORWARD_3CM_TIME
-                    )
-
-                    stop_robot()
-
-                    time.sleep(1)
-
-                    if target_color=="RED":
-
-                        target_color="YELLOW"
-
-                        center_counter=0
-
-                        continue
-
-                    else:
-
-                        break
-
-                else:
-
-                    w=-KP_ROT*error_x
-
-                    send_cmd(
-                        TRACK_SPEED,
-                        w
-                    )
+    print("STOP")
 
 finally:
 
@@ -466,8 +365,4 @@ finally:
         bytes([0xA5,0x25])
     )
 
-    cap.release()
-
     lidar_ser.close()
-
-    cv2.destroyAllWindows()
