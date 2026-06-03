@@ -6,41 +6,48 @@ import time
 # =========================================
 # SERIAL
 # =========================================
-arduino_ser = serial.Serial("/dev/serial0",115200,timeout=0.1)
+arduino_ser = serial.Serial(
+    "/dev/serial0",
+    115200,
+    timeout=0.1
+)
 
 # =========================================
 # CAMERA
 # =========================================
-cap = cv2.VideoCapture(0)
-
 WIDTH = 640
 HEIGHT = 480
 
-cap.set(3, WIDTH)
-cap.set(4, HEIGHT)
+cap = cv2.VideoCapture(0)
+
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
 
 # =========================================
-# MOTOR
+# CONTROL PARAMETER
 # =========================================
-MAX_V = 0.28
-TURN_W = 0.55
+MAX_V = 0.22
+MIN_V = 0.08
 
-def send_cmd(v,w):
-    arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
+MAX_W = 0.55
 
-def stop_robot():
-    send_cmd(0,0)
+KP_ROT = 0.0018
+KP_FORWARD = 0.0012
+
+X_TOL = 20
+Y_TOL = 20
+
+MIN_AREA = 700
 
 # =========================================
 # RED RANGE
-# (네가 준 값 기반)
 # =========================================
 
-# HSV
+# HSV 범위
 lower_hsv = np.array([160,130,150])
 upper_hsv = np.array([179,255,255])
 
-# BGR
+# BGR 범위
 lower_bgr = np.array([80,30,170])
 upper_bgr = np.array([150,100,255])
 
@@ -49,7 +56,26 @@ upper_bgr = np.array([150,100,255])
 # =========================================
 last_seen_x = WIDTH//2
 
-print("RED TRACK START")
+# =========================================
+# MOTOR
+# =========================================
+def send_cmd(v,w):
+
+    v = np.clip(v,-0.3,0.3)
+    w = np.clip(w,-0.8,0.8)
+
+    arduino_ser.write(
+        f"{v:.3f},{-w:.3f}\n".encode()
+    )
+
+def stop_robot():
+
+    send_cmd(0,0)
+
+# =========================================
+# START
+# =========================================
+print("COLOR CENTER TRACK START")
 
 try:
 
@@ -67,25 +93,21 @@ try:
             cv2.COLOR_BGR2HSV
         )
 
-        # --------------------
-        # HSV MASK
-        # --------------------
+        # ==========================
+        # MASK
+        # ==========================
         hsv_mask = cv2.inRange(
             hsv,
             lower_hsv,
             upper_hsv
         )
 
-        # --------------------
-        # BGR MASK
-        # --------------------
         bgr_mask = cv2.inRange(
             frame,
             lower_bgr,
             upper_bgr
         )
 
-        # 둘 다 만족
         mask = cv2.bitwise_and(
             hsv_mask,
             bgr_mask
@@ -111,23 +133,37 @@ try:
             cv2.CHAIN_APPROX_SIMPLE
         )
 
-        # 중앙 정지 박스
-        box = 120
+        frame_cx = WIDTH//2
+        frame_cy = HEIGHT//2
 
-        x1 = WIDTH//2 - box//2
-        x2 = WIDTH//2 + box//2
-
-        y1 = HEIGHT//2 - box//2
-        y2 = HEIGHT//2 + box//2
-
-        cv2.rectangle(
+        # 카메라 중심 표시
+        cv2.circle(
             frame,
-            (x1,y1),
-            (x2,y2),
-            (255,255,0),
-            2
+            (frame_cx,frame_cy),
+            7,
+            (0,255,255),
+            -1
         )
 
+        cv2.line(
+            frame,
+            (frame_cx,0),
+            (frame_cx,HEIGHT),
+            (0,255,255),
+            1
+        )
+
+        cv2.line(
+            frame,
+            (0,frame_cy),
+            (WIDTH,frame_cy),
+            (0,255,255),
+            1
+        )
+
+        # ====================================
+        # OBJECT FOUND
+        # ====================================
         if contours:
 
             c = max(
@@ -137,19 +173,24 @@ try:
 
             area = cv2.contourArea(c)
 
-            if area > 700:
+            if area > MIN_AREA:
 
-                x,y,w,h = cv2.boundingRect(c)
+                rect = cv2.minAreaRect(c)
 
-                cx = x + w//2
-                cy = y + h//2
+                (cx,cy),(rw,rh),angle = rect
+
+                cx = int(cx)
+                cy = int(cy)
 
                 last_seen_x = cx
 
-                cv2.rectangle(
+                box = cv2.boxPoints(rect)
+                box = np.int32(box)
+
+                cv2.drawContours(
                     frame,
-                    (x,y),
-                    (x+w,y+h),
+                    [box],
+                    0,
                     (0,255,0),
                     2
                 )
@@ -157,60 +198,69 @@ try:
                 cv2.circle(
                     frame,
                     (cx,cy),
-                    5,
+                    6,
                     (255,0,0),
                     -1
                 )
 
                 # ====================
-                # 사각형 안 도착
+                # ERROR
                 # ====================
-                if x1 < cx < x2 and y1 < cy < y2:
+                error_x = cx - frame_cx
+                error_y = frame_cy - cy
+
+                # ====================
+                # CENTERED
+                # ====================
+                if (
+                    abs(error_x) < X_TOL and
+                    abs(error_y) < Y_TOL
+                ):
 
                     v = 0
                     w = 0
-                    state = "STOP"
+
+                    state = "CENTERED"
 
                 else:
 
-                    error = cx - WIDTH//2
+                    # 회전 제어
+                    w = -KP_ROT * error_x
 
-                    if abs(error) > 80:
+                    # 전진 제어
+                    if abs(error_x) < 80:
 
-                        v = 0.12
+                        v = KP_FORWARD * abs(error_y)
 
-                        if error > 0:
-                            w = -TURN_W
-                            state = "RIGHT"
-
-                        else:
-                            w = TURN_W
-                            state = "LEFT"
+                        v = np.clip(
+                            v,
+                            MIN_V,
+                            MAX_V
+                        )
 
                     else:
 
-                        v = MAX_V
-                        w = 0
-                        state = "FORWARD"
+                        v = MIN_V
+
+                    state = "TRACK"
 
                 send_cmd(v,w)
 
             else:
 
                 stop_robot()
-                state="SMALL"
+                state = "SMALL OBJECT"
 
+        # ====================================
+        # LOST TARGET
+        # ====================================
         else:
 
-            # ====================
-            # 기억 기반 탐색
-            # ====================
-
-            if last_seen_x > WIDTH//2:
+            if last_seen_x > frame_cx:
 
                 send_cmd(
-                    0.08,
-                    -0.45
+                    0.05,
+                    -0.35
                 )
 
                 state="SEARCH RIGHT"
@@ -218,8 +268,8 @@ try:
             else:
 
                 send_cmd(
-                    0.08,
-                    0.45
+                    0.05,
+                    0.35
                 )
 
                 state="SEARCH LEFT"
@@ -234,13 +284,22 @@ try:
             2
         )
 
-        cv2.imshow("frame",frame)
-        cv2.imshow("mask",mask)
+        cv2.imshow(
+            "frame",
+            frame
+        )
 
-        if cv2.waitKey(1)==27:
+        cv2.imshow(
+            "mask",
+            mask
+        )
+
+        if cv2.waitKey(1) & 0xFF == 27:
+
             break
 
 except KeyboardInterrupt:
+
     pass
 
 finally:
