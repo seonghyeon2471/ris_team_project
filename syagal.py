@@ -32,18 +32,23 @@ print("LIDAR START")
 # =========================================
 # LIDAR PARAMETERS
 # =========================================
-MAX_SPEED        = 0.30
-MIN_SPEED        = 0.09
-MAX_W            = 0.9
-THRESH_30        = 32.0
-THRESH_20        = 22.0
-THRESH_10        = 12.0
+MAX_SPEED         = 0.30
+MIN_SPEED         = 0.09
+MAX_W             = 0.9
+THRESH_30         = 32.0
+THRESH_20         = 22.0
+THRESH_10         = 12.0
 FRONT_CHECK_RANGE = 45
 
 EMA_ALPHA = 0.35
 MEDIAN_K  = 2
-scan_data = np.full(360, 150.0, dtype=np.float32)
-scan_lock = threading.Lock()
+
+# ── 수정①: scan_data 를 두 벌 분리
+#    _buf  : lidar_loop 단독 쓰기 (락 불필요)
+#    _shared: 메인루프가 읽는 복사본 (scan_lock 으로 보호)
+_scan_buf    = np.full(360, 150.0, dtype=np.float32)
+_scan_shared = np.full(360, 150.0, dtype=np.float32)
+scan_lock    = threading.Lock()
 
 # =========================================
 # CAMERA PARAMETERS
@@ -83,7 +88,7 @@ COLOR_CFG = {
 MISSION = ["red", "yellow", "blue"]
 
 # =========================================
-# 상태
+# 상태 변수 (메인루프 단독 소유 — ② 수정)
 # =========================================
 mission_index = 0
 state         = "SEARCH"
@@ -92,34 +97,41 @@ park_start    = None
 
 # =========================================
 # LIDAR UTIL
+# ── 수정①: _scan_buf 에만 쓰고 락 없음
 # =========================================
-def apply_ema(angle, new_dist_cm):
-    if not isinstance(new_dist_cm, (int, float)) or new_dist_cm <= 0:
+def _apply_ema(angle, dist_cm):
+    if dist_cm <= 0:
         return
-    scan_data[angle] = (1.0 - EMA_ALPHA) * scan_data[angle] + EMA_ALPHA * new_dist_cm
+    _scan_buf[angle] = (1.0 - EMA_ALPHA) * _scan_buf[angle] + EMA_ALPHA * dist_cm
 
-def apply_median_filter():
+def _apply_median_filter():
     k = MEDIAN_K
     filtered = np.empty(360, dtype=np.float32)
     for i in range(360):
-        indices = [(i + d) % 360 for d in range(-k, k + 1)]
-        values  = np.sort(scan_data[indices])
-        filtered[i] = values[k]
-    scan_data[:] = filtered
+        idx = [(i + d) % 360 for d in range(-k, k + 1)]
+        filtered[i] = np.sort(_scan_buf[idx])[k]
+    _scan_buf[:] = filtered
 
+def _publish_scan():
+    """한 스캔 완료 시 _shared 에 원자적으로 복사"""
+    with scan_lock:
+        _scan_shared[:] = _scan_buf
+
+# 메인루프용 읽기 함수 — 항상 _shared 만 읽음
 def get_front_min():
     with scan_lock:
         indices = np.arange(-FRONT_CHECK_RANGE, FRONT_CHECK_RANGE + 1) % 360
-        return float(np.min(scan_data[indices]))
+        return float(np.min(_scan_shared[indices]))
 
 def choose_avoid_direction():
     with scan_lock:
-        left_avg  = float(np.mean(scan_data[1:90]))
-        right_avg = float(np.mean(scan_data[271:360]))
+        left_avg  = float(np.mean(_scan_shared[1:90]))
+        right_avg = float(np.mean(_scan_shared[271:360]))
     return 1 if left_avg >= right_avg else -1
 
 # =========================================
-# LIDAR 스레드 (패킷 파싱)
+# LIDAR 스레드
+# ── 수정①: 내부 함수는 락 없이, 스캔 완료 시에만 publish
 # =========================================
 def lidar_loop():
     while True:
@@ -134,11 +146,10 @@ def lidar_loop():
         angle   = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0) % 360
         dist_cm = (raw[3] | (raw[4] << 8)) / 40.0
         if 3 < dist_cm < 150:
-            with scan_lock:
-                apply_ema(angle, dist_cm)
+            _apply_ema(angle, dist_cm)      # 락 없이 buf 에만 기록
         if s_flag == 1:
-            with scan_lock:
-                apply_median_filter()
+            _apply_median_filter()          # 락 없이 buf 에서 계산
+            _publish_scan()                 # 완성 후 shared 에 복사
 
 lidar_thread = threading.Thread(target=lidar_loop, daemon=True)
 lidar_thread.start()
@@ -177,35 +188,43 @@ def make_mask(frame, hsv, color_name):
     return mask
 
 # =========================================
-# 동작 우선순위 결정
-# LiDAR 장애물 감지 시 → 회피 우선
-# 안전 구간일 때       → 카메라 추적
+# 동작 우선순위
+# ── 수정⑤: 회피 방향과 카메라 방향 부호 체크 후 블렌딩
 # =========================================
 def decide_cmd(cam_v, cam_w, front_min):
-    """
-    front_min : LiDAR 전방 최소 거리 (cm)
-    cam_v/w   : 카메라 추적이 요구하는 속도
-    반환      : (v, w, avoid_active)
-    """
     if front_min < THRESH_10:
         direction = choose_avoid_direction()
         return MIN_SPEED, direction * MAX_W, True
 
     elif front_min < THRESH_20:
         direction = choose_avoid_direction()
-        # 카메라 회전 방향과 회피 방향 블렌딩 (회피 70%)
-        blended_w = 0.3 * cam_w + 0.7 * (direction * 0.8)
+        avoid_w   = direction * 0.8
+        # 수정⑤: 방향 같으면 블렌딩, 반대면 회피 단독
+        if direction * cam_w >= 0:
+            blended_w = 0.3 * cam_w + 0.7 * avoid_w
+        else:
+            blended_w = avoid_w
         return 0.12, blended_w, True
 
     elif front_min < THRESH_30:
         direction = choose_avoid_direction()
-        blended_w = 0.5 * cam_w + 0.5 * (direction * 0.7)
+        avoid_w   = direction * 0.7
+        if direction * cam_w >= 0:
+            blended_w = 0.5 * cam_w + 0.5 * avoid_w
+        else:
+            blended_w = avoid_w
         v = min(cam_v, 0.15)
         return v, blended_w, True
 
     else:
-        # 장애물 없음 → 카메라 추적 그대로
         return cam_v, cam_w, False
+
+# =========================================
+# 카메라 버퍼 flush (수정⑦)
+# =========================================
+def flush_camera_buffer(n=3):
+    for _ in range(n):
+        cap.grab()
 
 # =========================================
 # START
@@ -236,10 +255,10 @@ try:
         cv2.circle(frame, (frame_cx, frame_cy), 5, (0, 255, 255), -1)
 
         # LiDAR 전방 거리 표시
+        lidar_color = (0, 255, 255) if front_min > THRESH_30 else (0, 0, 255)
         cv2.putText(frame, f"LIDAR:{front_min:.0f}cm",
                     (WIDTH - 110, HEIGHT - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4,
-                    (0, 255, 255) if front_min > THRESH_30 else (0, 0, 255), 1)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, lidar_color, 1)
 
         # ── 미션 완료 ──────────────────────────
         if mission_index >= len(MISSION):
@@ -254,21 +273,32 @@ try:
 
         target = MISSION[mission_index]
         draw   = COLOR_CFG[target]["draw"]
-        mask   = make_mask(frame, hsv, target)
 
+        # ── 수정⑦: PARKING 아닐 때만 일반 마스크 생성
+        mask = make_mask(frame, hsv, target)
         contours, _ = cv2.findContours(
             mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
 
-        # ── PARKING 상태 ───────────────────────
+        # ── PARKING 상태 ── 수정③: 긴급정지 추가 ──
         if state == "PARKING":
-            stop_robot()
+            # 긴급정지: 정차 중 장애물 접근 시 멈춤 유지
+            if front_min < THRESH_10:
+                stop_robot()
+            else:
+                stop_robot()    # 어차피 정차 중
+
             elapsed = time.time() - park_start
             remain  = max(0.0, PARK_SEC - elapsed)
+
             cv2.putText(frame, f"PARKING [{target}] {remain:.1f}s",
                         (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, draw, 2)
             cv2.putText(frame, f"MISSION {mission_index+1}/{len(MISSION)}",
-                        (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,200), 2)
+                        (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+
+            if front_min < THRESH_10:
+                cv2.putText(frame, "! OBSTACLE NEAR !",
+                            (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
             if elapsed >= PARK_SEC:
                 print(f"✅ [{target}] 정차 완료!")
@@ -278,6 +308,7 @@ try:
                 else:
                     state = "SEARCH"
                     last_seen_x = frame_cx
+                    flush_camera_buffer()   # 수정⑦: 버퍼 flush
                     print(f"➡️  다음 목표: [{MISSION[mission_index]}]")
 
             cv2.imshow("frame", frame)
@@ -286,10 +317,13 @@ try:
                 break
             continue
 
-        # ── 카메라 추적 로직 → cam_v, cam_w 계산
-        cam_v = 0.0
-        cam_w = 0.0
+        # ── 수정②+④: cam_state, cam_v, cam_w 루프 상단 초기화
+        cam_v     = 0.0
+        cam_w     = 0.0
+        # 수정④: flip 된 frame 기준으로 last_seen_x 방향 일관성 유지
+        cam_state = "SEARCH LEFT" if last_seen_x <= frame_cx else "SEARCH RIGHT"
 
+        # ── 객체 감지 ──────────────────────────
         if contours:
             c    = max(contours, key=cv2.contourArea)
             area = cv2.contourArea(c)
@@ -299,6 +333,8 @@ try:
                 (cx, cy), (rw, rh), angle = rect
                 cx = int(cx)
                 cy = int(cy)
+
+                # 수정④: flip 된 좌표 그대로 사용 (일관성 유지)
                 last_seen_x = cx
 
                 box = np.int32(cv2.boxPoints(rect))
@@ -318,19 +354,20 @@ try:
                     cv2.waitKey(1)
                     continue
 
-                # 추적 속도 계산
-                cam_w = -KP_ROT * error_x
-                cam_v = np.clip((TARGET_AREA - area) * 0.00003, MIN_V, MAX_V)
-
-                cv2.putText(frame, f"A:{int(area)}",
-                            (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+                cam_w     = -KP_ROT * error_x
+                cam_v     = np.clip((TARGET_AREA - area) * 0.00003, MIN_V, MAX_V)
                 cam_state = "TRACK"
 
+                cv2.putText(frame, f"A:{int(area)}",
+                            (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
             else:
+                # 수정②: cam_state 명시적 할당 (NameError 방지)
                 cam_state = "SMALL"
+                stop_robot()
 
         else:
-            # 색상 못 찾음 → 탐색 회전
+            # 색상 못 찾음 — 탐색 회전
             if last_seen_x > frame_cx:
                 cam_v, cam_w = 0.04, -0.32
                 cam_state    = "SEARCH RIGHT"
@@ -338,22 +375,18 @@ try:
                 cam_v, cam_w = 0.04,  0.32
                 cam_state    = "SEARCH LEFT"
 
-        # ── LiDAR 우선순위 적용 → 최종 명령 ──
+        # ── LiDAR 우선순위 적용 ────────────────
         final_v, final_w, avoid_on = decide_cmd(cam_v, cam_w, front_min)
-
         send_cmd(final_v, final_w)
 
-        # 상태 표시
-        if avoid_on:
-            state = f"AVOID({front_min:.0f}cm)"
-        else:
-            state = cam_state if contours and cv2.contourArea(
-                max(contours, key=cv2.contourArea)) > MIN_AREA else \
-                ("SEARCH RIGHT" if last_seen_x > frame_cx else "SEARCH LEFT")
+        # 상태 결정
+        state = f"AVOID {front_min:.0f}cm" if avoid_on else cam_state
 
+        # ── HUD ────────────────────────────────
         cv2.putText(frame, state,
-                    (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
-        cv2.putText(frame, f"TARGET:{target} ({mission_index+1}/{len(MISSION)})",
+                    (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.putText(frame,
+                    f"TARGET:{target} ({mission_index+1}/{len(MISSION)})",
                     (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.55, draw, 2)
 
         cv2.imshow("frame", frame)
