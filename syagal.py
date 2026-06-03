@@ -34,16 +34,9 @@ lidar_ser.read(7)
 print("LIDAR START")
 
 # =========================================
-# LIDAR PARAMETERS
+# LIDAR PARAMETERS (백그라운드 수신 유지용)
 # =========================================
-MAX_SPEED         = 0.30
-MIN_SPEED         = 0.09
-MAX_W             = 0.9
-THRESH_30         = 32.0
-THRESH_20         = 22.0
-THRESH_10         = 12.0
 FRONT_CHECK_RANGE = 45
-
 EMA_ALPHA = 0.35
 MEDIAN_K  = 2
 
@@ -59,14 +52,12 @@ MIN_V       = 0.10
 KP_ROT      = 0.003     
 X_TOL       = 35        
 MIN_AREA    = 400       
-TARGET_AREA = 14000     
+TARGET_AREA = 13000     
 PARK_SEC    = 3.0       
 
 APPROACH_DRIVE_SEC = 1.2  
 SEARCH_TIMEOUT = 2.2    
-
-# ── ★ [추가 안전장치 파라미터] ──
-APPROACH_MAX_TIMEOUT = 2.0   # APPROACH 모드가 지속될 수 있는 최대 시간 (초)
+APPROACH_MAX_TIMEOUT = 2.0   
 
 # =========================================
 # 색상별 HSV 범위
@@ -105,7 +96,7 @@ search_start_time   = None
 approach_start_time = None  
 
 # =========================================
-# LIDAR UTIL
+# LIDAR UTIL (수신 유지용 스레드)
 # =========================================
 def _apply_ema(angle, dist_cm):
     if dist_cm <= 0:
@@ -123,17 +114,6 @@ def _apply_median_filter():
 def _publish_scan():
     with scan_lock:
         _scan_shared[:] = _scan_buf
-
-def get_front_min():
-    with scan_lock:
-        indices = np.arange(-FRONT_CHECK_RANGE, FRONT_CHECK_RANGE + 1) % 360
-        return float(np.min(_scan_shared[indices]))
-
-def choose_avoid_direction():
-    with scan_lock:
-        left_avg  = float(np.mean(_scan_shared[1:90]))
-        right_avg = float(np.mean(_scan_shared[271:360]))
-    return 1 if left_avg >= right_avg else -1
 
 def lidar_loop():
     while True:
@@ -169,10 +149,8 @@ def stop_robot():
 
 def make_mask(frame, hsv, color_name):
     cfg    = COLOR_CFG[color_name]
-    
-    # ★ [변경]: 홀 노이즈 제거를 위해 MORPH_CLOSE 커널을 (5,5)에서 (9,9)로 강화
     kernel_open  = np.ones((5, 5), np.uint8)
-    kernel_close = np.ones((9, 9), np.uint8) 
+    kernel_close = np.ones((7, 7), np.uint8) 
 
     lo1, hi1 = np.array(cfg["hsv1"][0]), np.array(cfg["hsv1"][1])
     hsv_mask = cv2.inRange(hsv, lo1, hi1)
@@ -185,25 +163,8 @@ def make_mask(frame, hsv, color_name):
     mask = cv2.bitwise_and(hsv_mask, bgr_mask)
     
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close) # 닫기 연산 강화 적용
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close) 
     return mask
-
-def decide_cmd(cam_v, cam_w, front_min):
-    if front_min < THRESH_10:
-        direction = choose_avoid_direction()
-        return MIN_SPEED, direction * MAX_W, True
-    elif front_min < THRESH_20:
-        direction = choose_avoid_direction()
-        avoid_w   = direction * 0.8
-        blended_w = 0.3 * cam_w + 0.7 * avoid_w if direction * cam_w >= 0 else avoid_w
-        return 0.12, blended_w, True
-    elif front_min < THRESH_30:
-        direction = choose_avoid_direction()
-        avoid_w   = direction * 0.7
-        blended_w = 0.5 * cam_w + 0.5 * avoid_w if direction * cam_w >= 0 else avoid_w
-        return min(cam_v, 0.15), blended_w, True
-    else:
-        return cam_v, cam_w, False
 
 def flush_camera_buffer(n=8):  
     for _ in range(n):
@@ -212,7 +173,7 @@ def flush_camera_buffer(n=8):
 # =========================================
 # MAIN LOOP
 # =========================================
-print("🏁 MISSION CONTROL START")
+print("🏁 MISSION CONTROL START (PURE CAMERA SPEED)")
 
 try:
     while True:
@@ -226,7 +187,6 @@ try:
         frame_cy = HEIGHT // 2
 
         hsv       = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        front_min = get_front_min()
 
         if mission_index >= len(MISSION):
             stop_robot()
@@ -250,7 +210,7 @@ try:
             cv2.imshow("frame", frame)
             
             if elapsed >= PARK_SEC:
-                print(f"✅ [{target}] 미션 오버 -> 상태 스위칭")
+                print(f"✅ [{target}] 미션 타임아웃 완료 -> 넥스트 미션")
                 mission_index += 1
                 
                 if mission_index < len(MISSION):
@@ -265,13 +225,13 @@ try:
             if cv2.waitKey(1) & 0xFF == 27: break
             continue  
 
-        # ── [★ 변경: APPROACH 상태 내부 강제 타임아웃 확인 안전장치] ──
+        # ── [APPROACH 내부 강제 타임아웃 안전장치] ──
         if state == "APPROACH" and approach_start_time is not None:
             if time.time() - approach_start_time > APPROACH_MAX_TIMEOUT:
-                print(f"🚨 [안전장치 트리거] APPROACH 상태 {APPROACH_MAX_TIMEOUT}초 경과! 강제 PARKING 전환.")
+                print(f"🚨 [안전장치 트리거] APPROACH 강제 {APPROACH_MAX_TIMEOUT}초 만료 -> PARKING!")
                 state      = "PARKING"
                 park_start = time.time()
-                continue  # 다음 루프 최상단 주차 레이어로 바로 이행
+                continue  
 
         # 주행 연산 레이어
         mask = make_mask(frame, hsv, target)
@@ -288,7 +248,7 @@ try:
             if area > MIN_AREA:
                 if state in ["FORCED_SEARCH", "WANDERING", "SEARCH"]:
                     state = "TRACK"
-                    print(f"🎯 [{target}] 포착 -> TRACK 모드 체인지")
+                    print(f"🎯 [{target}] 포착 -> TRACK 모드")
 
                 rect = cv2.minAreaRect(c)
                 (cx, cy), _, _ = rect
@@ -299,22 +259,21 @@ try:
                 cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)
                 error_x = cx - frame_cx
 
-                # APPROACH 진입 판정
-                if state == "APPROACH" or (area > TARGET_AREA and state == "TRACK"):
+                # 돌격 진입 조건문 (오차 상관없이 면적 기반 강제 진입)
+                if state == "APPROACH" or area > TARGET_AREA:
                     if state != "APPROACH":
                         state = "APPROACH"
-                        approach_start_time = time.time() # 타임아웃 기점 저장
-                        print(f"📥 [{target}] 내부 진입 (Area 크기 만족: {int(area)})")
+                        approach_start_time = time.time() 
+                        print(f"📥 [{target}] 강제 돌격 (Area 만족: {int(area)})")
 
                     cam_w = -KP_ROT * error_x * 0.5 
                     cam_v = 0.12  
                     cam_state = "APPROACH"
 
-                    # 면적 만족으로 정상 정지하는 기본 조건문
-                    if area > 25000: 
+                    if area > 24000: 
                         state      = "PARKING"
                         park_start = time.time()
-                        print(f"🅿️  [{target}] 내부 면적 포화 정지 완료")
+                        print(f"🅿️  [{target}] 내부 포화 정상 정지 완료")
                 else:
                     cam_w     = -KP_ROT * error_x
                     rem_area  = max(0.0, TARGET_AREA - area)
@@ -341,25 +300,21 @@ try:
             elif state == "FORCED_SEARCH":
                 if time.time() - search_start_time > SEARCH_TIMEOUT:
                     state = "WANDERING"
-                    print(f"⚠️ 타임아웃 -> 맵 전체 탐색(WANDERING) 기동")
+                    print(f"⚠️ 타임아웃 -> WANDERING")
                     cam_v, cam_w = 0.20, 0.0  
                 else:
-                    cam_v, cam_w = 0.0, 0.75  
+                    cam_v, cam_w = 0.03, 0.80  # 사각지대 탈출을 위한 확실한 회전력 확보
             
             elif state == "WANDERING":
                 cam_v, cam_w = 0.20, 0.0  
                 
             else:
                 cam_state = "SEARCH LEFT" if last_seen_x <= frame_cx else "SEARCH RIGHT"
-                cam_v, cam_w = (0.02, -0.55) if last_seen_x > frame_cx else (0.02,  0.55)
+                cam_v, cam_w = (0.03, -0.65) if last_seen_x > frame_cx else (0.03,  0.65)
 
-        # ── [라이다 제어 분기 및 명령 최종 전달] ──────────────────
-        if state in ["APPROACH", "APPROACH_BLIND", "PARKING"]:
-            final_v, final_w = cam_v, cam_w
-        else:
-            final_v, final_w, _ = decide_cmd(cam_v, cam_w, front_min)
-            
-        send_cmd(final_v, final_w)
+        # ── ★ [라이다 예외처리 100% 제거] ──
+        # 라이다 간섭 필터를 완전히 폐기하고, 카메라 연산 기반의 속도(cam_v)와 조향(cam_w)을 다이렉트로 전달합니다.
+        send_cmd(cam_v, cam_w)
 
         # 디스플레이 업데이트
         cv2.putText(frame, f"STATE: {cam_state}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
