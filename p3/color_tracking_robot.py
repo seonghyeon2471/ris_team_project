@@ -469,6 +469,7 @@ def control_loop(motor: MotorController):
 
     pass_timer       = None
     PASS_HOLD_SEC    = 1.0
+    color_ever_seen  = False   # 현재 타깃 색을 한 번이라도 본 적 있는지
 
     log.info(f"Control loop started. Targets: {TARGET_COLORS}")
 
@@ -553,20 +554,21 @@ def control_loop(motor: MotorController):
         v, w = compute_cmd(blended, scan)
         motor.send(v, w)
 
-        # ── 색상 통과 판정 ─────────────────────────────────────────────────
+        # ── 색상 통과 판정 ─────────────────────────────────────
         if rstst == "TRACKING":
-            cx_ok   = abs(blob_cx - FRAME_W//2) < FRAME_W // 4
-            area_ok = blob_area > PASS_AREA_THR
-            if color_found and cx_ok and area_ok:
-                if pass_timer is None:
-                    pass_timer = now
-                    log.info(f"[{TARGET_COLORS[cidx]}] Pass condition detected…")
-                elif now - pass_timer >= PASS_HOLD_SEC:
-                    log.info(f"[{TARGET_COLORS[cidx]}] PASSED! → next color")
-                    state.next_color()
-                    pass_timer = None
+            if color_found:
+                color_ever_seen = True   # 한 번이라도 발견한 적 있음
+                pass_timer = None        # 보이는 동안은 타이머 리셋
             else:
-                pass_timer = None
+                if color_ever_seen:
+                    if pass_timer is None:
+                        pass_timer = now
+                        log.info(f"[{TARGET_COLORS[cidx]}] 색 사라짐 → 올라탄 것으로 판정, 1초 대기…")
+                    elif now - pass_timer >= PASS_HOLD_SEC:
+                        log.info(f"[{TARGET_COLORS[cidx]}] PASSED! → next color")
+                        color_ever_seen = False
+                        state.next_color()
+                        pass_timer = None
 
         # ── Debug display ─────────────────────────────────────────────────
         log.info(f"TRG:{blended:+.1f}° v:{v:.2f} w:{w:.2f} "
