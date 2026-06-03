@@ -45,6 +45,17 @@ TARGET_AREA = 23000
 ARRIVE_MARGIN = 1200
 
 # =========================================
+# BLIND SPOT
+# =========================================
+BLIND_THRESHOLD = 0.75
+
+BLIND_FORWARD_TIME = 20
+
+last_area = 0
+
+blind_counter = 0
+
+# =========================================
 # STATE
 # =========================================
 target_color = "RED"
@@ -57,25 +68,25 @@ search_timer = 0
 last_seen_x = 160
 
 # =========================================
-# RED
+# RED RANGE
 # =========================================
-lower_red1 = np.array([0,70,70])
-upper_red1 = np.array([12,255,255])
+lower_red1=np.array([0,70,70])
+upper_red1=np.array([12,255,255])
 
-lower_red2 = np.array([160,70,70])
-upper_red2 = np.array([179,255,255])
+lower_red2=np.array([160,70,70])
+upper_red2=np.array([179,255,255])
 
-lower_red_bgr = np.array([40,20,120])
-upper_red_bgr = np.array([210,170,255])
+lower_red_bgr=np.array([40,20,120])
+upper_red_bgr=np.array([210,170,255])
 
 # =========================================
-# YELLOW
+# YELLOW RANGE
 # =========================================
-lower_yellow_hsv = np.array([15,80,80])
-upper_yellow_hsv = np.array([40,255,255])
+lower_yellow_hsv=np.array([15,80,80])
+upper_yellow_hsv=np.array([40,255,255])
 
-lower_yellow_bgr = np.array([0,120,120])
-upper_yellow_bgr = np.array([170,255,255])
+lower_yellow_bgr=np.array([0,120,120])
+upper_yellow_bgr=np.array([170,255,255])
 
 # =========================================
 # MOTOR
@@ -99,45 +110,45 @@ try:
 
     while True:
 
-        ret,frame = cap.read()
+        ret,frame=cap.read()
 
         if not ret:
             continue
 
-        frame = cv2.flip(frame,1)
+        frame=cv2.flip(frame,1)
 
-        HEIGHT,WIDTH = frame.shape[:2]
+        HEIGHT,WIDTH=frame.shape[:2]
 
-        frame_cx = WIDTH//2
+        frame_cx=WIDTH//2
 
-        hsv = cv2.cvtColor(
+        hsv=cv2.cvtColor(
             frame,
             cv2.COLOR_BGR2HSV
         )
 
         # =====================================
-        # COLOR MASK
+        # MASK
         # =====================================
-        if target_color == "RED":
+        if target_color=="RED":
 
-            mask1 = cv2.inRange(
+            mask1=cv2.inRange(
                 hsv,
                 lower_red1,
                 upper_red1
             )
 
-            mask2 = cv2.inRange(
+            mask2=cv2.inRange(
                 hsv,
                 lower_red2,
                 upper_red2
             )
 
-            hsv_mask = cv2.bitwise_or(
+            hsv_mask=cv2.bitwise_or(
                 mask1,
                 mask2
             )
 
-            bgr_mask = cv2.inRange(
+            bgr_mask=cv2.inRange(
                 frame,
                 lower_red_bgr,
                 upper_red_bgr
@@ -145,19 +156,19 @@ try:
 
         else:
 
-            hsv_mask = cv2.inRange(
+            hsv_mask=cv2.inRange(
                 hsv,
                 lower_yellow_hsv,
                 upper_yellow_hsv
             )
 
-            bgr_mask = cv2.inRange(
+            bgr_mask=cv2.inRange(
                 frame,
                 lower_yellow_bgr,
                 upper_yellow_bgr
             )
 
-        mask = cv2.bitwise_and(
+        mask=cv2.bitwise_and(
             hsv_mask,
             bgr_mask
         )
@@ -170,7 +181,7 @@ try:
             kernel
         )
 
-        contours,_ = cv2.findContours(
+        contours,_=cv2.findContours(
             mask,
             cv2.RETR_EXTERNAL,
             cv2.CHAIN_APPROX_SIMPLE
@@ -183,8 +194,11 @@ try:
         # =====================================
         if contours:
 
-            found_once = True
-            search_timer = 0
+            blind_counter = 0
+
+            found_once=True
+
+            search_timer=0
 
             c=max(
                 contours,
@@ -192,6 +206,8 @@ try:
             )
 
             area=cv2.contourArea(c)
+
+            last_area = area
 
             if area > MIN_AREA:
 
@@ -201,33 +217,19 @@ try:
 
                 cx=int(cx)
 
-                last_seen_x = cx
+                last_seen_x=cx
 
-                error_x = cx - frame_cx
+                error_x=cx-frame_cx
 
-                box=cv2.boxPoints(rect)
+                w=-KP_ROT*error_x
 
-                box=np.int32(box)
-
-                cv2.drawContours(
-                    frame,
-                    [box],
-                    0,
-                    (0,255,0),
-                    2
+                distance_error=(
+                    TARGET_AREA-area
                 )
 
-                # 회전
-                w = -KP_ROT * error_x
+                v=distance_error*0.000025
 
-                # 거리
-                distance_error = (
-                    TARGET_AREA - area
-                )
-
-                v = distance_error * 0.000025
-
-                if v > 0:
+                if v>0:
 
                     v=max(
                         v,
@@ -241,13 +243,13 @@ try:
                         MIN_BACKWARD
                     )
 
-                # =====================
+                # ==================
                 # ARRIVED
-                # =====================
+                # ==================
                 if (
 
-                    abs(error_x) < X_TOL and
-                    abs(distance_error) < ARRIVE_MARGIN
+                    abs(error_x)<X_TOL and
+                    abs(distance_error)<ARRIVE_MARGIN
 
                 ):
 
@@ -255,18 +257,16 @@ try:
 
                     if target_color=="RED":
 
-                        state="RED ARRIVED"
-
-                        cv2.imshow(
-                            "frame",
-                            frame
-                        )
-
-                        cv2.waitKey(1)
-
                         time.sleep(1)
 
                         target_color="YELLOW"
+
+                        found_once=False
+                        search_timer=0
+                        search_dir=1
+                        last_seen_x=frame_cx
+
+                        continue
 
                     else:
 
@@ -278,50 +278,73 @@ try:
 
                 else:
 
-                    send_cmd(
-                        v,
-                        w
-                    )
+                    send_cmd(v,w)
 
-                    if distance_error < 0:
-
-                        state="BACKWARD"
-
-                    else:
-
-                        state="TRACK"
+                    state="TRACK"
 
         # =====================================
         # LOST TARGET
         # =====================================
         else:
 
-            search_timer += 1
+            blind_counter += 1
 
-            # 처음부터 못찾음
-            if not found_once:
+            # -------------------------
+            # 사각지대 가능
+            # -------------------------
+            if (
+
+                last_area >
+                TARGET_AREA *
+                BLIND_THRESHOLD
+
+            ):
+
+                if blind_counter < BLIND_FORWARD_TIME:
+
+                    send_cmd(
+                        0.05,
+                        0
+                    )
+
+                    state="BLIND FORWARD"
+
+                else:
+
+                    stop_robot()
+
+                    state="ASSUME ARRIVED"
+
+            # -------------------------
+            # 처음부터 못 찾음
+            # -------------------------
+            elif not found_once:
 
                 send_cmd(
-                    0,
-                    0.35 * search_dir
+                    0.06,
+                    0.60*search_dir
                 )
 
                 state="INIT SEARCH"
 
-                if search_timer > 70:
+                if search_timer>120:
 
-                    search_dir *= -1
+                    search_dir*=-1
 
-                    search_timer = 0
+                    search_timer=0
 
+                search_timer += 1
+
+            # -------------------------
             # 찾다가 놓침
+            # -------------------------
             else:
 
                 if last_seen_x > frame_cx:
 
                     send_cmd(
-                        0.03,
-                        -0.30
+                        0.05,
+                        -0.45
                     )
 
                     state="SEARCH RIGHT"
@@ -329,8 +352,8 @@ try:
                 else:
 
                     send_cmd(
-                        0.03,
-                        0.30
+                        0.05,
+                        0.45
                     )
 
                     state="SEARCH LEFT"
