@@ -15,54 +15,60 @@ arduino_ser = serial.Serial(
 # =========================================
 # CAMERA
 # =========================================
-WIDTH = 640
-HEIGHT = 480
-
 cap = cv2.VideoCapture(0)
 
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH,320)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT,240)
+
+cap.set(cv2.CAP_PROP_BUFFERSIZE,1)
+
+cap.set(
+    cv2.CAP_PROP_FOURCC,
+    cv2.VideoWriter_fourcc(*'MJPG')
+)
 
 # =========================================
-# CONTROL PARAMETER
+# CONTROL
 # =========================================
 MAX_V = 0.22
-MIN_V = 0.08
+MIN_V = 0.06
 
+KP_ROT = 0.004
 MAX_W = 0.55
 
-KP_ROT = 0.0018
-KP_FORWARD = 0.0012
+X_TOL = 15
 
-X_TOL = 20
-Y_TOL = 20
-
-MIN_AREA = 700
+MIN_AREA = 500
+TARGET_AREA = 18000
 
 # =========================================
 # RED RANGE
 # =========================================
 
-# HSV 범위
-lower_hsv = np.array([160,130,150])
-upper_hsv = np.array([179,255,255])
+# HSV red lower region
+lower_red1 = np.array([0,70,70])
+upper_red1 = np.array([12,255,255])
 
-# BGR 범위
-lower_bgr = np.array([80,30,170])
-upper_bgr = np.array([150,100,255])
+# HSV red upper region
+lower_red2 = np.array([160,70,70])
+upper_red2 = np.array([179,255,255])
+
+# BGR filter
+lower_bgr = np.array([40,20,120])
+upper_bgr = np.array([210,170,255])
 
 # =========================================
 # MEMORY
 # =========================================
-last_seen_x = WIDTH//2
+last_seen_x = 160
 
 # =========================================
 # MOTOR
 # =========================================
 def send_cmd(v,w):
 
-    v = np.clip(v,-0.3,0.3)
-    w = np.clip(w,-0.8,0.8)
+    v=np.clip(v,-0.3,0.3)
+    w=np.clip(w,-0.8,0.8)
 
     arduino_ser.write(
         f"{v:.3f},{-w:.3f}\n".encode()
@@ -75,31 +81,51 @@ def stop_robot():
 # =========================================
 # START
 # =========================================
-print("COLOR CENTER TRACK START")
+print("RED CENTER TRACK START")
 
 try:
 
     while True:
 
-        ret, frame = cap.read()
+        ret,frame = cap.read()
 
         if not ret:
             continue
 
-        frame = cv2.flip(frame,1)
+        frame = cv2.flip(
+            frame,
+            1
+        )
+
+        HEIGHT, WIDTH = frame.shape[:2]
+
+        frame_cx = WIDTH//2
+        frame_cy = HEIGHT//2
 
         hsv = cv2.cvtColor(
             frame,
             cv2.COLOR_BGR2HSV
         )
 
-        # ==========================
+        # =====================================
         # MASK
-        # ==========================
-        hsv_mask = cv2.inRange(
+        # =====================================
+
+        mask1 = cv2.inRange(
             hsv,
-            lower_hsv,
-            upper_hsv
+            lower_red1,
+            upper_red1
+        )
+
+        mask2 = cv2.inRange(
+            hsv,
+            lower_red2,
+            upper_red2
+        )
+
+        hsv_mask = cv2.bitwise_or(
+            mask1,
+            mask2
         )
 
         bgr_mask = cv2.inRange(
@@ -113,18 +139,15 @@ try:
             bgr_mask
         )
 
-        kernel = np.ones((5,5),np.uint8)
-
-        mask = cv2.erode(
-            mask,
-            kernel,
-            iterations=1
+        kernel = np.ones(
+            (3,3),
+            np.uint8
         )
 
-        mask = cv2.dilate(
+        mask = cv2.morphologyEx(
             mask,
-            kernel,
-            iterations=2
+            cv2.MORPH_OPEN,
+            kernel
         )
 
         contours,_ = cv2.findContours(
@@ -133,40 +156,23 @@ try:
             cv2.CHAIN_APPROX_SIMPLE
         )
 
-        frame_cx = WIDTH//2
-        frame_cy = HEIGHT//2
-
-        # 카메라 중심 표시
+        # 화면 중심 표시
         cv2.circle(
             frame,
             (frame_cx,frame_cy),
-            7,
+            5,
             (0,255,255),
             -1
         )
 
-        cv2.line(
-            frame,
-            (frame_cx,0),
-            (frame_cx,HEIGHT),
-            (0,255,255),
-            1
-        )
+        state="SEARCH"
 
-        cv2.line(
-            frame,
-            (0,frame_cy),
-            (WIDTH,frame_cy),
-            (0,255,255),
-            1
-        )
-
-        # ====================================
+        # =====================================
         # OBJECT FOUND
-        # ====================================
+        # =====================================
         if contours:
 
-            c = max(
+            c=max(
                 contours,
                 key=cv2.contourArea
             )
@@ -179,13 +185,13 @@ try:
 
                 (cx,cy),(rw,rh),angle = rect
 
-                cx = int(cx)
-                cy = int(cy)
+                cx=int(cx)
+                cy=int(cy)
 
                 last_seen_x = cx
 
                 box = cv2.boxPoints(rect)
-                box = np.int32(box)
+                box=np.int32(box)
 
                 cv2.drawContours(
                     frame,
@@ -198,69 +204,70 @@ try:
                 cv2.circle(
                     frame,
                     (cx,cy),
-                    6,
+                    5,
                     (255,0,0),
                     -1
                 )
 
-                # ====================
-                # ERROR
-                # ====================
                 error_x = cx - frame_cx
-                error_y = frame_cy - cy
 
-                # ====================
-                # CENTERED
-                # ====================
+                # =====================
+                # ARRIVED
+                # =====================
                 if (
                     abs(error_x) < X_TOL and
-                    abs(error_y) < Y_TOL
+                    area > TARGET_AREA
                 ):
 
-                    v = 0
-                    w = 0
+                    v=0
+                    w=0
 
-                    state = "CENTERED"
+                    state="ARRIVED"
 
                 else:
 
-                    # 회전 제어
                     w = -KP_ROT * error_x
 
-                    # 전진 제어
-                    if abs(error_x) < 80:
+                    distance_error = TARGET_AREA - area
 
-                        v = KP_FORWARD * abs(error_y)
+                    v = distance_error * 0.00003
 
-                        v = np.clip(
-                            v,
-                            MIN_V,
-                            MAX_V
-                        )
+                    v = np.clip(
+                        v,
+                        MIN_V,
+                        MAX_V
+                    )
 
-                    else:
-
-                        v = MIN_V
-
-                    state = "TRACK"
+                    state="TRACK"
 
                 send_cmd(v,w)
+
+                cv2.putText(
+                    frame,
+                    f"A:{int(area)}",
+                    (20,80),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0,255,0),
+                    2
+                )
 
             else:
 
                 stop_robot()
-                state = "SMALL OBJECT"
 
-        # ====================================
+                state="SMALL"
+
+        # =====================================
         # LOST TARGET
-        # ====================================
+        # =====================================
         else:
 
             if last_seen_x > frame_cx:
 
                 send_cmd(
-                    0.05,
-                    -0.35
+                    0.04,
+                    -0.32
                 )
 
                 state="SEARCH RIGHT"
@@ -268,8 +275,8 @@ try:
             else:
 
                 send_cmd(
-                    0.05,
-                    0.35
+                    0.04,
+                    0.32
                 )
 
                 state="SEARCH LEFT"
@@ -289,13 +296,9 @@ try:
             frame
         )
 
-        cv2.imshow(
-            "mask",
-            mask
-        )
+        key = cv2.waitKey(1)
 
-        if cv2.waitKey(1) & 0xFF == 27:
-
+        if key == 27:
             break
 
 except KeyboardInterrupt:
