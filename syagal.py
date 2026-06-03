@@ -51,7 +51,7 @@ MAX_V       = 0.24
 MIN_V       = 0.10      
 KP_ROT      = 0.003     
 X_TOL       = 35        
-MIN_AREA    = 400       
+MIN_AREA    = 900       # ★ 모폴로지 제거로 인한 잔돌 노이즈 필터링을 위해 면적 하한선 상향
 TARGET_AREA = 13000     
 PARK_SEC    = 3.0       
 
@@ -148,9 +148,7 @@ def stop_robot():
     send_cmd(0.0, 0.0)
 
 def make_mask(frame, hsv, color_name):
-    cfg    = COLOR_CFG[color_name]
-    kernel_open  = np.ones((5, 5), np.uint8)
-    kernel_close = np.ones((7, 7), np.uint8) 
+    cfg = COLOR_CFG[color_name]
 
     lo1, hi1 = np.array(cfg["hsv1"][0]), np.array(cfg["hsv1"][1])
     hsv_mask = cv2.inRange(hsv, lo1, hi1)
@@ -162,8 +160,7 @@ def make_mask(frame, hsv, color_name):
     bgr_mask = cv2.inRange(frame, np.array(cfg["bgr"][0]), np.array(cfg["bgr"][1]))
     mask = cv2.bitwise_and(hsv_mask, bgr_mask)
     
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close) 
+    # ★ [변경]: 기존의 MORPH_OPEN / MORPH_CLOSE 연산을 완전히 들어내어 딜레이 최소화
     return mask
 
 def flush_camera_buffer(n=8):  
@@ -173,7 +170,7 @@ def flush_camera_buffer(n=8):
 # =========================================
 # MAIN LOOP
 # =========================================
-print("🏁 MISSION CONTROL START (PURE CAMERA SPEED)")
+print("🏁 MISSION CONTROL START (MORPHOLOGY REMOVED)")
 
 try:
     while True:
@@ -259,7 +256,7 @@ try:
                 cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)
                 error_x = cx - frame_cx
 
-                # 돌격 진입 조건문 (오차 상관없이 면적 기반 강제 진입)
+                # 돌격 진입 조건문
                 if state == "APPROACH" or area > TARGET_AREA:
                     if state != "APPROACH":
                         state = "APPROACH"
@@ -303,7 +300,7 @@ try:
                     print(f"⚠️ 타임아웃 -> WANDERING")
                     cam_v, cam_w = 0.20, 0.0  
                 else:
-                    cam_v, cam_w = 0.03, 0.80  # 사각지대 탈출을 위한 확실한 회전력 확보
+                    cam_v, cam_w = 0.03, 0.80  
             
             elif state == "WANDERING":
                 cam_v, cam_w = 0.20, 0.0  
@@ -312,8 +309,7 @@ try:
                 cam_state = "SEARCH LEFT" if last_seen_x <= frame_cx else "SEARCH RIGHT"
                 cam_v, cam_w = (0.03, -0.65) if last_seen_x > frame_cx else (0.03,  0.65)
 
-        # ── ★ [라이다 예외처리 100% 제거] ──
-        # 라이다 간섭 필터를 완전히 폐기하고, 카메라 연산 기반의 속도(cam_v)와 조향(cam_w)을 다이렉트로 전달합니다.
+        # 라이다 간섭 필터가 영구 차단된 모터 전달부
         send_cmd(cam_v, cam_w)
 
         # 디스플레이 업데이트
