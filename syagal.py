@@ -58,20 +58,15 @@ MAX_V       = 0.24
 MIN_V       = 0.10      
 KP_ROT      = 0.003     
 X_TOL       = 35        
+MIN_AREA    = 400       
 TARGET_AREA = 14000     
 PARK_SEC    = 3.0       
 
 APPROACH_DRIVE_SEC = 1.2  
+SEARCH_TIMEOUT = 2.2    
 
-# ── ★ [탐색 반경 확장 및 초정밀 포착 튜닝 변수] ──
-TRACK_MIN_AREA = 400         # 정식 추적(TRACK) 진입 면적
-GLIMPSE_MIN_AREA = 80        # ★ 스치듯 인식되어도 포착할 최소 픽셀 면적 (초민감 세팅)
-SEARCH_TIMEOUT = 3.5         # 제자리 고속 스캔 시간 확장 (3.5초)
-HIGH_TURN_W = 0.85           # 제자리 회전 속도 극대화
-
-# 맵 순항 탐색(WANDERING) 선회 반경 극대화 세팅
-WANDERING_V = 0.22           # 직진 속도를 키우고
-WANDERING_W = 0.25           # 회전 속도를 줄여서 원을 매우 크게 그리며 전진하도록 수정
+# ── ★ [추가 안전장치 파라미터] ──
+APPROACH_MAX_TIMEOUT = 2.0   # APPROACH 모드가 지속될 수 있는 최대 시간 (초)
 
 # =========================================
 # 색상별 HSV 범위
@@ -174,7 +169,10 @@ def stop_robot():
 
 def make_mask(frame, hsv, color_name):
     cfg    = COLOR_CFG[color_name]
-    kernel = np.ones((5, 5), np.uint8) 
+    
+    # ★ [변경]: 홀 노이즈 제거를 위해 MORPH_CLOSE 커널을 (5,5)에서 (9,9)로 강화
+    kernel_open  = np.ones((5, 5), np.uint8)
+    kernel_close = np.ones((9, 9), np.uint8) 
 
     lo1, hi1 = np.array(cfg["hsv1"][0]), np.array(cfg["hsv1"][1])
     hsv_mask = cv2.inRange(hsv, lo1, hi1)
@@ -186,8 +184,8 @@ def make_mask(frame, hsv, color_name):
     bgr_mask = cv2.inRange(frame, np.array(cfg["bgr"][0]), np.array(cfg["bgr"][1]))
     mask = cv2.bitwise_and(hsv_mask, bgr_mask)
     
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close) # 닫기 연산 강화 적용
     return mask
 
 def decide_cmd(cam_v, cam_w, front_min):
@@ -252,19 +250,28 @@ try:
             cv2.imshow("frame", frame)
             
             if elapsed >= PARK_SEC:
-                print(f"✅ [{target}] 미션 시간 종료 -> 타겟 인덱스 상승")
+                print(f"✅ [{target}] 미션 오버 -> 상태 스위칭")
                 mission_index += 1
                 
                 if mission_index < len(MISSION):
                     flush_camera_buffer(n=15)         
                     state = "FORCED_SEARCH" 
                     search_start_time = time.time()  
-                    print(f"➡️  NEXT TARGET: [{MISSION[mission_index]}] 탐색 시퀀스 개시")
+                    last_seen_x = 160                 
+                    print(f"➡️  NEXT TARGET: [{MISSION[mission_index]}] 탐색 개시")
                 else:
                     print("🏁 모든 미션 클리어")
             
             if cv2.waitKey(1) & 0xFF == 27: break
             continue  
+
+        # ── [★ 변경: APPROACH 상태 내부 강제 타임아웃 확인 안전장치] ──
+        if state == "APPROACH" and approach_start_time is not None:
+            if time.time() - approach_start_time > APPROACH_MAX_TIMEOUT:
+                print(f"🚨 [안전장치 트리거] APPROACH 상태 {APPROACH_MAX_TIMEOUT}초 경과! 강제 PARKING 전환.")
+                state      = "PARKING"
+                park_start = time.time()
+                continue  # 다음 루프 최상단 주차 레이어로 바로 이행
 
         # 주행 연산 레이어
         mask = make_mask(frame, hsv, target)
@@ -278,8 +285,11 @@ try:
             c    = max(contours, key=cv2.contourArea)
             area = cv2.contourArea(c)
 
-            # ★ [핵심 기능 1]: 탐색 중에 목표 색상이 아주 조금이라도(GLIMPSE_MIN_AREA 이상) 잡힌 경우
-            if area > GLIMPSE_MIN_AREA:
+            if area > MIN_AREA:
+                if state in ["FORCED_SEARCH", "WANDERING", "SEARCH"]:
+                    state = "TRACK"
+                    print(f"🎯 [{target}] 포착 -> TRACK 모드 체인지")
+
                 rect = cv2.minAreaRect(c)
                 (cx, cy), _, _ = rect
                 cx, cy = int(cx), int(cy)
@@ -289,87 +299,64 @@ try:
                 cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)
                 error_x = cx - frame_cx
 
-                # 아직 확실하게 정중앙 조준이 안 되었거나 면적이 작은 상태라면
-                if state in ["FORCED_SEARCH", "WANDERING", "SEARCH"] or area < TRACK_MIN_AREA:
-                    # 일단 직진 속도를 0으로 하여 그 자리에 스냅 정지(SNAP STOP)
-                    cam_v = 0.0 
-                    # 목표물이 있는 방향으로 미세 조향 회전축 가동 (중앙정렬 유도)
-                    cam_w = -0.45 if error_x > 0 else 0.45
-                    cam_state = "SNAP STOP & ALIGN"
-                    
-                    # 만약 화면 오차가 좁혀지고 면적도 충분히 커졌다면 정식 추적(TRACK)으로 완전 전환
-                    if abs(error_x) < X_TOL and area >= TRACK_MIN_AREA:
-                        state = "TRACK"
-                        print(f"🎯 [{target}] 정밀 조준 완료 -> TRACK 모드 전환")
-                
-                # 정식 추적 모드 및 접근 모드 구역
+                # APPROACH 진입 판정
+                if state == "APPROACH" or (area > TARGET_AREA and state == "TRACK"):
+                    if state != "APPROACH":
+                        state = "APPROACH"
+                        approach_start_time = time.time() # 타임아웃 기점 저장
+                        print(f"📥 [{target}] 내부 진입 (Area 크기 만족: {int(area)})")
+
+                    cam_w = -KP_ROT * error_x * 0.5 
+                    cam_v = 0.12  
+                    cam_state = "APPROACH"
+
+                    # 면적 만족으로 정상 정지하는 기본 조건문
+                    if area > 25000: 
+                        state      = "PARKING"
+                        park_start = time.time()
+                        print(f"🅿️  [{target}] 내부 면적 포화 정지 완료")
                 else:
-                    if state == "APPROACH" or (area > TARGET_AREA and state == "TRACK"):
-                        if state != "APPROACH":
-                            state = "APPROACH"
-                            approach_start_time = time.time()
-                            print(f"📥 [{target}] 내부 진입 (Area 크기 만족: {int(area)})")
-
-                        cam_w = -KP_ROT * error_x * 0.5 
-                        cam_v = 0.12  
-                        cam_state = "APPROACH"
-
-                        if area > 25000: 
-                            state      = "PARKING"
-                            park_start = time.time()
-                            print(f"🅿️  [{target}] 내부 면적 포화 정지")
-                    else:
-                        cam_w     = -KP_ROT * error_x
-                        rem_area  = max(0.0, TARGET_AREA - area)
-                        cam_v     = MIN_V + (MAX_V - MIN_V) * (rem_area / TARGET_AREA)
-                        cam_v     = np.clip(cam_v, MIN_V, MAX_V)
-                        cam_state = "TRACK"
+                    cam_w     = -KP_ROT * error_x
+                    rem_area  = max(0.0, TARGET_AREA - area)
+                    cam_v     = MIN_V + (MAX_V - MIN_V) * (rem_area / TARGET_AREA)
+                    cam_v     = np.clip(cam_v, MIN_V, MAX_V)
+                    cam_state = "TRACK"
 
                 cv2.putText(frame, f"Area: {int(area)}", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             else:
-                # 노이즈 수준의 극소 면적은 탐색 제어 유지
                 if state in ["FORCED_SEARCH", "WANDERING"]: pass
                 else: cam_v, cam_w = 0.0, 0.0
         
-        # ── [객체 유실 구역 - 광대역 선회 탐색] ──
+        # ── [객체 유실 구역] ──────────────────────
         else:
             if state == "APPROACH":
                 cam_v, cam_w = 0.12, 0.0  
                 cam_state    = "APPROACH_BLIND"
+
                 if time.time() - approach_start_time > APPROACH_DRIVE_SEC:
                     state      = "PARKING"
                     park_start = time.time()
                     print(f"🅿️  [{target}] 사각지대 시간 완료 -> 주차 가동")
 
-            # 1단계: 미션 전환 직후 제자리 초고속 회전 스캔 (3.5초간)
             elif state == "FORCED_SEARCH":
-                elapsed_search = time.time() - search_start_time
-                if elapsed_search > SEARCH_TIMEOUT:
+                if time.time() - search_start_time > SEARCH_TIMEOUT:
                     state = "WANDERING"
-                    print(f"⚠️ 1단계 실패 -> 2단계: 광대역 순항 탐색(WANDERING) 돌입")
+                    print(f"⚠️ 타임아웃 -> 맵 전체 탐색(WANDERING) 기동")
+                    cam_v, cam_w = 0.20, 0.0  
                 else:
-                    search_dir = -HIGH_TURN_W if last_seen_x > frame_cx else HIGH_TURN_W
-                    cam_v, cam_w = 0.03, search_dir  
-                    cam_state    = f"F_SEARCH ({SEARCH_TIMEOUT - elapsed_search:.1f}s)"
+                    cam_v, cam_w = 0.0, 0.75  
             
-            # 2단계: 선회 반경을 대폭 넓혀 운동장 크게 돌듯이 맵 순항
             elif state == "WANDERING":
-                # 높은 전진 속도(WANDERING_V)와 부드러운 회전(WANDERING_W)으로 큰 타원을 그리며 사각지대 제거
-                # 벽을 만나면 하단 라이다가 튕겨내 주어 자동 순항맵 청소기 모드 작동
-                cruise_dir = -WANDERING_W if last_seen_x > frame_cx else WANDERING_W
-                cam_v = WANDERING_V
-                cam_w = cruise_dir
-                cam_state = "WANDERING (WIDE CRUISE)"
+                cam_v, cam_w = 0.20, 0.0  
                 
             else:
                 cam_state = "SEARCH LEFT" if last_seen_x <= frame_cx else "SEARCH RIGHT"
-                cam_v, cam_w = (0.03, -HIGH_TURN_W) if last_seen_x > frame_cx else (0.03, HIGH_TURN_W)
+                cam_v, cam_w = (0.02, -0.55) if last_seen_x > frame_cx else (0.02,  0.55)
 
         # ── [라이다 제어 분기 및 명령 최종 전달] ──────────────────
         if state in ["APPROACH", "APPROACH_BLIND", "PARKING"]:
             final_v, final_w = cam_v, cam_w
         else:
-            # WANDERING 상태로 크게 돌다가 벽을 만나면 라이다가 안전하게 튕겨내 선회를 유지해 줌
             final_v, final_w, _ = decide_cmd(cam_v, cam_w, front_min)
             
         send_cmd(final_v, final_w)
