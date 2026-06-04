@@ -1,101 +1,111 @@
 """
-Pure Pursuit Controller — 차동구동(Differential Drive) 버전
-============================================================
-조향각 대신 좌/우 모터 속도 비율을 출력합니다.
+Pure Pursuit Controller — 차동구동 버전
+========================================
+실제 파라미터:
+  바퀴 반지름 = 0.034 m  →  둘레 ≈ 0.2136 m
+  트랙 폭(좌우 간격) = 실측 필요 (기본 0.18 m)
+
+출력: 좌/우 모터 속도 (m/s) + 등가 조향각 (도, HUD용)
 
 Reference: arXiv:2507.12449 §II-B2
 """
 
 import logging
+import math
 import numpy as np
 
 log = logging.getLogger("pure_pursuit")
 
+WHEEL_RADIUS = 0.034
+WHEEL_CIRC   = 2 * math.pi * WHEEL_RADIUS   # ≈ 0.2136 m/rev
+
 
 class PurePursuitController:
     def __init__(self, cfg: dict):
-        self.L           = cfg["wheelbase"]        # 좌우 바퀴 간격 (m) — 트랙 폭
-        self.ld          = cfg["lookahead_dist"]   # 전방 주시 거리 (m)
-        self.max_steer   = np.radians(cfg["max_steer_deg"])
-        self.cruise_spd  = cfg["cruise_speed"]
-        self.avoid_spd   = cfg["avoidance_speed"]
+        # 트랙 폭 (좌우 바퀴 간격) — wheelbase 키 재활용
+        self.track_width = cfg["wheelbase"]
+        self.ld          = cfg["lookahead_dist"]
+        self.max_steer   = math.radians(cfg["max_steer_deg"])
 
+    # ──────────────────────────────────────────────────
     def compute(self,
-                pos: np.ndarray,    # (2,) 차량 위치 (vehicle frame)
+                pos: np.ndarray,    # (2,) 차량 위치
                 yaw: float,         # 헤딩 (rad)
                 path: np.ndarray,   # (N,2) 계획 경로
-                base_speed: float,  # m/s 기본 속도
+                base_speed: float,  # m/s 기준 속도
                 ) -> tuple[float, float, np.ndarray | None]:
         """
         Returns
         -------
-        speed_left  : float   왼쪽 모터 명령 속도 (m/s)
-        speed_right : float   오른쪽 모터 명령 속도 (m/s)
-        target_pt   : (2,)    룩어헤드 포인트 (시각화용)
+        v_left   : float  왼쪽 바퀴 속도 (m/s)
+        v_right  : float  오른쪽 바퀴 속도 (m/s)
+        target   : (2,)   룩어헤드 포인트
         """
         target = self._find_lookahead(pos, path)
         if target is None:
             return 0.0, 0.0, None
 
-        # ── 목표점을 차량 로컬 프레임으로 변환 ────────
-        dx = target[0] - pos[0]
-        dy = target[1] - pos[1]
-        # -yaw 회전
-        tx =  dx * np.cos(-yaw) - dy * np.sin(-yaw)
-        ty =  dx * np.sin(-yaw) + dy * np.cos(-yaw)
+        # 목표점 → 차량 로컬 프레임
+        dx =  (target[0] - pos[0]) * math.cos(-yaw) \
+            - (target[1] - pos[1]) * math.sin(-yaw)
+        dy =  (target[0] - pos[0]) * math.sin(-yaw) \
+            + (target[1] - pos[1]) * math.cos(-yaw)
 
-        # ── Pure Pursuit 조향각 계산 ───────────────────
-        ld_actual = max(np.hypot(tx, ty), 1e-3)
-        alpha     = np.arctan2(ty, tx)
-        # δ = arctan(2·L·sin(α) / ld)
-        steer = np.arctan2(2.0 * self.L * np.sin(alpha), ld_actual)
-        steer = float(np.clip(steer, -self.max_steer, self.max_steer))
+        # Pure Pursuit 조향각
+        ld_actual = max(math.hypot(dx, dy), 1e-3)
+        alpha     = math.atan2(dy, dx)
+        steer     = math.atan2(2.0 * self.track_width * math.sin(alpha),
+                               ld_actual)
+        steer     = max(-self.max_steer, min(self.max_steer, steer))
 
-        # ── 차동구동 속도 믹싱 ─────────────────────────
-        # 곡률 ρ = tan(δ) / L
-        # vL = v·(1 - L·ρ/2),  vR = v·(1 + L·ρ/2)
-        curvature = np.tan(steer) / max(self.L, 1e-3)
-        half_LK   = 0.5 * self.L * curvature
+        # 차동구동 속도 계산
+        # 각속도 ω = v * tan(δ) / L
+        omega   = base_speed * math.tan(steer) / max(self.track_width, 1e-3)
+        v_left  = base_speed - omega * self.track_width / 2.0
+        v_right = base_speed + omega * self.track_width / 2.0
 
-        v_left  = base_speed * (1.0 - half_LK)
-        v_right = base_speed * (1.0 + half_LK)
-
-        # ── 최대 속도 정규화 ───────────────────────────
+        # 최대 속도 정규화
         max_v = max(abs(v_left), abs(v_right), 1e-6)
-        if max_v > base_speed:
-            v_left  *= base_speed / max_v
-            v_right *= base_speed / max_v
+        if max_v > abs(base_speed) and abs(base_speed) > 0:
+            scale   = abs(base_speed) / max_v
+            v_left  *= scale
+            v_right *= scale
 
-        steer_deg = float(np.degrees(steer))
-        log.debug(f"PP steer={steer_deg:.1f}° "
-                  f"vL={v_left:.3f} vR={v_right:.3f}")
+        log.debug(f"PP α={math.degrees(alpha):.1f}° δ={math.degrees(steer):.1f}°"
+                  f" vL={v_left:.3f} vR={v_right:.3f}")
 
         return float(v_left), float(v_right), target
 
-    # ── 하위 호환용 래퍼 (main.py의 steer_deg 인터페이스 유지) ──
+    # ── HUD 표시용 등가 조향각만 반환 ─────────────────
     def compute_steering(self,
                          pos, yaw, path
                          ) -> tuple[float, np.ndarray | None]:
-        """steer_deg와 target만 반환 (main.py HUD 표시용)."""
         target = self._find_lookahead(pos, path)
         if target is None:
             return 0.0, None
 
-        dx = target[0] - pos[0]
-        dy = target[1] - pos[1]
-        tx =  dx * np.cos(-yaw) - dy * np.sin(-yaw)
-        ty =  dx * np.sin(-yaw) + dy * np.cos(-yaw)
+        dx =  (target[0] - pos[0]) * math.cos(-yaw) \
+            - (target[1] - pos[1]) * math.sin(-yaw)
+        dy =  (target[0] - pos[0]) * math.sin(-yaw) \
+            + (target[1] - pos[1]) * math.cos(-yaw)
 
-        ld_actual = max(np.hypot(tx, ty), 1e-3)
-        alpha     = np.arctan2(ty, tx)
-        steer     = np.arctan2(2.0 * self.L * np.sin(alpha), ld_actual)
-        steer     = float(np.clip(steer, -self.max_steer, self.max_steer))
-        return float(np.degrees(steer)), target
+        ld_actual = max(math.hypot(dx, dy), 1e-3)
+        alpha     = math.atan2(dy, dx)
+
+        # track_width 대신 등가 축거로 조향각 계산 (Pure Pursuit 원식)
+        steer = math.atan2(2.0 * self.track_width * math.sin(alpha), ld_actual)
+        steer = max(-self.max_steer, min(self.max_steer, steer))
+        return float(math.degrees(steer)), target
 
     # ──────────────────────────────────────────────────
     def _find_lookahead(self, pos, path):
-        """룩어헤드 거리 이상의 첫 번째 경로점 반환."""
         for pt in path:
             if np.linalg.norm(pt - pos) >= self.ld:
                 return pt
         return path[-1] if len(path) else None
+
+    # ── 유틸: m/s → RPM 변환 (arduino_comm 없이도 사용) ─
+    @staticmethod
+    def mps_to_rpm(v_ms: float, max_rpm: int = 150) -> int:
+        rpm = (v_ms / WHEEL_CIRC) * 60.0
+        return int(max(-max_rpm, min(max_rpm, rpm)))

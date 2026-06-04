@@ -1,192 +1,247 @@
 /*
  * Arduino UNO R4 Minima — Differential Drive Controller
  * ======================================================
- * 차동구동 방식: 좌/우 L298N 2개로 방향 전환
+ * 실제 핀 배선 기반으로 작성
  *
- * Serial 수신 (from Raspberry Pi 4B):
- *   <SPEED:±0.00,STEER:±00.0>\n
- *   SPEED: m/s (양수=전진, 음수=후진)
- *   STEER: 도  (양수=좌회전, 음수=우회전)
+ * ── 핀 배선 ──────────────────────────────────────────
+ *   오른쪽 모터:  PWM=D9,  DIR1=D10, DIR2=D11
+ *   왼쪽  모터:  PWM=D6,  DIR1=D7,  DIR2=D8
+ *   오른쪽 엔코더: D2 (인터럽트 0)
+ *   왼쪽  엔코더: D3 (인터럽트 1)
  *
- * Serial 송신 (to Raspberry Pi):
- *   <LENC:1234,RENC:1234>\n
+ * ── Raspberry Pi → Arduino 수신 프로토콜 ──────────────
+ *   RPM 모드:      "LEFT_RPM,RIGHT_RPM\n"   예) "80,80\n"
+ *   거리 모드:     "0.5\n"                   예) "0.5\n" (단위: m)
+ *   긴급 정지:     "0,0\n"
  *
- * 배선:
- * ┌─────────────────────────────────────────────────┐
- * │  왼쪽 L298N                                      │
- * │    IN1 → D2   IN2 → D3   ENA → D5(PWM)          │
- * │  오른쪽 L298N                                    │
- * │    IN3 → D4   IN4 → D7   ENB → D6(PWM)          │
- * │  왼쪽 엔코더 A → D8  (인터럽트 폴링)            │
- * │  오른쪽 엔코더 A → D9  (인터럽트 폴링)          │
- * └─────────────────────────────────────────────────┘
+ * ── Arduino → Raspberry Pi 송신 ───────────────────────
+ *   "<LENC:1234,RENC:5678>\n"   (100ms 주기)
  *
- * ※ 레벨 컨버터(LV=3.3V, HV=5V) 통해 Pi GPIO 연결
- * ※ L298N VCC(12V) → 배터리 12V 직결
- * ※ L298N 5V핀 → Arduino 5V 공급 가능 (점퍼 확인)
+ * ── 물리 파라미터 ─────────────────────────────────────
+ *   PPR_R = 492.5  (오른쪽 엔코더 펄스/회전)
+ *   PPR_L = 493.0  (왼쪽  엔코더 펄스/회전)
+ *   바퀴 반지름 = 34mm
+ *
+ * ── 버그 수정 ─────────────────────────────────────────
+ *   원본 driveRPM()에서 PWPin_r → PWMPin_r 수정
  */
 
-// ── 핀 정의 ──────────────────────────────────────────
-// 왼쪽 모터 (L298N #1)
-const int L_IN1 = 2;
-const int L_IN2 = 3;
-const int L_ENA = 5;   // PWM
+// =========================
+// MOTOR PINS
+// =========================
+const byte PWMPin_r  = 9;
+const byte DirPin1_r = 10;
+const byte DirPin2_r = 11;
 
-// 오른쪽 모터 (L298N #2)
-const int R_IN3 = 4;
-const int R_IN4 = 7;
-const int R_ENB = 6;   // PWM
+const byte PWMPin_l  = 6;
+const byte DirPin1_l = 7;
+const byte DirPin2_l = 8;
 
-// 엔코더 (없으면 무시)
-const int ENC_L = 8;
-const int ENC_R = 9;
+// =========================
+// ENCODER PINS
+// =========================
+const byte ENC_R = 2;   // 인터럽트 0
+const byte ENC_L = 3;   // 인터럽트 1
 
-// ── 파라미터 ──────────────────────────────────────────
-const float MAX_SPEED_MS  = 1.0;    // m/s 풀스케일
-const int   PWM_MAX       = 200;    // 하드웨어 보호용 상한
-const float MAX_STEER_DEG = 30.0;   // 최대 조향각
-// 차동 조향 믹싱 계수: 속도 차이 = steer_ratio * steer_deg
-const float STEER_RATIO   = 0.03;   // 실측 후 조정
+volatile long encoder_r = 0;
+volatile long encoder_l = 0;
 
-const unsigned long TIMEOUT_MS = 500;  // 통신 끊기면 정지
+// =========================
+// PHYSICAL PARAMETERS
+// =========================
+const float PPR_R      = 492.5;          // 오른쪽 엔코더 펄스/회전
+const float PPR_L      = 493.0;          // 왼쪽  엔코더 펄스/회전
+const float WHEEL_R    = 0.034;          // 바퀴 반지름 (m)
+const float WHEEL_CIRC = 2.0 * PI * WHEEL_R;  // 바퀴 둘레 (m) ≈ 0.2136m
 
-// ── 상태 변수 ─────────────────────────────────────────
-float cmdSpeed = 0.0;
-float cmdSteer = 0.0;
+// =========================
+// CONTROL PARAMETERS
+// =========================
+const int   MAX_RPM      = 150;    // driveRPM() 입력 최대값
+const int   PWM_MAX      = 255;    // PWM 상한 (필요시 200으로 낮춤)
+const int   PWM_MIN_MOVE = 50;     // 정지 판정 하한
+const float STRAIGHT_KP  = 200.0; // 직진 보정 gain (거리 모드)
+
+// =========================
+// TIMEOUT
+// =========================
+const unsigned long TIMEOUT_MS = 500;  // 통신 끊기면 자동 정지
+
+// =========================
+// MODE
+// =========================
+enum Mode { IDLE, RPM_MODE, DISTANCE_MODE };
+Mode mode = IDLE;
+
+// =========================
+// DISTANCE CONTROL STATE
+// =========================
+float target_distance = 0.0;
+bool  moving          = false;
+
+// =========================
+// RPM CONTROL STATE
+// =========================
+int cmd_rpm_l = 0;
+int cmd_rpm_r = 0;
+
 unsigned long lastCmdMs = 0;
 
-volatile long encL = 0;
-volatile long encR = 0;
+// =========================
+// ENCODER ISR
+// =========================
+void encoderISR_r() { encoder_r++; }
+void encoderISR_l() { encoder_l++; }
 
-// ── 인터럽트 핸들러 ───────────────────────────────────
-void isrEncL() { encL++; }
-void isrEncR() { encR++; }
-
-// ─────────────────────────────────────────────────────
+// =========================
+// SETUP
+// =========================
 void setup() {
   Serial.begin(115200);
 
-  pinMode(L_IN1, OUTPUT); pinMode(L_IN2, OUTPUT); pinMode(L_ENA, OUTPUT);
-  pinMode(R_IN3, OUTPUT); pinMode(R_IN4, OUTPUT); pinMode(R_ENB, OUTPUT);
+  pinMode(PWMPin_r,  OUTPUT);
+  pinMode(DirPin1_r, OUTPUT);
+  pinMode(DirPin2_r, OUTPUT);
 
-  // 엔코더 핀 (없어도 동작함)
-  pinMode(ENC_L, INPUT_PULLUP);
+  pinMode(PWMPin_l,  OUTPUT);
+  pinMode(DirPin1_l, OUTPUT);
+  pinMode(DirPin2_l, OUTPUT);
+
   pinMode(ENC_R, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(ENC_L), isrEncL, RISING);
-  attachInterrupt(digitalPinToInterrupt(ENC_R), isrEncR, RISING);
+  pinMode(ENC_L, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(ENC_R), encoderISR_r, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENC_L), encoderISR_l, RISING);
 
   stopMotors();
   Serial.println("<READY>");
 }
 
+// =========================
+// MAIN LOOP
+// =========================
 void loop() {
-  // ── 시리얼 수신 ────────────────────────────────────
+
+  // ── 시리얼 수신 ──────────────────────────────────
   if (Serial.available()) {
-    String msg = Serial.readStringUntil('\n');
-    msg.trim();
-    if (msg.startsWith("<") && msg.endsWith(">")) {
-      parseCommand(msg);
-      lastCmdMs = millis();
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+
+    if (cmd.length() == 0) goto feedback;
+
+    // RPM 모드: "LEFT,RIGHT"  예) "80,80"  또는  "0,0"
+    if (cmd.indexOf(',') >= 0) {
+      int idx       = cmd.indexOf(',');
+      cmd_rpm_l     = constrain(cmd.substring(0, idx).toInt(),     -MAX_RPM, MAX_RPM);
+      cmd_rpm_r     = constrain(cmd.substring(idx + 1).toInt(),    -MAX_RPM, MAX_RPM);
+      mode          = RPM_MODE;
+      lastCmdMs     = millis();
+      driveRPM(cmd_rpm_l, cmd_rpm_r);
+    }
+    // 거리 모드: "0.5"
+    else {
+      float dist = cmd.toFloat();
+      if (dist > 0.0) {
+        target_distance = dist;
+        encoder_r = 0;
+        encoder_l = 0;
+        moving    = true;
+        mode      = DISTANCE_MODE;
+        lastCmdMs = millis();
+      }
     }
   }
 
-  // ── 타임아웃 안전 정지 ─────────────────────────────
+  // ── 타임아웃 안전 정지 ───────────────────────────
   if (millis() - lastCmdMs > TIMEOUT_MS) {
-    cmdSpeed = 0.0;
-    cmdSteer = 0.0;
+    if (mode == RPM_MODE) {
+      stopMotors();
+      mode = IDLE;
+    }
   }
 
-  // ── 차동 구동 믹싱 적용 ────────────────────────────
-  applyDifferentialDrive(cmdSpeed, cmdSteer);
+  // ── 거리 제어 루프 ───────────────────────────────
+  if (mode == DISTANCE_MODE && moving) {
+    distanceControl();
+  }
 
-  // ── 피드백 전송 (100ms 주기) ───────────────────────
+  // ── 엔코더 피드백 송신 (100ms) ───────────────────
+  feedback:
   static unsigned long lastFbMs = 0;
   if (millis() - lastFbMs >= 100) {
     Serial.print("<LENC:");
-    Serial.print(encL);
+    Serial.print(encoder_l);
     Serial.print(",RENC:");
-    Serial.print(encR);
+    Serial.print(encoder_r);
     Serial.println(">");
     lastFbMs = millis();
   }
 }
 
-// ─────────────────────────────────────────────────────
-// 커맨드 파싱: <SPEED:±0.00,STEER:±00.0>
-// ─────────────────────────────────────────────────────
-void parseCommand(String msg) {
-  msg = msg.substring(1, msg.length() - 1);  // < > 제거
+// =========================
+// RPM CONTROL
+// RPM 입력 범위: -MAX_RPM ~ +MAX_RPM
+// 음수 = 후진
+// =========================
+void driveRPM(int left_rpm, int right_rpm) {
+  int pwm_l = map(abs(left_rpm),  0, MAX_RPM, 0, PWM_MAX);
+  int pwm_r = map(abs(right_rpm), 0, MAX_RPM, 0, PWM_MAX);
 
-  int commaIdx = msg.indexOf(',');
-  if (commaIdx < 0) return;
+  pwm_l = constrain(pwm_l, 0, PWM_MAX);
+  pwm_r = constrain(pwm_r, 0, PWM_MAX);
 
-  String speedPart = msg.substring(0, commaIdx);
-  String steerPart = msg.substring(commaIdx + 1);
-
-  int si = speedPart.indexOf(':');
-  int ti = steerPart.indexOf(':');
-  if (si < 0 || ti < 0) return;
-
-  cmdSpeed = constrain(speedPart.substring(si + 1).toFloat(),
-                       -MAX_SPEED_MS, MAX_SPEED_MS);
-  cmdSteer = constrain(steerPart.substring(ti + 1).toFloat(),
-                       -MAX_STEER_DEG, MAX_STEER_DEG);
+  setMotor(PWMPin_l, DirPin1_l, DirPin2_l, pwm_l, left_rpm  >= 0);
+  setMotor(PWMPin_r, DirPin1_r, DirPin2_r, pwm_r, right_rpm >= 0);
 }
 
-// ─────────────────────────────────────────────────────
-// 차동 구동 믹싱
-//   steer > 0 → 좌회전: 오른쪽 빠르게, 왼쪽 느리게
-//   steer < 0 → 우회전: 왼쪽 빠르게, 오른쪽 느리게
-// ─────────────────────────────────────────────────────
-void applyDifferentialDrive(float speed, float steerDeg) {
-  // 정규화 (−1.0 ~ +1.0)
-  float v = speed / MAX_SPEED_MS;
-  float s = steerDeg / MAX_STEER_DEG;  // −1=우 ~ +1=좌
+// =========================
+// DISTANCE CONTROL
+// 엔코더 기반 직진 + 보정
+// =========================
+void distanceControl() {
+  float dist_r = (encoder_r / PPR_R) * WHEEL_CIRC;
+  float dist_l = (encoder_l / PPR_L) * WHEEL_CIRC;
+  float current = (dist_r + dist_l) / 2.0;
+  float error   = target_distance - current;
 
-  // 좌우 속도 계산
-  float vL = v - s * abs(v);   // 좌회전이면 왼쪽 감속
-  float vR = v + s * abs(v);   // 좌회전이면 오른쪽 가속
-
-  // 클램프 (−1 ~ +1)
-  vL = constrain(vL, -1.0, 1.0);
-  vR = constrain(vR, -1.0, 1.0);
-
-  // PWM 변환 및 출력
-  driveMotorL(vL);
-  driveMotorR(vR);
-}
-
-// ─────────────────────────────────────────────────────
-void driveMotorL(float v) {
-  int pwm = (int)(abs(v) * PWM_MAX);
-  pwm = constrain(pwm, 0, PWM_MAX);
-
-  if (v > 0.02) {
-    digitalWrite(L_IN1, HIGH); digitalWrite(L_IN2, LOW);
-  } else if (v < -0.02) {
-    digitalWrite(L_IN1, LOW);  digitalWrite(L_IN2, HIGH);
-  } else {
-    digitalWrite(L_IN1, LOW);  digitalWrite(L_IN2, LOW);
-    pwm = 0;
+  if (error <= 0.002) {   // 2mm 이내면 도착
+    stopMotors();
+    moving = false;
+    mode   = IDLE;
+    Serial.println("<DONE>");
+    return;
   }
-  analogWrite(L_ENA, pwm);
+
+  // 속도 비례 감속 (원본 로직 유지)
+  int pwm = 120 + (int)(135.0 * (error / target_distance));
+
+  // 좌우 거리 차이 보정
+  float diff       = dist_r - dist_l;
+  int   correction = (int)(diff * STRAIGHT_KP);
+
+  int pwm_r = constrain(pwm - correction, PWM_MIN_MOVE, PWM_MAX);
+  int pwm_l = constrain(pwm + correction, PWM_MIN_MOVE, PWM_MAX);
+
+  setMotor(PWMPin_r, DirPin1_r, DirPin2_r, pwm_r, true);
+  setMotor(PWMPin_l, DirPin1_l, DirPin2_l, pwm_l, true);
 }
 
-void driveMotorR(float v) {
-  int pwm = (int)(abs(v) * PWM_MAX);
-  pwm = constrain(pwm, 0, PWM_MAX);
-
-  if (v > 0.02) {
-    digitalWrite(R_IN3, HIGH); digitalWrite(R_IN4, LOW);
-  } else if (v < -0.02) {
-    digitalWrite(R_IN3, LOW);  digitalWrite(R_IN4, HIGH);
-  } else {
-    digitalWrite(R_IN3, LOW);  digitalWrite(R_IN4, LOW);
-    pwm = 0;
-  }
-  analogWrite(R_ENB, pwm);
+// =========================
+// MOTOR DRIVER
+// forward=true → DIR1=HIGH, DIR2=LOW
+// forward=false → DIR1=LOW,  DIR2=HIGH
+// =========================
+void setMotor(byte pwmPin, byte dir1, byte dir2, int pwm, bool forward) {
+  digitalWrite(dir1, forward ? HIGH : LOW);
+  digitalWrite(dir2, forward ? LOW  : HIGH);
+  analogWrite(pwmPin, pwm);
 }
 
+// =========================
 void stopMotors() {
-  driveMotorL(0); driveMotorR(0);
+  analogWrite(PWMPin_r, 0);
+  analogWrite(PWMPin_l, 0);
+  // 브레이크: 둘 다 LOW
+  digitalWrite(DirPin1_r, LOW); digitalWrite(DirPin2_r, LOW);
+  digitalWrite(DirPin1_l, LOW); digitalWrite(DirPin2_l, LOW);
 }

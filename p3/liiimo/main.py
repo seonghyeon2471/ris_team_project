@@ -62,12 +62,13 @@ CFG = {
     "num_lateral_samples": 7,       # candidate paths
     "lookahead_s": 5.0,             # metres along reference path
     # Pure Pursuit
-    "lookahead_dist": 1.5,          # metres
-    "wheelbase": 0.18,              # metres — 좌우 바퀴 간격(트랙 폭), 실측 필요
+    "lookahead_dist": 0.6,          # metres (바퀴 둘레 0.214m의 약 3배)
+    "wheelbase": 0.18,              # metres — 좌우 바퀴 간격(트랙 폭) 실측 필요!
     "max_steer_deg": 30.0,
     # Speed control
-    "cruise_speed": 0.5,            # m/s
-    "avoidance_speed": 0.3,
+    # 물리 한계: max RPM=150 → max speed ≈ 150/60 * 0.2136 ≈ 0.53 m/s
+    "cruise_speed": 0.35,           # m/s  ≈ RPM 98
+    "avoidance_speed": 0.20,        # m/s  ≈ RPM 56
     # RPLIDAR
     "lidar_port": "/dev/ttyUSB1",
     "lidar_baudrate": 460800,
