@@ -25,12 +25,12 @@ except ImportError:
 
 
 # Minimum and maximum distances to consider (metres)
-MIN_DIST = 0.15
-MAX_DIST = 6.0
+MIN_DIST = 0.10
+MAX_DIST = 1.5
 
 # Field of view to consider (degrees) — front-facing ±90°
-FOV_MIN = -90
-FOV_MAX =  90
+FOV_MIN = -70
+FOV_MAX =  70
 
 
 class LidarFusion:
@@ -74,7 +74,7 @@ class LidarFusion:
             self._lidar = RPLidar(self.port, baudrate=self.baudrate)
             self._lidar.start_motor()
 
-            for scan in self._lidar.iter_scans(max_buf_meas=500):
+            for scan in self._lidar.iter_scans(max_buf_meas=3000):
                 if not self._running:
                     break
                 obs = self._process_scan(scan)
@@ -96,16 +96,23 @@ class LidarFusion:
         """
         obstacles = []
         for quality, angle_deg, dist_mm in scan:
-            if quality < 5:
+
+            # 품질 낮은 포인트 제거
+            if quality < 10:
                 continue
+
             dist_m = dist_mm / 1000.0
+
+            # 1.5m 이상은 무시
+            if dist_m > 1.5:
+                continue
+
             if not (MIN_DIST <= dist_m <= MAX_DIST):
                 continue
 
-            # Normalise angle to [-180, 180)
             angle = (angle_deg + 180) % 360 - 180
 
-            # Only consider front FOV
+            # 전방 180도만 사용
             if not (FOV_MIN <= angle <= FOV_MAX):
                 continue
 
