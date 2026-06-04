@@ -70,11 +70,11 @@ CFG = {
     "cruise_speed": 0.35,           # m/s  ≈ RPM 98
     "avoidance_speed": 0.20,        # m/s  ≈ RPM 56
     # RPLIDAR
-    "lidar_port": "/dev/ttyUSB1",
+    "lidar_port": "/dev/ttyUSB0",
     "lidar_baudrate": 460800,
     "lidar_use": True,
     # Arduino serial
-    "arduino_port": "/dev/ttyUSB0",
+    "arduino_port": "/dev/serial0",
     "arduino_baud": 115200,
     # Display
     "show_viz": True,
