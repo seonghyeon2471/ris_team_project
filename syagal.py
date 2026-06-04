@@ -55,9 +55,11 @@ MIN_AREA    = 900       # ★ 모폴로지 제거로 인한 잔돌 노이즈 필
 TARGET_AREA = 13000     
 PARK_SEC    = 3.0       
 
-APPROACH_DRIVE_SEC = 1.2  
-SEARCH_TIMEOUT = 2.2    
-APPROACH_MAX_TIMEOUT = 2.0   
+APPROACH_DRIVE_SEC   = 1.5   # 0.2초 여유 추가
+SEARCH_TIMEOUT       = 2.2    
+APPROACH_MAX_TIMEOUT = 4.0   # ★ 2.0 → 4.0 (핵심 수정)
+APPROACH_V           = 0.22  # ★ 신규 — APPROACH 전용 속도 상수
+PARK_AREA            = 18000 # ★ 신규 — PARKING 진입 면적 기준 (24000 → 18000)
 
 # =========================================
 # 색상별 HSV 범위
@@ -264,13 +266,17 @@ try:
                         print(f"📥 [{target}] 강제 돌격 (Area 만족: {int(area)})")
 
                     cam_w = -KP_ROT * error_x * 0.5 
-                    cam_v = 0.12  
+                    cam_v = APPROACH_V    # ★ 0.12 → 0.22
                     cam_state = "APPROACH"
 
-                    if area > 24000: 
+                    if area > PARK_AREA:  # ★ 24000 → 18000 (PARK_AREA 상수 사용)
                         state      = "PARKING"
                         park_start = time.time()
-                        print(f"🅿️  [{target}] 내부 포화 정상 정지 완료")
+                        print(f"🅿️  [{target}] 면적 기반 정상 정지 (area={int(area)})")
+
+                    # APPROACH 상태 진입 시 출력
+                    if state == "APPROACH":
+                        print(f"[APPROACH] area={int(area):6d}  target={PARK_AREA}  elapsed={time.time()-approach_start_time:.2f}s")
                 else:
                     cam_w     = -KP_ROT * error_x
                     rem_area  = max(0.0, TARGET_AREA - area)
