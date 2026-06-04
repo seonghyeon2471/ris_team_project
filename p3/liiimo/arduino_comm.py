@@ -1,14 +1,10 @@
 """
-Arduino R4 Minima — Serial 통신 모듈
-=====================================
-송신 프로토콜 (RPM 모드):   "LEFT_RPM,RIGHT_RPM\n"   예) "80,80\n"
-송신 프로토콜 (거리 모드):  "0.5\n"
-수신 피드백:               "<LENC:1234,RENC:5678>\n"
-
-물리 파라미터:
-  PPR_R = 492.5,  PPR_L = 493.0  (엔코더 펄스/회전)
-  바퀴 반지름 = 0.034 m
-  최대 RPM = 150
+Arduino R4 Minima — Serial 통신 모듈 (개선 버전)
+=================================================
+- R4 Minima 시리얼 연결 안정성 강화
+- dsrdtr=False 적용으로 불필요한 리셋 방지
+- READY 메시지 대기 로직 개선
+- 연결 후 자동 테스트 명령 전송
 """
 
 import logging
@@ -19,16 +15,16 @@ import serial
 log = logging.getLogger("arduino")
 
 # ── 차량 물리 파라미터 ────────────────────────────────
-WHEEL_RADIUS  = 0.034          # m
-WHEEL_CIRC    = 2 * math.pi * WHEEL_RADIUS  # ≈ 0.2136 m/rev
-TRACK_WIDTH   = 0.17           # m  좌우 바퀴 간격 — 실측 후 수정!
-MAX_RPM       = 150            # Arduino 최대 RPM 입력값
+WHEEL_RADIUS  = 0.034
+WHEEL_CIRC    = 2 * math.pi * WHEEL_RADIUS
+TRACK_WIDTH   = 0.18           # 실제 로봇 바퀴 간 거리 실측 필요
+MAX_RPM       = 150
 
-# m/s → RPM 변환:  RPM = (v / WHEEL_CIRC) * 60
+
 def mps_to_rpm(v_ms: float) -> int:
     return int((v_ms / WHEEL_CIRC) * 60.0)
 
-# RPM → m/s 변환
+
 def rpm_to_mps(rpm: int) -> float:
     return (rpm / 60.0) * WHEEL_CIRC
 
@@ -38,44 +34,64 @@ class ArduinoComm:
         self.port      = port
         self.baudrate  = baudrate
         self._ser      = None
-        self._last_l   = 9999   # 강제 첫 전송
+        self._last_l   = 9999
         self._last_r   = 9999
         self.enc_left  = 0
         self.enc_right = 0
 
     # ──────────────────────────────────────────────────
     def connect(self):
+        """R4 Minima와의 시리얼 연결 (안정성 강화 버전)"""
         try:
             self._ser = serial.Serial(
                 self.port,
                 baudrate=self.baudrate,
                 timeout=0.1,
+                dsrdtr=False,      # R4 Minima 리셋 방지
+                rtscts=False
             )
-            time.sleep(2.0)   # R4 Minima 리셋 대기
-            # READY 수신 대기
-            deadline = time.time() + 5.0
+            time.sleep(2.5)        # 리셋 + 안정화 대기
+
+            # 버퍼 초기화
+            self._ser.reset_input_buffer()
+            self._ser.reset_output_buffer()
+
+            # READY 대기 (최대 6초)
+            deadline = time.time() + 6.0
+            got_ready = False
+
             while time.time() < deadline:
-                line = self._ser.readline().decode("ascii", errors="ignore").strip()
-                if "<READY>" in line:
-                    log.info(f"Arduino 연결 완료: {self.port}")
-                    return
-            log.warning("Arduino READY 응답 없음 — 계속 진행")
+                if self._ser.in_waiting:
+                    line = self._ser.readline().decode("ascii", errors="ignore").strip()
+                    if "<READY>" in line:
+                        log.info(f"Arduino 연결 완료: {self.port}")
+                        got_ready = True
+                        break
+                time.sleep(0.05)
+
+            if not got_ready:
+                log.warning("Arduino READY 응답 없음 — 계속 진행")
+
+            # 연결 확인용 테스트 명령 전송
+            self.send_rpm(0, 0)
+            time.sleep(0.1)
+
         except serial.SerialException as e:
             log.error(f"Arduino 포트 열기 실패 {self.port}: {e}")
+            self._ser = None
+        except Exception as e:
+            log.error(f"Arduino connect 예외 발생: {e}")
             self._ser = None
 
     # ──────────────────────────────────────────────────
     def send_rpm(self, rpm_left: int, rpm_right: int):
-        """
-        좌/우 RPM을 직접 전송.  범위: -MAX_RPM ~ +MAX_RPM
-        """
+        """좌/우 RPM 직접 전송"""
         if self._ser is None or not self._ser.is_open:
             return
 
         rpm_l = int(max(-MAX_RPM, min(MAX_RPM, rpm_left)))
         rpm_r = int(max(-MAX_RPM, min(MAX_RPM, rpm_right)))
 
-        # 변화 없으면 생략
         if abs(rpm_l - self._last_l) < 1 and abs(rpm_r - self._last_r) < 1:
             return
 
@@ -90,26 +106,17 @@ class ArduinoComm:
 
     # ──────────────────────────────────────────────────
     def send_command(self, speed: float, steer_deg: float):
-        """
-        main.py 인터페이스 호환용.
-        speed(m/s) + steer_deg(도) → 좌우 RPM으로 변환 후 전송.
-
-        차동구동 믹싱:
-          v_base  = speed
-          omega   = v_base * tan(steer_rad) / TRACK_WIDTH
-          v_left  = v_base - omega * TRACK_WIDTH / 2
-          v_right = v_base + omega * TRACK_WIDTH / 2
-        """
+        """main.py 호환용 (speed + steer → 좌우 RPM 변환)"""
         steer_rad = math.radians(steer_deg)
-        omega     = speed * math.tan(steer_rad) / max(TRACK_WIDTH, 1e-3)
+        omega = speed * math.tan(steer_rad) / max(TRACK_WIDTH, 1e-3)
 
         v_left  = speed - omega * TRACK_WIDTH / 2.0
         v_right = speed + omega * TRACK_WIDTH / 2.0
 
         # 최대 속도 정규화
         max_v = max(abs(v_left), abs(v_right), 1e-6)
-        if max_v > speed and speed > 0:
-            scale   = speed / max_v
+        if max_v > abs(speed) and abs(speed) > 0:
+            scale = abs(speed) / max_v
             v_left  *= scale
             v_right *= scale
 
@@ -120,7 +127,7 @@ class ArduinoComm:
 
     # ──────────────────────────────────────────────────
     def send_distance(self, dist_m: float):
-        """거리 모드: 직진 거리(m) 전송."""
+        """거리 모드 명령 전송"""
         if self._ser is None or not self._ser.is_open:
             return
         msg = f"{dist_m:.3f}\n"
@@ -132,10 +139,7 @@ class ArduinoComm:
 
     # ──────────────────────────────────────────────────
     def read_feedback(self) -> dict | None:
-        """
-        Arduino 엔코더 피드백 수신.
-        수신 형식: <LENC:1234,RENC:5678>
-        """
+        """엔코더 피드백 수신"""
         if self._ser is None or not self._ser.is_open:
             return None
         try:
@@ -159,9 +163,9 @@ class ArduinoComm:
 
     # ──────────────────────────────────────────────────
     def emergency_stop(self):
-        """즉시 정지 — 3회 반복 전송."""
+        """긴급 정지"""
         for _ in range(3):
-            self._last_l = 9999  # 강제 재전송
+            self._last_l = 9999
             self.send_rpm(0, 0)
         log.warning("긴급 정지 전송 완료")
 
