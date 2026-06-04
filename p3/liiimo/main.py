@@ -48,6 +48,7 @@ class LidarFusion:
         self._running = False
         if self._lidar:
             try:
+                self._lidar.stop()
                 self._lidar.stop_motor()
                 self._lidar.disconnect()
             except Exception:
