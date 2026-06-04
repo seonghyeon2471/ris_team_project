@@ -21,7 +21,7 @@ log = logging.getLogger("arduino")
 # ── 차량 물리 파라미터 ────────────────────────────────
 WHEEL_RADIUS  = 0.034          # m
 WHEEL_CIRC    = 2 * math.pi * WHEEL_RADIUS  # ≈ 0.2136 m/rev
-TRACK_WIDTH   = 0.18           # m  좌우 바퀴 간격 — 실측 후 수정!
+TRACK_WIDTH   = 0.17           # m  좌우 바퀴 간격 — 실측 후 수정!
 MAX_RPM       = 150            # Arduino 최대 RPM 입력값
 
 # m/s → RPM 변환:  RPM = (v / WHEEL_CIRC) * 60
