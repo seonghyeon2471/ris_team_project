@@ -36,9 +36,6 @@ cap.set(
 
 time.sleep(1)
 
-cap.set(cv2.CAP_PROP_AUTO_EXPOSURE,1)
-cap.set(cv2.CAP_PROP_AUTO_WB,0)
-
 # =========================================
 # LIDAR START
 # =========================================
@@ -55,21 +52,23 @@ lidar_ser.read(7)
 # =========================================
 # PARAM
 # =========================================
-MAX_V = 0.24
-MIN_V = 0.10
-
 KP_ROT = 0.003
 
 MIN_AREA = 900
 
-TARGET_AREA = 19000
-
-STOP_AREA = 26000
-
-PARK_SEC = 3
+CENTER_X_TOL = 12
 
 FORWARD_SPEED = 0.10
+
 FORWARD_TIME = 0.32
+
+WAIT_AFTER_FORWARD = 1.0
+
+TRACK_V = 0.06
+
+SEARCH_V = 0.05
+
+SEARCH_W = 0.55
 
 # =========================================
 # COLOR
@@ -78,9 +77,9 @@ COLOR_CFG = {
 
 "red":{
 
-"hsv1":([0,70,40],[20,255,255]),
+"hsv1":([0,50,25],[25,255,255]),
 
-"hsv2":([160,70,40],[179,255,255]),
+"hsv2":([155,50,25],[179,255,255]),
 
 "draw":(0,0,255)
 
@@ -123,8 +122,6 @@ mission_index = 0
 state = "SEARCH"
 
 last_seen_x = 160
-
-park_start = None
 
 # =========================================
 # LIDAR THREAD
@@ -173,7 +170,7 @@ def stop_robot():
 # =========================================
 def make_mask(hsv,target):
 
-    cfg = COLOR_CFG[target]
+    cfg=COLOR_CFG[target]
 
     lo1=np.array(cfg["hsv1"][0])
 
@@ -207,7 +204,7 @@ def make_mask(hsv,target):
 
     return mask
 
-def flush_camera(n=15):
+def flush_camera(n=20):
 
     for _ in range(n):
 
@@ -226,12 +223,12 @@ try:
 
             continue
 
-        frame=cv2.flip(
+        frame = cv2.flip(
             frame,
             1
         )
 
-        hsv=cv2.cvtColor(
+        hsv = cv2.cvtColor(
 
             frame,
 
@@ -241,45 +238,17 @@ try:
 
         if mission_index >= len(MISSION):
 
+            print(
+                "MISSION COMPLETE"
+            )
+
             break
 
         target = MISSION[
             mission_index
         ]
 
-        if state=="PARKING":
-
-            stop_robot()
-
-            elapsed=time.time()-park_start
-
-            if elapsed>PARK_SEC:
-
-                mission_index += 1
-
-                if mission_index>=len(MISSION):
-
-                    break
-
-                print(
-
-                    "NEXT TARGET:",
-
-                    MISSION[
-                        mission_index
-                    ]
-
-                )
-
-                flush_camera()
-
-                state="SEARCH"
-
-                last_seen_x=160
-
-            continue
-
-        mask=make_mask(
+        mask = make_mask(
 
             hsv,
 
@@ -287,7 +256,7 @@ try:
 
         )
 
-        contours,_=cv2.findContours(
+        contours,_ = cv2.findContours(
 
             mask,
 
@@ -320,104 +289,95 @@ try:
 
                 cx=int(cx)
 
-                error=cx-160
-
                 last_seen_x=cx
 
-                if area>TARGET_AREA:
+                error=cx-160
 
-                    state="APPROACH"
+                state="TRACK"
 
-                if state=="APPROACH":
+                if abs(error) < CENTER_X_TOL:
 
-                    v=0.10
+                    print(
+                        target,
+                        "CENTERED"
+                    )
 
-                    w=-KP_ROT*error*0.5
+                    stop_robot()
 
-                    # 중심 정렬
-                    if abs(error)<15:
+                    # ===== 3cm 이동 =====
+                    send_cmd(
 
-                        stop_robot()
+                        FORWARD_SPEED,
 
-                        send_cmd(
+                        0
 
-                            FORWARD_SPEED,
+                    )
 
-                            0
+                    time.sleep(
 
-                        )
+                        FORWARD_TIME
 
-                        time.sleep(
+                    )
 
-                            FORWARD_TIME
+                    stop_robot()
 
-                        )
+                    # ===== 1초 정지 =====
+                    time.sleep(
 
-                        stop_robot()
+                        WAIT_AFTER_FORWARD
 
-                        state="PARKING"
+                    )
 
-                        park_start=time.time()
+                    # ===== 다음 타겟 =====
+                    mission_index += 1
+
+                    if mission_index >= len(MISSION):
+
+                        break
+
+                    flush_camera()
+
+                    state="SEARCH"
+
+                    last_seen_x=160
+
+                    print(
+
+                        "NEXT TARGET:",
+
+                        MISSION[
+                            mission_index
+                        ]
+
+                    )
+
+                    continue
 
                 else:
 
-                    v=MIN_V + (
-
-                        MAX_V-MIN_V
-
-                    )*(
-
-                        (TARGET_AREA-area)
-
-                        /TARGET_AREA
-
-                    )
+                    v=TRACK_V
 
                     w=-KP_ROT*error
 
         else:
 
-            if state=="APPROACH":
+            state="SEARCH"
 
-                v=0.10
+            if last_seen_x < 160:
 
-                w=0
+                v=SEARCH_V
+
+                w=SEARCH_W
 
             else:
 
-                if last_seen_x<160:
+                v=SEARCH_V
 
-                    v=0.03
-
-                    w=0.65
-
-                else:
-
-                    v=0.03
-
-                    w=-0.65
+                w=-SEARCH_W
 
         send_cmd(
             v,
             w
-        )
-
-        cv2.putText(
-
-            frame,
-
-            f"{target} {state}",
-
-            (20,40),
-
-            cv2.FONT_HERSHEY_SIMPLEX,
-
-            0.7,
-
-            (0,255,0),
-
-            2
-
         )
 
         cv2.imshow(
