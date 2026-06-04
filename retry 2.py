@@ -25,11 +25,27 @@ cap.set(
     cv2.VideoWriter_fourcc(*'MJPG')
 )
 
-WIDTH  = 320
-HEIGHT = 240
+FRAME_W = 320
+FRAME_H = 240
 
-FRAME_CX = WIDTH // 2
-FRAME_CY = HEIGHT // 2
+CENTER_X = FRAME_W // 2
+CENTER_Y = FRAME_H // 2
+
+# =========================================
+# RED HSV RANGE
+# =========================================
+LOW_RED1  = np.array([0,120,120])
+HIGH_RED1 = np.array([8,255,255])
+
+LOW_RED2  = np.array([170,120,120])
+HIGH_RED2 = np.array([179,255,255])
+
+MIN_AREA = 700
+
+KP_ROT  = 0.01
+MIN_ROT = 0.25
+
+MOVE_DONE = False
 
 # =========================================
 # MOTOR
@@ -44,25 +60,33 @@ def send_cmd(v,w):
     )
 
 def stop_robot():
+
     send_cmd(0.0,0.0)
 
+def forward_3cm():
+
+    send_cmd(
+        0.12,
+        0.0
+    )
+
+    time.sleep(0.35)
+
+    stop_robot()
+
+def backward_3cm():
+
+    send_cmd(
+        -0.12,
+        0.0
+    )
+
+    time.sleep(0.35)
+
+    stop_robot()
+
 # =========================================
-# RED RANGE (좁힘)
-# =========================================
-LOWER_RED1 = np.array([0,110,120])
-UPPER_RED1 = np.array([8,255,255])
-
-LOWER_RED2 = np.array([170,110,120])
-UPPER_RED2 = np.array([179,255,255])
-
-MIN_AREA = 500
-
-KP_ROT = 0.004
-
-MOVE_DONE = False
-
-# =========================================
-# MAIN
+# MAIN LOOP
 # =========================================
 try:
 
@@ -73,7 +97,10 @@ try:
         if not ret:
             continue
 
-        frame = cv2.flip(frame,1)
+        frame = cv2.flip(
+            frame,
+            1
+        )
 
         hsv = cv2.cvtColor(
             frame,
@@ -82,14 +109,14 @@ try:
 
         mask1 = cv2.inRange(
             hsv,
-            LOWER_RED1,
-            UPPER_RED1
+            LOW_RED1,
+            HIGH_RED1
         )
 
         mask2 = cv2.inRange(
             hsv,
-            LOWER_RED2,
-            UPPER_RED2
+            LOW_RED2,
+            HIGH_RED2
         )
 
         mask = cv2.bitwise_or(
@@ -97,15 +124,18 @@ try:
             mask2
         )
 
-        kernel=np.ones((5,5),np.uint8)
+        kernel = np.ones(
+            (5,5),
+            np.uint8
+        )
 
-        mask=cv2.erode(
+        mask = cv2.erode(
             mask,
             kernel,
             iterations=1
         )
 
-        mask=cv2.dilate(
+        mask = cv2.dilate(
             mask,
             kernel,
             iterations=2
@@ -120,27 +150,27 @@ try:
         # 카메라 중심
         cv2.circle(
             frame,
-            (FRAME_CX,FRAME_CY),
+            (CENTER_X,CENTER_Y),
             6,
             (255,0,0),
             -1
         )
 
-        if len(contours)>0:
+        if len(contours) > 0:
 
-            c=max(
+            c = max(
                 contours,
                 key=cv2.contourArea
             )
 
-            area=cv2.contourArea(c)
+            area = cv2.contourArea(c)
 
-            if area>MIN_AREA:
+            if area > MIN_AREA:
 
                 x,y,w,h = cv2.boundingRect(c)
 
-                cx=x+w//2
-                cy=y+h//2
+                cx = x + w//2
+                cy = y + h//2
 
                 # 초록 박스
                 cv2.rectangle(
@@ -162,13 +192,23 @@ try:
 
                 cv2.line(
                     frame,
-                    (FRAME_CX,FRAME_CY),
+                    (CENTER_X,CENTER_Y),
                     (cx,cy),
                     (255,255,0),
                     2
                 )
 
-                error = cx - FRAME_CX
+                error = cx - CENTER_X
+
+                cv2.putText(
+                    frame,
+                    f"ERR:{error}",
+                    (10,25),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0,255,0),
+                    2
+                )
 
                 print(
                     "CENTER ERROR:",
@@ -182,27 +222,47 @@ try:
 
                         rot = KP_ROT * error
 
+                        if rot > 0:
+
+                            rot = max(
+                                rot,
+                                MIN_ROT
+                            )
+
+                        else:
+
+                            rot = min(
+                                rot,
+                                -MIN_ROT
+                            )
+
                         send_cmd(
                             0.0,
-                            -rot
+                            rot
                         )
 
+                    # 중심 맞음
                     else:
 
                         print(
-                            "3cm MOVE"
+                            "ALIGN COMPLETE"
                         )
 
-                        send_cmd(
-                            0.10,
-                            0.0
+                        forward_3cm()
+
+                        MOVE_DONE = True
+
+                        print(
+                            "MISSION COMPLETE"
                         )
 
-                        time.sleep(0.35)
+                else:
 
-                        stop_robot()
+                    stop_robot()
 
-                        MOVE_DONE=True
+            else:
+
+                stop_robot()
 
         else:
 
@@ -218,9 +278,9 @@ try:
             mask
         )
 
-        key=cv2.waitKey(1)
+        key = cv2.waitKey(1)
 
-        if key==27:
+        if key == 27:
             break
 
 finally:
