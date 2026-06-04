@@ -36,57 +36,24 @@ cap.set(
 
 time.sleep(1)
 
-cap.set(
-    cv2.CAP_PROP_AUTO_EXPOSURE,
-    1
-)
-
-cap.set(
-    cv2.CAP_PROP_AUTO_WB,
-    0
-)
+cap.set(cv2.CAP_PROP_AUTO_EXPOSURE,1)
+cap.set(cv2.CAP_PROP_AUTO_WB,0)
 
 # =========================================
 # LIDAR START
 # =========================================
-lidar_ser.write(
-    bytes([0xA5,0x40])
-)
+lidar_ser.write(bytes([0xA5,0x40]))
 
 time.sleep(2)
 
 lidar_ser.reset_input_buffer()
 
-lidar_ser.write(
-    bytes([0xA5,0x20])
-)
+lidar_ser.write(bytes([0xA5,0x20]))
 
 lidar_ser.read(7)
 
-print("LIDAR START")
-
 # =========================================
-# FILTER PARAM
-# =========================================
-EMA_ALPHA = 0.35
-MEDIAN_K  = 2
-
-_scan_buf = np.full(
-    360,
-    150.0,
-    dtype=np.float32
-)
-
-_scan_shared = np.full(
-    360,
-    150.0,
-    dtype=np.float32
-)
-
-scan_lock = threading.Lock()
-
-# =========================================
-# CONTROL PARAM
+# PARAM
 # =========================================
 MAX_V = 0.24
 MIN_V = 0.10
@@ -95,75 +62,62 @@ KP_ROT = 0.003
 
 MIN_AREA = 900
 
-TARGET_AREA = 13000
+TARGET_AREA = 19000
 
-PARK_SEC = 3.0
+STOP_AREA = 26000
 
-APPROACH_DRIVE_SEC = 1.2
+PARK_SEC = 3
 
-SEARCH_TIMEOUT = 2.2
-
-APPROACH_MAX_TIMEOUT = 2.0
-
-FORWARD_3CM_SPEED = 0.10
-FORWARD_3CM_TIME  = 0.32
+FORWARD_SPEED = 0.10
+FORWARD_TIME = 0.32
 
 # =========================================
-# COLOR CONFIG
+# COLOR
 # =========================================
 COLOR_CFG = {
 
-    "red":{
+"red":{
 
-        "hsv1":([0,45,50],[15,255,255]),
+"hsv1":([0,70,40],[20,255,255]),
 
-        "hsv2":([160,45,50],[179,255,255]),
+"hsv2":([160,70,40],[179,255,255]),
 
-        "bgr":([0,0,0],[255,255,255]),
+"draw":(0,0,255)
 
-        "draw":(0,0,255)
+},
 
-    },
+"yellow":{
 
-    "yellow":{
+"hsv1":([15,30,60],[40,255,255]),
 
-        "hsv1":([15,30,60],[40,255,255]),
+"hsv2":([10,0,190],[45,45,255]),
 
-        "hsv2":([10,0,190],[45,45,255]),
+"draw":(0,220,255)
 
-        "bgr":([0,0,0],[255,255,255]),
+},
 
-        "draw":(0,200,255)
+"blue":{
 
-    },
+"hsv1":([90,45,40],[140,255,255]),
 
-    "blue":{
+"hsv2":None,
 
-        "hsv1":([90,45,40],[140,255,255]),
+"draw":(255,0,0)
 
-        "hsv2":None,
-
-        "bgr":([0,0,0],[255,255,255]),
-
-        "draw":(255,80,0)
-
-    }
+}
 
 }
 
 MISSION = [
 
-    "red",
+"red",
 
-    "yellow",
+"yellow",
 
-    "blue"
+"blue"
 
 ]
 
-# =========================================
-# STATE
-# =========================================
 mission_index = 0
 
 state = "SEARCH"
@@ -172,54 +126,9 @@ last_seen_x = 160
 
 park_start = None
 
-search_start_time = None
-
-approach_start_time = None
-
 # =========================================
-# LIDAR FUNCTIONS
+# LIDAR THREAD
 # =========================================
-def _apply_ema(angle,dist):
-
-    _scan_buf[angle] = (
-
-        (1-EMA_ALPHA)
-
-        * _scan_buf[angle]
-
-        +
-
-        EMA_ALPHA*dist
-
-    )
-
-def _apply_median():
-
-    k = MEDIAN_K
-
-    filtered = np.empty(
-        360,
-        dtype=np.float32
-    )
-
-    for i in range(360):
-
-        idx = [
-
-            (i+d)%360
-
-            for d in range(-k,k+1)
-
-        ]
-
-        filtered[i] = np.sort(
-
-            _scan_buf[idx]
-
-        )[k]
-
-    _scan_buf[:] = filtered
-
 def lidar_loop():
 
     while True:
@@ -232,49 +141,11 @@ def lidar_loop():
 
             continue
 
-        angle = int(
-
-            (
-
-                (raw[1]>>1)
-
-                |
-
-                (raw[2]<<7)
-
-            )/64
-
-        )%360
-
-        dist = (
-
-            raw[3]
-
-            |
-
-            (raw[4]<<8)
-
-        )/40
-
-        if 3<dist<150:
-
-            _apply_ema(
-
-                angle,
-
-                dist
-
-            )
-
-        if raw[0]&1:
-
-            _apply_median()
-
 threading.Thread(
 
-    target=lidar_loop,
+target=lidar_loop,
 
-    daemon=True
+daemon=True
 
 ).start()
 
@@ -300,37 +171,43 @@ def stop_robot():
 # =========================================
 # MASK
 # =========================================
-def make_mask(frame,hsv,target):
+def make_mask(hsv,target):
 
     cfg = COLOR_CFG[target]
 
-    lo1,hi1 = map(
-        np.array,
-        cfg["hsv1"]
-    )
+    lo1=np.array(cfg["hsv1"][0])
 
-    mask = cv2.inRange(
+    hi1=np.array(cfg["hsv1"][1])
+
+    mask=cv2.inRange(
+
         hsv,
+
         lo1,
+
         hi1
+
     )
 
     if cfg["hsv2"]:
 
-        lo2,hi2 = map(
-            np.array,
-            cfg["hsv2"]
-        )
+        lo2=np.array(cfg["hsv2"][0])
+
+        hi2=np.array(cfg["hsv2"][1])
 
         mask |= cv2.inRange(
+
             hsv,
+
             lo2,
+
             hi2
+
         )
 
     return mask
 
-def flush_camera(n=10):
+def flush_camera(n=15):
 
     for _ in range(n):
 
@@ -349,12 +226,12 @@ try:
 
             continue
 
-        frame = cv2.flip(
+        frame=cv2.flip(
             frame,
             1
         )
 
-        hsv = cv2.cvtColor(
+        hsv=cv2.cvtColor(
 
             frame,
 
@@ -370,37 +247,47 @@ try:
             mission_index
         ]
 
-        draw = COLOR_CFG[
-            target
-        ]["draw"]
-
         if state=="PARKING":
 
             stop_robot()
 
-            elapsed = time.time()-park_start
+            elapsed=time.time()-park_start
 
             if elapsed>PARK_SEC:
 
-                mission_index +=1
+                mission_index += 1
 
-                flush_camera(15)
+                if mission_index>=len(MISSION):
 
-                state="FORCED_SEARCH"
+                    break
 
-                search_start_time=time.time()
+                print(
+
+                    "NEXT TARGET:",
+
+                    MISSION[
+                        mission_index
+                    ]
+
+                )
+
+                flush_camera()
+
+                state="SEARCH"
 
                 last_seen_x=160
 
             continue
 
-        mask = make_mask(
-            frame,
+        mask=make_mask(
+
             hsv,
+
             target
+
         )
 
-        contours,_ = cv2.findContours(
+        contours,_=cv2.findContours(
 
             mask,
 
@@ -410,14 +297,17 @@ try:
 
         )
 
-        cam_v=0
-        cam_w=0
+        v=0
+        w=0
 
         if contours:
 
             c=max(
+
                 contours,
+
                 key=cv2.contourArea
+
             )
 
             area=cv2.contourArea(c)
@@ -440,17 +330,18 @@ try:
 
                 if state=="APPROACH":
 
-                    cam_v=0.12
+                    v=0.10
 
-                    cam_w=-KP_ROT*error*0.5
+                    w=-KP_ROT*error*0.5
 
-                    if area>24000:
+                    # 중심 정렬
+                    if abs(error)<15:
 
                         stop_robot()
 
                         send_cmd(
 
-                            FORWARD_3CM_SPEED,
+                            FORWARD_SPEED,
 
                             0
 
@@ -458,7 +349,7 @@ try:
 
                         time.sleep(
 
-                            FORWARD_3CM_TIME
+                            FORWARD_TIME
 
                         )
 
@@ -470,9 +361,7 @@ try:
 
                 else:
 
-                    cam_w=-KP_ROT*error
-
-                    cam_v=MIN_V + (
+                    v=MIN_V + (
 
                         MAX_V-MIN_V
 
@@ -484,23 +373,33 @@ try:
 
                     )
 
+                    w=-KP_ROT*error
+
         else:
 
             if state=="APPROACH":
 
-                cam_v=0.12
+                v=0.10
 
-                cam_w=0
+                w=0
 
             else:
 
-                cam_v=0.03
+                if last_seen_x<160:
 
-                cam_w=0.65 if last_seen_x<160 else -0.65
+                    v=0.03
+
+                    w=0.65
+
+                else:
+
+                    v=0.03
+
+                    w=-0.65
 
         send_cmd(
-            cam_v,
-            cam_w
+            v,
+            w
         )
 
         cv2.putText(
@@ -515,7 +414,7 @@ try:
 
             0.7,
 
-            draw,
+            (0,255,0),
 
             2
 
@@ -548,5 +447,3 @@ finally:
     lidar_ser.close()
 
     cv2.destroyAllWindows()
-
-    print("SYSTEM OFF")
