@@ -5,31 +5,43 @@ import time
 import threading
 
 # ====================================
-# SERIAL 연결
+# SERIAL
 # ====================================
 arduino_ser = serial.Serial(
-    "/dev/serial0",   # 아두이노 연결 포트
+    "/dev/serial0",
     115200,
     timeout=0.05
 )
 
 lidar_ser = serial.Serial(
-    "/dev/ttyUSB0",   # LiDAR 포트
+    "/dev/ttyUSB0",
     460800,
-    timeout=0.001
+    timeout=0.01
 )
 
 # ====================================
-# CAMERA 설정
+# CAMERA
 # ====================================
 cap = cv2.VideoCapture(
     0,
     cv2.CAP_V4L2
 )
 
-# 해상도 낮춰서 속도 확보
-cap.set(cv2.CAP_PROP_FRAME_WIDTH,320)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT,240)
+# 버퍼 최소화 (지연 감소)
+cap.set(
+    cv2.CAP_PROP_BUFFERSIZE,
+    1
+)
+
+cap.set(
+    cv2.CAP_PROP_FRAME_WIDTH,
+    320
+)
+
+cap.set(
+    cv2.CAP_PROP_FRAME_HEIGHT,
+    240
+)
 
 if not cap.isOpened():
 
@@ -38,7 +50,7 @@ if not cap.isOpened():
     exit()
 
 # ====================================
-# LiDAR 시작 명령
+# LiDAR START
 # ====================================
 lidar_ser.write(
     bytes([0xA5,0x40])
@@ -52,12 +64,10 @@ lidar_ser.write(
     bytes([0xA5,0x20])
 )
 
-# descriptor 제거
 lidar_ser.read(7)
 
 # ====================================
-# 미션 순서
-# red → yellow
+# PARAM
 # ====================================
 MISSION = [
 
@@ -69,77 +79,62 @@ MISSION = [
 
 mission_idx = 0
 
-# ====================================
-# 주행 파라미터
-# ====================================
-
-# 회전 gain
 KP_ROT = 0.004
 
-# 최소/최대 전진속도
 MIN_V = 0.08
 MAX_V = 0.18
 
-# 이 면적 이상이면 도착
 TARGET_AREA = 22000
+MIN_AREA = 600
 
-# 너무 작은 노이즈 제거
-MIN_AREA = 800
-
-# 목표 도달 후 추가 전진
 FORWARD_3CM_SPEED = 0.10
 FORWARD_3CM_TIME = 0.32
 
-# 탐색 속도
-SEARCH_V = 0.12
+SEARCH_V = 0.10
 SEARCH_W = 0.35
 
-# 마지막 본 위치
 last_seen_x = 160
 
-# 탐색 회전 방향
 search_dir = 1
 
-# 탐색 시작 시간
 search_start = time.time()
 
 # ====================================
-# COLOR MASK 생성
+# COLOR
 # ====================================
 def make_mask(hsv,target):
 
     if target=="red":
 
-        # 빨간색은 HSV 양끝 분리됨
-        mask1=cv2.inRange(
+        # 빨간색 범위 확대
+        mask1 = cv2.inRange(
 
             hsv,
 
-            np.array([0,45,50]),
+            np.array([0,70,40]),
 
-            np.array([15,255,255])
+            np.array([12,255,255])
 
         )
 
-        mask2=cv2.inRange(
+        mask2 = cv2.inRange(
 
             hsv,
 
-            np.array([160,45,50]),
+            np.array([165,70,40]),
 
             np.array([179,255,255])
 
         )
 
-        mask=cv2.bitwise_or(
+        mask = cv2.bitwise_or(
             mask1,
             mask2
         )
 
     else:
 
-        # 노란색 범위
-        mask=cv2.inRange(
+        mask = cv2.inRange(
 
             hsv,
 
@@ -149,18 +144,17 @@ def make_mask(hsv,target):
 
         )
 
-    # 노이즈 제거
-    kernel=np.ones(
-        (5,5),
+    kernel = np.ones(
+        (3,3),
         np.uint8
     )
 
-    mask=cv2.erode(
+    mask = cv2.erode(
         mask,
         kernel
     )
 
-    mask=cv2.dilate(
+    mask = cv2.dilate(
         mask,
         kernel
     )
@@ -168,7 +162,7 @@ def make_mask(hsv,target):
     return mask
 
 # ====================================
-# 모터 제어
+# MOTOR
 # ====================================
 def send_cmd(v,w):
 
@@ -183,8 +177,7 @@ def stop_robot():
     send_cmd(0,0)
 
 # ====================================
-# LiDAR 쓰레드
-# 전방 최소거리 계산
+# LiDAR THREAD
 # ====================================
 front_min = 150
 
@@ -192,7 +185,7 @@ def lidar_loop():
 
     global front_min
 
-    scan=np.full(
+    scan = np.full(
         360,
         150,
         dtype=np.float32
@@ -200,13 +193,16 @@ def lidar_loop():
 
     while True:
 
-        raw=lidar_ser.read(5)
+        raw = lidar_ser.read(5)
 
-        if len(raw)!=5:
+        if len(raw) != 5:
+
+            # CPU 독점 방지
+            time.sleep(0.001)
 
             continue
 
-        angle=int(
+        angle = int(
 
             (
 
@@ -218,9 +214,9 @@ def lidar_loop():
 
             )/64
 
-        )%360
+        ) % 360
 
-        dist=(
+        dist = (
 
             raw[3]
 
@@ -228,39 +224,45 @@ def lidar_loop():
 
             (raw[4]<<8)
 
-        )/40
+        ) / 40
 
-        if 3<dist<150:
+        if 3 < dist < 150:
 
-            scan[angle]=dist
+            scan[angle] = dist
 
-            # 전방 ±45도 범위
-            idx=np.arange(
+            idx = np.arange(
                 -45,
                 46
-            )%360
+            ) % 360
 
-            front_min=np.min(
+            front_min = np.min(
                 scan[idx]
             )
 
-threading.Thread(
+lidar_thread = threading.Thread(
 
-target=lidar_loop,
+    target=lidar_loop,
 
-daemon=True
+    daemon=True
 
-).start()
+)
+
+lidar_thread.start()
+
+time.sleep(0.2)
 
 # ====================================
-# MAIN LOOP
+# MAIN
 # ====================================
 try:
 
     while True:
 
-        # 미션 끝났으면 종료
         if mission_idx >= len(MISSION):
+
+            print(
+                "MISSION COMPLETE"
+            )
 
             break
 
@@ -268,24 +270,18 @@ try:
             mission_idx
         ]
 
-        print(
-            "Current target:",
-            target
-        )
-
-        ret,frame=cap.read()
+        ret,frame = cap.read()
 
         if not ret:
 
             continue
 
-        # 좌우 반전
-        frame=cv2.flip(
+        frame = cv2.flip(
             frame,
             1
         )
 
-        hsv=cv2.cvtColor(
+        hsv = cv2.cvtColor(
 
             frame,
 
@@ -293,12 +289,12 @@ try:
 
         )
 
-        mask=make_mask(
+        mask = make_mask(
             hsv,
             target
         )
 
-        contours,_=cv2.findContours(
+        contours,_ = cv2.findContours(
 
             mask,
 
@@ -308,12 +304,12 @@ try:
 
         )
 
-        v=0
-        w=0
+        v = 0
+        w = 0
 
-        # ====================================
+        # ==========================
         # 장애물 회피
-        # ====================================
+        # ==========================
         if front_min < 15:
 
             print(
@@ -327,12 +323,12 @@ try:
 
             continue
 
-        # ====================================
+        # ==========================
         # 목표 발견
-        # ====================================
+        # ==========================
         if contours:
 
-            c=max(
+            c = max(
 
                 contours,
 
@@ -340,7 +336,7 @@ try:
 
             )
 
-            area=cv2.contourArea(c)
+            area = cv2.contourArea(c)
 
             if area > MIN_AREA:
 
@@ -352,18 +348,16 @@ try:
 
                 err = cx - 160
 
-                # ==========================
                 # 목표 도착
-                # ==========================
                 if area > TARGET_AREA:
 
                     print(
-                        f"{target} reached"
+                        target,
+                        "reached"
                     )
 
                     stop_robot()
 
-                    # 조금 더 전진
                     send_cmd(
 
                         FORWARD_3CM_SPEED,
@@ -373,48 +367,26 @@ try:
                     )
 
                     time.sleep(
-
                         FORWARD_3CM_TIME
-
                     )
 
                     stop_robot()
 
-                    # 다음 목표
                     mission_idx += 1
 
-                    if mission_idx >= len(MISSION):
-
-                        print(
-                            "MISSION COMPLETE"
-                        )
-
-                        break
-
-                    # 탐색 상태 초기화
                     last_seen_x = 160
 
                     search_dir = 1
 
                     search_start = time.time()
 
-                    # 카메라 잔상 제거
+                    # 빨간색 잔상 제거
                     for _ in range(8):
 
                         cap.read()
 
                     time.sleep(
                         0.5
-                    )
-
-                    print(
-
-                        "NEXT TARGET =",
-
-                        MISSION[
-                            mission_idx
-                        ]
-
                     )
 
                     continue
@@ -424,37 +396,64 @@ try:
 
                     MAX_V - MIN_V
 
-                )*(
+                ) * (
 
                     1-area/TARGET_AREA
 
                 )
 
-                # 중앙 정렬
                 w = -KP_ROT * err
 
-        # ====================================
-        # 목표 잃어버림
-        # ====================================
+        # ==========================
+        # 목표 없음
+        # ==========================
         else:
 
-            elapsed = time.time()-search_start
+            err = last_seen_x - 160
 
-            # 5초마다 방향 변경
-            if elapsed > 5:
+            # 마지막 방향 먼저 탐색
+            if abs(err) > 25:
 
-                search_start=time.time()
+                v = 0.05
 
-                search_dir *= -1
+                w = -KP_ROT * err * 2
 
-            # 원운동 탐색
-            v = SEARCH_V
+            else:
 
-            w = SEARCH_W * search_dir
+                elapsed = time.time()-search_start
+
+                if elapsed > 5:
+
+                    search_start = time.time()
+
+                    search_dir *= -1
+
+                # 원운동 탐색
+                v = SEARCH_V
+
+                w = SEARCH_W * search_dir
 
         send_cmd(
             v,
             w
+        )
+
+        cv2.putText(
+
+            frame,
+
+            f"{target} {front_min:.1f}",
+
+            (20,40),
+
+            cv2.FONT_HERSHEY_SIMPLEX,
+
+            0.8,
+
+            (0,255,0),
+
+            2
+
         )
 
         cv2.imshow(
@@ -467,7 +466,7 @@ try:
             mask
         )
 
-        if cv2.waitKey(1)&0xFF==ord('q'):
+        if cv2.waitKey(1)&0xFF == ord('q'):
 
             break
 
