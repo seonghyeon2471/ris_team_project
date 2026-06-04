@@ -1,0 +1,72 @@
+# Autonomous Obstacle Avoidance — Setup Guide
+# Based on arXiv:2507.12449
+# Hardware: Raspberry Pi 4B + HBVCAM USB 720p + RPLIDAR C1 + Arduino R4 Minima
+
+# ── Python dependencies ──────────────────────────────────────────────────────
+# Install on Raspberry Pi 4B (Python 3.10+)
+
+# Core
+numpy
+scipy
+opencv-python-headless   # headless to avoid GTK issues; use opencv-python if you want display
+pyserial
+
+# YOLOv11 (via ultralytics)
+ultralytics>=8.3.0
+
+# Depth Anything V2
+# Clone the repo and install manually:
+#   git clone https://github.com/DepthAnything/Depth-Anything-V2
+#   cd Depth-Anything-V2 && pip install -e .
+# Then download checkpoint (vits is smallest/fastest for Pi4):
+#   mkdir checkpoints && cd checkpoints
+#   wget https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/main/depth_anything_v2_vits.pth
+
+# PyTorch (ARM64 wheel for Pi4 — install separately first!)
+# See: https://pytorch.org/get-started/locally/
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
+
+# RPLIDAR C1
+rplidar-roboticia
+
+# ── System packages (apt) ────────────────────────────────────────────────────
+# sudo apt update
+# sudo apt install python3-pip libopenblas-dev libatlas-base-dev libjpeg-dev
+
+# ── Device permissions ───────────────────────────────────────────────────────
+# Add user to dialout group for serial access:
+#   sudo usermod -aG dialout $USER
+# Verify devices:
+#   ls /dev/ttyUSB*   → Arduino = /dev/ttyUSB0, LiDAR = /dev/ttyUSB1
+# (Swap ports if needed, adjust CFG in main.py)
+
+# ── HBVCAM setup ─────────────────────────────────────────────────────────────
+# Verify camera is detected:
+#   v4l2-ctl --list-devices
+#   → should show /dev/video0
+# Test: python3 -c "import cv2; cap=cv2.VideoCapture(0); print(cap.read()[0])"
+
+# ── Run ──────────────────────────────────────────────────────────────────────
+# Full pipeline:
+#   python3 main.py
+# Without LiDAR:
+#   python3 main.py --no-lidar
+# Headless (no display window):
+#   python3 main.py --no-viz
+
+# ── Camera calibration ───────────────────────────────────────────────────────
+# Update fx, fy, cx, cy in main.py CFG.
+# Quick calibration with OpenCV checkerboard:
+#   python3 calibrate_camera.py   (not included — use OpenCV tutorial)
+# Default values assume HBVCAM 720p with ~90° FOV.
+
+# ── Depth scale calibration ──────────────────────────────────────────────────
+# Place an object at a known distance (e.g. 2.0 m) and tune depth_scale in
+# perception.py until PerceptionModule.process() reports the correct distance.
+
+# ── Arduino ──────────────────────────────────────────────────────────────────
+# Flash arduino_firmware.ino via Arduino IDE or arduino-cli:
+#   arduino-cli compile --fqbn arduino:renesas_uno:minima arduino_firmware
+#   arduino-cli upload  --fqbn arduino:renesas_uno:minima -p /dev/ttyUSB0 arduino_firmware
