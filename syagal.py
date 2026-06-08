@@ -320,6 +320,7 @@ try:
             if park_elapsed >= PARK_SEC:
                 print(f"✅ [{target}] 사각지대 안착 및 {PARK_SEC}s 정차 완료 → 미션 클리어")
                 mission_index += 1
+                arduino_ser.write(b"RESET\n")
                 blind_dash_start_time = None
                 boundary_phase = 0
                 last_dist_cm = 150.0  
