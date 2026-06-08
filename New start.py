@@ -113,9 +113,9 @@ COLOR_CFG = {
 
     "yellow": {
         # 노랑: 100 180 200 / 20 140 210 부근
-        "hsv1": ([15, 100, 180], [40, 210, 255]),
+        "hsv1": ([20, 20, 180], [40, 210, 255]),
         "hsv2": None,
-        "bgr":  ([0, 100, 100], [180, 255, 255]),
+        "bgr":  ([150, 150, 100], [255, 255, 255]),
         "draw": (0, 200, 255),
     },
 
@@ -466,7 +466,7 @@ try:
             else:
                 cam_state = "SEARCH-L" if last_seen_x <= frame_cx else "SEARCH-R"
                 cam_v = 0.03
-                cam_w = -1.30 if last_seen_x > frame_cx else 1.30
+                cam_w = -0.90 if last_seen_x > frame_cx else 0.90
 
         # ── 모터 전달 ─────────────────────────────────────────────
         send_cmd(cam_v, cam_w)
