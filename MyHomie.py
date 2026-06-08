@@ -42,10 +42,12 @@ actual_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
 actual_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
 print(f"카메라 열림: {int(actual_w)}x{int(actual_h)}")
 
-FRAME_W          = int(actual_w)
-FRAME_H          = int(actual_h)
-BOTTOM_THRESHOLD = int(FRAME_H * 0.80)
-MIN_COLOR_AREA   = 800
+FRAME_W        = int(actual_w)
+FRAME_H        = int(actual_h)
+MIN_COLOR_AREA = 800
+
+# 아래로 사라짐 판단: 마지막 cy가 이 값 이상일 때 사라지면 도착
+DISAPPEAR_THRESHOLD = int(FRAME_H * 0.70)
 
 # =========================================
 # LIDAR START
@@ -128,12 +130,12 @@ def apply_ema(angle, new_dist_cm):
     )
 
 def apply_median_filter():
-    k      = MEDIAN_K
-    window = 2 * k + 1
+    k        = MEDIAN_K
+    window   = 2 * k + 1
     filtered = np.empty(360, dtype=np.float32)
     for i in range(360):
-        idx    = [(i + d) % 360 for d in range(-k, k + 1)]
-        values = np.sort(scan_data[idx])
+        idx      = [(i + d) % 360 for d in range(-k, k + 1)]
+        values   = np.sort(scan_data[idx])
         filtered[i] = values[window // 2]
     scan_data[:] = filtered
 
@@ -259,6 +261,9 @@ TARGET_COLOR = {
 # =========================================
 print(f"START → {current_state()}")
 
+# 마지막으로 색상을 본 cy 위치 기억
+last_cy = 0
+
 try:
     while True:
 
@@ -281,7 +286,7 @@ try:
         # 카메라: 버퍼 비우고 최신 프레임만 사용
         # ──────────────────────────────
         for _ in range(3):
-            cap.grab()          # decode 없이 빠르게 버퍼 비우기
+            cap.grab()
         ret, frame = cap.retrieve()
 
         if not ret:
@@ -295,6 +300,8 @@ try:
         # FIND_* : 라이다 주행 + 색상 탐색
         # ──────────────────────────────
         if state.startswith("FIND_"):
+
+            last_cy = 0  # FIND 상태 진입 시 초기화
 
             if detection:
                 cx, cy, area = detection
@@ -310,23 +317,29 @@ try:
                 send_cmd(v, w)
 
         # ──────────────────────────────
-        # PARK_* : 카메라 조향 → 하단 도달 시 정지
+        # PARK_* : 카메라 조향
+        # 색상이 하단(70% 이하)에서 사라지면 도착
         # ──────────────────────────────
         elif state.startswith("PARK_"):
 
             if detection is None:
-                send_cmd(MIN_SPEED, 0.0)
-                print(f"[{color_name}] 추적 중 소실, 재탐색...")
+                # 마지막으로 본 cy가 하단 70% 이하였으면 → 아래로 사라진 것
+                if last_cy >= DISAPPEAR_THRESHOLD:
+                    stop_robot()
+                    print(
+                        f"[{color_name}] 화면 아래로 사라짐 "
+                        f"(last_cy={last_cy}) → 주차 완료"
+                    )
+                    time.sleep(0.5)
+                    next_state()
+                else:
+                    # 위쪽에서 놓친 것 → 재탐색
+                    send_cmd(MIN_SPEED, 0.0)
+                    print(f"[{color_name}] 추적 중 소실, 재탐색...")
                 continue
 
             cx, cy, area = detection
-
-            if cy >= BOTTOM_THRESHOLD:
-                stop_robot()
-                print(f"[{color_name}] 하단 도달 (cy={cy}) → 주차 완료")
-                time.sleep(0.5)
-                next_state()
-                continue
+            last_cy = cy  # 매 프레임 cy 업데이트
 
             error = cx - (FRAME_W / 2)
             w     = KP_STEER * error
