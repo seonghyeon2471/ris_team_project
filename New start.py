@@ -403,10 +403,12 @@ try:
 
                 # 🌟 [핵심 변경] 카메라 중심과 객체 센트리이드(cx)가 마진 이내로 완벽히 일치했는지 판별
                 if abs(error_x) <= ALIGN_MARGIN_PX:
-                    print(f"🎯 [중심 일치] 센터 동기화 완료 (Error: {error_x}px) -> 3cm 정밀 전진 돌입")
-                    state = "ALIGN_FORWARD"
-                    align_start_time = time.time()
-                    continue
+                    area > TARGET_AREA * 0.7 or
+                    last_seen_y > 170):
+                        print(f"🎯 [중심 일치] 센터 동기화 완료 (Error: {error_x}px) -> 3cm 정밀 전진 돌입")
+                        state = "ALIGN_FORWARD"
+                        align_start_time = time.time()
+                        continue
 
                 # 면적이 커지거나 하단 접근 시 APPROACH 명시화
                 if state == "APPROACH" or area > TARGET_AREA or last_seen_y >= 200:
