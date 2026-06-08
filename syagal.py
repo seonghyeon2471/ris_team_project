@@ -131,7 +131,7 @@ boundary_direction   = 1
 
 morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
 
-# 🌟 출력을 제어하기 위한 프레임 카운터 추가
+# 출력을 제어하기 위한 프레임 카운터
 frame_count = 0
 
 # =========================================
@@ -305,7 +305,7 @@ try:
             
             cv2.drawContours(frame, [np.int32(cv2.boxPoints(rect))], 0, draw, 2)
 
-            # 🌟 [신규 추가] 15프레임(약 0.5초)마다 타겟 오브젝트 중심점의 색상 상태를 실시간 출력
+            # 15프레임(약 0.5초)마다 타겟 오브젝트 중심점의 색상 상태를 실시간 출력
             if frame_count % 15 == 0:
                 cx_clamped = np.clip(cx, 0, WIDTH - 1)
                 cy_clamped = np.clip(cy_obj, 0, HEIGHT - 1)
