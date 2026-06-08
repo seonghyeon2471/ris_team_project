@@ -23,18 +23,29 @@ lidar_ser = serial.Serial(
 # CAMERA
 # =========================================
 cap = cv2.VideoCapture(0)
+
+if not cap.isOpened():
+    cap = cv2.VideoCapture(1)
+    if not cap.isOpened():
+        print("[ERROR] 카메라를 열 수 없습니다.")
+        lidar_ser.close()
+        arduino_ser.close()
+        exit(1)
+
+# 버퍼 크기 1로 설정 (지연 방지 핵심)
+cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+cap.set(cv2.CAP_PROP_FPS, 30)
 
-FRAME_W = 320
-FRAME_H = 240
+actual_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+actual_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+print(f"카메라 열림: {int(actual_w)}x{int(actual_h)}")
 
-# 색상이 "아래로 사라졌다"고 판단할 Y 기준선
-# 화면 하단 20% 이내에 색상 중심이 있으면 → 도착
+FRAME_W          = int(actual_w)
+FRAME_H          = int(actual_h)
 BOTTOM_THRESHOLD = int(FRAME_H * 0.80)
-
-# 색상이 충분히 크면 추적 시작 (노이즈 제거)
-MIN_COLOR_AREA = 800
+MIN_COLOR_AREA   = 800
 
 # =========================================
 # LIDAR START
@@ -49,32 +60,31 @@ print("LIDAR START")
 # =========================================
 # PARAMETERS
 # =========================================
-MAX_SPEED   = 0.28
-MIN_SPEED   = 0.09
-TRACK_SPEED = 0.15      # 색상 추적 중 전진 속도
-MAX_W       = 0.9
+MAX_SPEED         = 0.28
+MIN_SPEED         = 0.09
+TRACK_SPEED       = 0.15
+MAX_W             = 0.9
 
-THRESH_30   = 32.0
-THRESH_20   = 22.0
-THRESH_10   = 12.0
+THRESH_30         = 32.0
+THRESH_20         = 22.0
+THRESH_10         = 12.0
 FRONT_CHECK_RANGE = 45
 
-# 조향 P 게인 (픽셀 오차 → 각속도)
-KP_STEER = 0.004
+KP_STEER          = 0.004
 
 # =========================================
 # HSV 색상 범위
 # =========================================
 COLOR_RANGES = {
     "RED": [
-        (np.array([0,   120,  70]),  np.array([10,  255, 255])),
-        (np.array([170, 120,  70]),  np.array([180, 255, 255])),
+        (np.array([0,   120,  70]), np.array([10,  255, 255])),
+        (np.array([170, 120,  70]), np.array([180, 255, 255])),
     ],
     "YELLOW": [
-        (np.array([20,  120,  70]),  np.array([35,  255, 255])),
+        (np.array([20,  120,  70]), np.array([35,  255, 255])),
     ],
     "BLUE": [
-        (np.array([100, 120,  70]),  np.array([130, 255, 255])),
+        (np.array([100, 120,  70]), np.array([130, 255, 255])),
     ],
 }
 
@@ -102,7 +112,7 @@ def next_state():
     print(f">>> STATE: {current_state()}")
 
 # =========================================
-# FILTER
+# LIDAR FILTER
 # =========================================
 EMA_ALPHA = 0.35
 MEDIAN_K  = 2
@@ -118,11 +128,11 @@ def apply_ema(angle, new_dist_cm):
     )
 
 def apply_median_filter():
-    k = MEDIAN_K
+    k      = MEDIAN_K
     window = 2 * k + 1
     filtered = np.empty(360, dtype=np.float32)
     for i in range(360):
-        idx = [(i + d) % 360 for d in range(-k, k + 1)]
+        idx    = [(i + d) % 360 for d in range(-k, k + 1)]
         values = np.sort(scan_data[idx])
         filtered[i] = values[window // 2]
     scan_data[:] = filtered
@@ -150,16 +160,15 @@ def stop_robot():
 # 반환: (cx, cy, area) 또는 None
 # =========================================
 def detect_color(frame, color_name):
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
 
     for (lo, hi) in COLOR_RANGES[color_name]:
         mask |= cv2.inRange(hsv, lo, hi)
 
-    # 모폴로지 노이즈 제거
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
+    mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
     contours, _ = cv2.findContours(
         mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
@@ -169,7 +178,7 @@ def detect_color(frame, color_name):
         return None
 
     largest = max(contours, key=cv2.contourArea)
-    area = cv2.contourArea(largest)
+    area    = cv2.contourArea(largest)
 
     if area < MIN_COLOR_AREA:
         return None
@@ -184,8 +193,7 @@ def detect_color(frame, color_name):
     return (cx, cy, area)
 
 # =========================================
-# 라이다 기반 회피 조향값 계산
-# (send 하지 않고 v, w 만 반환)
+# LIDAR 회피 cmd 계산
 # =========================================
 def lidar_avoid_cmd():
     front_min = get_front_min()
@@ -206,8 +214,7 @@ def lidar_avoid_cmd():
         return MAX_SPEED, 0.0
 
 # =========================================
-# 라이다 1프레임 읽기
-# 반환: s_flag (스캔 완료 여부)
+# LIDAR 1프레임 읽기
 # =========================================
 def read_lidar_frame():
     raw = lidar_ser.read(5)
@@ -223,8 +230,8 @@ def read_lidar_frame():
     ):
         return False
 
-    angle    = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0) % 360
-    dist_cm  = (raw[3] | (raw[4] << 8)) / 40.0
+    angle   = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0) % 360
+    dist_cm = (raw[3] | (raw[4] << 8)) / 40.0
 
     if 3 < dist_cm < 150:
         apply_ema(angle, dist_cm)
@@ -236,11 +243,8 @@ def read_lidar_frame():
     return False
 
 # =========================================
-# MAIN LOOP
+# TARGET COLOR PER STATE
 # =========================================
-print(f"START → {current_state()}")
-
-# 현재 추적 중인 색상 이름
 TARGET_COLOR = {
     "FIND_RED":    "RED",
     "PARK_RED":    "RED",
@@ -249,6 +253,11 @@ TARGET_COLOR = {
     "FIND_BLUE":   "BLUE",
     "PARK_BLUE":   "BLUE",
 }
+
+# =========================================
+# MAIN LOOP
+# =========================================
+print(f"START → {current_state()}")
 
 try:
     while True:
@@ -264,20 +273,26 @@ try:
             break
 
         # ──────────────────────────────
-        # 라이다 읽기 (매 루프)
+        # 라이다 읽기
         # ──────────────────────────────
         scan_complete = read_lidar_frame()
 
         # ──────────────────────────────
-        # 카메라 읽기 (매 루프)
+        # 카메라: 버퍼 비우고 최신 프레임만 사용
         # ──────────────────────────────
-        ret, frame = cap.read()
-        color_name = TARGET_COLOR[state]
-        detection  = detect_color(frame, color_name) if ret else None
+        for _ in range(3):
+            cap.grab()          # decode 없이 빠르게 버퍼 비우기
+        ret, frame = cap.retrieve()
+
+        if not ret:
+            print("[WARN] 카메라 프레임 읽기 실패")
+            detection = None
+        else:
+            color_name = TARGET_COLOR[state]
+            detection  = detect_color(frame, color_name)
 
         # ──────────────────────────────
-        # FIND_* 상태
-        # 라이다로 주행, 색상 발견 시 PARK_* 전환
+        # FIND_* : 라이다 주행 + 색상 탐색
         # ──────────────────────────────
         if state.startswith("FIND_"):
 
@@ -287,45 +302,36 @@ try:
                     f"[{color_name}] 발견! cx={cx} cy={cy} "
                     f"area={area:.0f} → PARK 전환"
                 )
-                next_state()   # FIND_* → PARK_*
+                next_state()
                 continue
 
-            # 색상 미발견 → 라이다 회피 주행
             if scan_complete:
                 v, w = lidar_avoid_cmd()
                 send_cmd(v, w)
 
         # ──────────────────────────────
-        # PARK_* 상태
-        # 색상 X축 중앙값으로 P 조향
-        # 색상이 하단으로 사라지면 정지 → 다음 FIND_* 전환
+        # PARK_* : 카메라 조향 → 하단 도달 시 정지
         # ──────────────────────────────
         elif state.startswith("PARK_"):
 
             if detection is None:
-                # 색상을 잃었으면 잠깐 전진하며 재탐색
                 send_cmd(MIN_SPEED, 0.0)
                 print(f"[{color_name}] 추적 중 소실, 재탐색...")
                 continue
 
             cx, cy, area = detection
 
-            # 도착 판정: 색상 중심이 화면 하단 아래로 내려옴
             if cy >= BOTTOM_THRESHOLD:
                 stop_robot()
-                print(
-                    f"[{color_name}] 하단 도달 (cy={cy}) → 주차 완료"
-                )
+                print(f"[{color_name}] 하단 도달 (cy={cy}) → 주차 완료")
                 time.sleep(0.5)
-                next_state()   # PARK_* → FIND_* (또는 DONE)
+                next_state()
                 continue
 
-            # P 조향: 화면 중앙과 색상 중심의 X 오차
-            error = cx - (FRAME_W / 2)     # 양수 = 오른쪽
-            w     = KP_STEER * error       # 오른쪽이면 오른쪽 조향
+            error = cx - (FRAME_W / 2)
+            w     = KP_STEER * error
             v     = TRACK_SPEED
 
-            # 라이다 장애물이 매우 가까우면 속도 감소
             front_min = get_front_min()
             if front_min < THRESH_10:
                 v = MIN_SPEED
