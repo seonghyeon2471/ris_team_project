@@ -47,7 +47,7 @@ FRAME_H        = int(actual_h)
 MIN_COLOR_AREA = 800
 
 # 아래로 사라짐 판단: 마지막 cy가 이 값 이상일 때 사라지면 도착
-DISAPPEAR_THRESHOLD = int(FRAME_H * 0.70)
+DISAPPEAR_THRESHOLD = int(FRAME_H * 0.80)
 
 # =========================================
 # LIDAR START
