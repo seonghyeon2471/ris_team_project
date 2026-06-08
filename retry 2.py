@@ -71,23 +71,23 @@ MIN_AREA    = 400
 TARGET_AREA = 6000       
 
 APPROACH_V           = 0.24  
-BLIND_V              = 0.29  # 사각지대 강제 전진 속도 (최고조)
+BLIND_V              = 0.29  
 
-# 화면 하단 유실 시점(전방 51cm)에서 로봇 중심이 색지 위에 안착할 때까지의 주행 시간 계산 반영 (51cm / 29cm/s ≈ 1.75초)
+# 화면 하단 유실 시점 기준 타이머
 APPROACH_DRIVE_SEC   = 1.7   
 APPROACH_MAX_TIMEOUT = 4.5   
 SEARCH_TIMEOUT       = 1.6   
 
-# 🌟 [신규 추가] 센트로이드 일치 후 3cm 이동 파라미터
-ALIGN_MARGIN_PX      = 4     # 센터 일치 판단 픽셀 오차 범위 (±4픽셀)
-ALIGN_DRIVE_V        = 0.20  # 3cm 이동 시 정밀 제어를 위한 저속 설정 (10cm/s)
-ALIGN_DRIVE_SEC      = 0.40  # 10cm/s 속도로 3cm 가기 위한 시간 (3cm / 10cm/s = 0.3초)
+# 센트로이드 일치 후 전진 파라미터
+ALIGN_MARGIN_PX      = 4     
+ALIGN_DRIVE_V        = 0.20  
+ALIGN_DRIVE_SEC      = 0.40  
 align_start_time     = None
 
 # =========================================
 # 색지 내부 정지 조건
 # =========================================
-PARK_SEC        = 3.0     # 전체 PARKING 대기 시간 (초)
+PARK_SEC        = 3.0     
 
 # =========================================
 # [1조] 바운더리 탐색 파라미터
@@ -99,26 +99,26 @@ BOUNDARY_W          = 0.55
 BOUNDARY_BACK_V     = -0.10
 
 # =========================================
-# 색상별 HSV 범위
+# 🌟 [수정] 오인식 방지를 위한 정밀 HSV 타겟 매핑
 # =========================================
 COLOR_CFG = {
     "red": {
-        "hsv1": ([0,   45,  50], [15,  255, 255]),
-        "hsv2": ([160, 45,  50], [179, 255, 255]),
+        "hsv1": ([0,   100,  80],  [12,  255, 255]), # 낮은 H 영역 빨강
+        "hsv2": ([165, 100,  80],  [179, 255, 255]), # 높은 H 영역 빨강
         "bgr":  ([0, 0, 0], [255, 255, 255]),
         "draw": (0, 0, 255),
     },
     "yellow": {
-        "hsv1": ([15,  30,  60], [40,  255, 255]),
-        "hsv2": ([10,  0,  190], [45,  45,  255]),
-        "bgr":  ([0, 0, 0], [255, 255, 255]),
-        "draw": (0, 200, 255),
-    },
-    "blue": {
-        "hsv1": ([90,  45,  40], [140, 255, 255]),
+        "hsv1": ([15,  110,  120], [32,  255, 255]), # 순수 노란색 타겟팅
         "hsv2": None,
         "bgr":  ([0, 0, 0], [255, 255, 255]),
-        "draw": (255, 80, 0),
+        "draw": (0, 220, 255),
+    },
+    "blue": {
+        "hsv1": ([95,  100,  60],  [130, 255, 255]), # 주위 간섭 차단한 청색 영역
+        "hsv2": None,
+        "bgr":  ([0, 0, 0], [255, 255, 255]),
+        "draw": (255, 110, 0),
     },
 }
 
@@ -134,13 +134,11 @@ last_seen_y               = 120
 park_start                = None
 search_start_time         = None
 approach_start_time       = None
-blind_dash_start_time     = None  # 블라인드 타이머 분리
+blind_dash_start_time     = None  
 
-# 근거리 유실 판단 변수
 last_dist_cm         = 150.0  
-NEAR_DIST_THRESHOLD  = 65.0   # 사각지대 진입선 유연화 (51cm 감안)
+NEAR_DIST_THRESHOLD  = 65.0   
 
-# [1조] 바운더리 탐색 내부 상태
 boundary_phase       = 0
 boundary_phase_start = None
 boundary_direction   = 1
@@ -223,8 +221,7 @@ def start_boundary_search(lost_x, frame_cx):
     boundary_phase = 1
     boundary_phase_start = time.time()
     state = "BOUNDARY"
-    print(f"🔍 [1조] 바운더리 탐색 | 유실x={lost_x} | "
-          f"1단계={'우' if boundary_direction > 0 else '좌'}")
+    print(f"🔍 [1조] 바운더리 탐색 | 유실x={lost_x} | 1단계={'우' if boundary_direction > 0 else '좌'}")
 
 def run_boundary_search():
     global boundary_phase, boundary_phase_start, state, search_start_time
@@ -236,7 +233,6 @@ def run_boundary_search():
         boundary_phase = 2
         boundary_phase_start = time.time()
         elapsed = 0.0
-        print("🔍 [1조] 2단계: 반대 방향 확장 탐색")
 
     if boundary_phase == 2:
         if elapsed < BOUNDARY_PHASE2_SEC:
@@ -244,7 +240,6 @@ def run_boundary_search():
         boundary_phase = 3
         boundary_phase_start = time.time()
         elapsed = 0.0
-        print("🔍 [1조] 3단계: 후진")
 
     if boundary_phase == 3:
         if elapsed < BOUNDARY_PHASE3_SEC:
@@ -252,7 +247,6 @@ def run_boundary_search():
         boundary_phase = 0
         state = "SEARCH"
         search_start_time = time.time()
-        print("⚠️ [1조] 바운더리 실패 → SEARCH 복귀")
         return 0.0, 0.0
 
     return 0.0, 0.0
@@ -260,8 +254,7 @@ def run_boundary_search():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("🏁 MISSION CONTROL v4 (Centroid Alignment Enabled)")
-print(f"   카메라 하단 사각지대 경계 거리: {pixel_to_ground_dist(240):.1f}cm")
+print("🏁 MISSION CONTROL v4 (Color Masking Optimized)")
 
 try:
     while True:
@@ -288,7 +281,7 @@ try:
         target = MISSION[mission_index]
         draw   = COLOR_CFG[target]["draw"]
 
-        # ── 마스크 ────────────────────────────────────────────────
+        # ── 마스크 생성 ────────────────────────────────────────────
         mask = make_mask(frame, hsv, target)
 
         contours_full, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
@@ -297,8 +290,7 @@ try:
         if contours_full:
             c_main = max(contours_full, key=cv2.contourArea)
             if cv2.contourArea(c_main) > MIN_AREA:
-                bottom_y = int(cv2.boundingRect(c_main)[1] +
-                               cv2.boundingRect(c_main)[3])
+                bottom_y = int(cv2.boundingRect(c_main)[1] + cv2.boundingRect(c_main)[3])
                 bottom_y = min(bottom_y, RES_H - 1)
                 est_dist_cm = pixel_to_ground_dist(bottom_y)
                 
@@ -306,41 +298,37 @@ try:
                 if est_dist_cm != float('inf'):
                     last_dist_cm = est_dist_cm
 
-        # ── 🌟 [신규 추가] 센트로이드 일치 후 3cm 정밀 전진 레이어 ──
+        # ── ALIGN_FORWARD 레이어 ──────────────────────────────────
         if state == "ALIGN_FORWARD":
             align_elapsed = time.time() - align_start_time
             if align_elapsed < ALIGN_DRIVE_SEC:
-                send_cmd(ALIGN_DRIVE_V, 0.0) # 직진 컴맨드 강제 유지
+                send_cmd(ALIGN_DRIVE_V, 0.0)
                 
-                cv2.putText(frame, f"STATE: ALIGN_FORWARD (3cm Drive)", (20, 40),
+                cv2.putText(frame, f"STATE: ALIGN_FORWARD", (20, 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 100, 0), 2)
                 cv2.imshow("frame", frame)
                 if cv2.waitKey(1) & 0xFF == 27:
                     break
                 continue
             else:
-                # 3cm 이동 시간 종료 -> 즉시 정지 레이어(PARKING)로 전환
                 state = "PARKING"
                 park_start = time.time()
-                print("🏁 [정렬 완료] 3cm 전진 종료 -> PARKING 정지 레이어 이행")
+                print("🏁 [정렬 완료] 3cm 전진 종료 -> PARKING 이행")
 
-        # ── [PARKING 격리 레이어] ──────────────────────────────────
+        # ── PARKING 격리 레이어 ──────────────────────────────────
         if state == "PARKING":
-            send_cmd(0.0, 0.0)  # 무조건 정지
-
+            send_cmd(0.0, 0.0)
             park_elapsed = time.time() - park_start
             remain_park  = max(0.0, PARK_SEC - park_elapsed)
 
-            cv2.putText(frame, "STATE: PARKING (STATIONARY)", (20, 40),
+            cv2.putText(frame, "STATE: PARKING", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            cv2.putText(frame, f"TARGET: {target}", (20, 70),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, draw, 2)
             cv2.putText(frame, f"HOLD: {remain_park:.1f}s", (20, 100),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             cv2.imshow("frame", frame)
 
             if park_elapsed >= PARK_SEC:
-                print(f"✅ [{target}] 미션 정차 완료 → 다음 단계로 복귀")
+                print(f"✅ [{target}] 미션 정차 완료")
                 mission_index += 1
                 blind_dash_start_time = None
                 boundary_phase = 0
@@ -350,7 +338,6 @@ try:
                 if mission_index < len(MISSION):
                     flush_camera_buffer(n=15)
                     start_boundary_search(last_seen_x, frame_cx)
-                    print(f"➡️  NEXT TARGET: [{MISSION[mission_index]}]")
                 else:
                     print("🏁 모든 미션 클리어")
 
@@ -358,20 +345,18 @@ try:
                 break
             continue
 
-        # ── APPROACH 타임아웃 안전장치 ────────────────────────────
+        # ── APPROACH 안전장치 ────────────────────────────────────
         if state == "APPROACH" and approach_start_time is not None:
             if time.time() - approach_start_time > APPROACH_MAX_TIMEOUT:
-                print(f"🚨 [안전장치] 타임아웃 만료 → 강제 주차 레이어 이행")
                 state      = "PARKING"
                 park_start = time.time()
                 continue
 
-        # ── 컨투어 ────────────────────────────────────────────────
+        # ── 제어 및 컨투어 처리 ──────────────────────────────────
         contours = contours_full
         cam_v, cam_w = 0.0, 0.0
         cam_state = state
 
-        # ── [객체 인지 상황] ───────────────────────────────────────
         if contours:
             c    = max(contours, key=cv2.contourArea)
             area = cv2.contourArea(c)
@@ -380,14 +365,13 @@ try:
                 if state in ["BOUNDARY", "FORCED_SEARCH", "WANDERING", "SEARCH"]:
                     boundary_phase = 0
                     state = "TRACK"
-                    print(f"🎯 [{target}] 포착 → TRACK (dist≈{est_dist_cm:.1f}cm)")
 
                 rect = cv2.minAreaRect(c)
                 (cx, cy_obj), _, _ = rect
                 cx, cy_obj = int(cx), int(cy_obj)
                 last_seen_x = cx
 
-                # 테두리를 초록색으로 변경 + 센트리이드 원 및 텍스트 표현
+                # 초록색 시각화 라인 출력
                 cv2.drawContours(frame, [np.int32(cv2.boxPoints(rect))], 0, (0, 255, 0), 2)
                 cv2.circle(frame, (cx, cy_obj), 5, (0, 255, 0), -1)
                 cv2.putText(frame, f"({cx}, {cy_obj})", (cx + 10, cy_obj - 10),
@@ -395,19 +379,16 @@ try:
 
                 error_x = cx - frame_cx
 
-                # 🌟 [핵심 변경] 카메라 중심과 객체 센트리이드(cx)가 마진 이내로 완벽히 일치했는지 판별
+                # 카메라 중앙과 물체 중심이 마진 내부로 일치할 시 즉시 전진 시퀀스 트리거
                 if abs(error_x) <= ALIGN_MARGIN_PX:
-                    print(f"🎯 [중심 일치] 센터 동기화 완료 (Error: {error_x}px) -> 3cm 정밀 전진 돌입")
                     state = "ALIGN_FORWARD"
                     align_start_time = time.time()
                     continue
 
-                # 면적이 커지거나 하단 접근 시 APPROACH 명시화
                 if state == "APPROACH" or area > TARGET_AREA or last_seen_y >= 200:
                     if state != "APPROACH":
                         state = "APPROACH"
                         approach_start_time = time.time()
-                        print(f"📥 [{target}] APPROACH 돌입 (Y={last_seen_y})")
 
                     cam_w = -KP_ROT * error_x * 0.5
                     cam_v = APPROACH_V
@@ -418,21 +399,14 @@ try:
                     cam_v    = MIN_V + (MAX_V - MIN_V) * (rem_area / TARGET_AREA)
                     cam_v    = np.clip(cam_v, MIN_V, MAX_V)
                     cam_state = "TRACK"
-
-            # 미세 노이즈 이하 유실 전조 처리
             else:
                 if state == "APPROACH" and last_seen_y >= 210:
                     state = "APPROACH_BLIND"
                     blind_dash_start_time = time.time()
-                    print("🚀 [하단 경계 유실] 객체 미세화 -> BLIND DASH 트리거")
-
-        # ── [객체 유실 상황 - 아예 사라졌을 때 처리 핵심] ──────────
         else:
-            # 주차 과정 실행을 위해 화면 아래로 아예 사라진 시점 제어
             if state == "APPROACH" or state == "APPROACH_BLIND":
                 if blind_dash_start_time is None:
                     blind_dash_start_time = time.time()
-                    print(f"🚀 [완전 유실 확정] 전방 사각지대 진입 -> {APPROACH_DRIVE_SEC}초간 블라인드 돌진 시작")
 
                 cam_v, cam_w = BLIND_V, 0.0
                 cam_state    = "APPROACH_BLIND"
@@ -440,7 +414,6 @@ try:
                 if time.time() - blind_dash_start_time > APPROACH_DRIVE_SEC:
                     state      = "PARKING"
                     park_start = time.time()
-                    print(f"🅿️  [{target}] 사각지대 돌진 시간 완료 → 로봇 정지 및 PARKING 검증")
 
             elif state == "BOUNDARY":
                 cam_v, cam_w = run_boundary_search()
@@ -460,10 +433,10 @@ try:
                 cam_v = 0.03
                 cam_w = -1.30 if last_seen_x > frame_cx else 1.30
 
-        # ── 모터 전달 ─────────────────────────────────────────────
+        # 모터 명령 송신
         send_cmd(cam_v, cam_w)
 
-        # ── 디스플레이 ────────────────────────────────────────────
+        # 디스플레이 출력
         cv2.putText(frame, f"STATE: {cam_state}", (20, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(frame, f"TARGET: {target}", (20, 70),
