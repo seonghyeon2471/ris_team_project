@@ -128,6 +128,7 @@ MISSION = ["red", "yellow", "blue"]
 mission_index        = 0
 state                = "SEARCH"
 last_seen_x          = 160
+last_seen_y          = 120    # 🌟 [추가] 마지막으로 목격된 Y 좌표 객체 (화면 중앙 부근 초기화)
 park_start           = None
 inside_stop_start    = None
 search_start_time    = None
@@ -258,7 +259,7 @@ def run_boundary_search():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("🏁 MISSION CONTROL v3 (Prompt Minimized)")
+print("🏁 MISSION CONTROL v3 (Blind Spot Logic Enhanced)")
 print(f"   카메라: h={CAM_H}cm  pitch={CAM_PITCH}°  fy={FY:.1f}px")
 print(f"   ROI y={ROI_Y} → 지면 거리 {pixel_to_ground_dist(ROI_Y):.1f}cm 이내 = 색지 내부")
 
@@ -306,6 +307,9 @@ try:
                 bottom_y = min(bottom_y, RES_H - 1)
                 est_dist_cm = pixel_to_ground_dist(bottom_y)
                 
+                # 🌟 [추가] 목격된 Y좌표 실시간 최신화 (가장 하단 픽셀 기준)
+                last_seen_y = bottom_y
+                
                 if est_dist_cm != float('inf'):
                     last_dist_cm = est_dist_cm
 
@@ -351,6 +355,7 @@ try:
                 inside_stop_start = None
                 boundary_phase = 0
                 last_dist_cm = 150.0  
+                last_seen_y = 120    # 미션 초기화 시 Y좌표 리셋
 
                 if mission_index < len(MISSION):
                     flush_camera_buffer(n=15)
@@ -421,7 +426,6 @@ try:
                 error_x = cx - frame_cx
 
                 if state == "TRACK":
-                    # 🌟 [최적화 - 제거] 매 프레임 터미널을 도배하던 무거운 실시간 라이다/카메라 거리 print문 제거
                     pass
 
                 if state == "APPROACH" or area > TARGET_AREA:
@@ -447,12 +451,18 @@ try:
 
             else:
                 # ── 형체는 유실되었으나 노이즈 수준의 작은 컨투어가 잡힌 경우 ──
-                if state not in ["BOUNDARY", "FORCED_SEARCH", "WANDERING", "PARKING"]:
+                if state not in ["BOUNDARY", "FORCED_SEARCH", "WANDERING", "PARKING", "APPROACH"]:
                     if last_dist_cm <= NEAR_DIST_THRESHOLD:
-                        state = "SEARCH"
-                        search_start_time = time.time()
-                        print(f"🔄 [근거리 면적유실] 최종거리 {last_dist_cm:.1f}cm <= {NEAR_DIST_THRESHOLD}cm "
-                              f"→ 바운더리 패스, 즉시 회전 탐색(SEARCH) 전환")
+                        
+                        # 🌟 [수정] 근거리 면적 축소 유실 시, 화면 아래쪽(Y>=210)으로 나갔다면 강제 진입 처리
+                        if last_seen_y >= 210:
+                            state = "APPROACH"
+                            approach_start_time = time.time()
+                            print(f"🚀 [하단 유실 예측] Y={last_seen_y} >= 210 -> 강제 직진(BLIND) 후 주차 연계")
+                        else:
+                            state = "SEARCH"
+                            search_start_time = time.time()
+                            print(f"🔄 [근거리 좌우유실] 최종거리 {last_dist_cm:.1f}cm -> 회전 탐색(SEARCH) 전환")
                     else:
                         start_boundary_search(last_seen_x, frame_cx)
 
@@ -482,9 +492,16 @@ try:
                 cam_v, cam_w = 0.20, 0.0
 
             else:
-                cam_state = "SEARCH-L" if last_seen_x <= frame_cx else "SEARCH-R"
-                cam_v = 0.03
-                cam_w = -0.65 if last_seen_x > frame_cx else 0.65
+                # 🌟 [추가] 완전유실 상태이나 근거리였고 화면 하단(Y>=210)으로 사라진 케이스라면 강제 직진(BLIND) 가동
+                if last_dist_cm <= NEAR_DIST_THRESHOLD and last_seen_y >= 210:
+                    state = "APPROACH"
+                    approach_start_time = time.time()
+                    print(f"🚀 [하단 완전유실] Y={last_seen_y} -> 강제 직진(BLIND) 상태 트리거")
+                else:
+                    # 일반 원거리 유실 및 좌우 탈출은 기존 구조대로 제자리 회전 탐색
+                    cam_state = "SEARCH-L" if last_seen_x <= frame_cx else "SEARCH-R"
+                    cam_v = 0.03
+                    cam_w = -0.65 if last_seen_x > frame_cx else 0.65
 
         # ── 모터 전달 ─────────────────────────────────────────────
         send_cmd(cam_v, cam_w)
