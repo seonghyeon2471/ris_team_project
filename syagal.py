@@ -70,12 +70,12 @@ KP_ROT      = 0.003
 MIN_AREA    = 400        # 광각 대응 하한
 TARGET_AREA = 6000       # APPROACH 진입 면적
 
-# 🌟 [블라인드 대시 강화] 유실 후 주차 패드까지 탄력 있게 밀고 들어가는 파라미터
-APPROACH_V           = 0.22  # 타겟이 보일 때 조준하며 다가가는 속도
-BLIND_V              = 0.25  # 타겟이 화면 아래로 사라진 직후 밀고 나가는 돌진 속도
-APPROACH_DRIVE_SEC   = 1.2   # BLIND_V 속도로 직진할 시간 (초) - 속도가 빨라진 만큼 시간은 소폭 최적화
-APPROACH_MAX_TIMEOUT = 4.0
-SEARCH_TIMEOUT       = 2.2
+# 🌟 [속도 폭발 및 시간 최적화] 전진 대시 및 회전수색 파라미터 과감한 상향
+APPROACH_V           = 0.24  # 정렬 주행 속도 소폭 상향
+BLIND_V              = 0.29  # 사각지대 강제 전진 속도 대폭 상향 (기존 0.25 -> 한계점 돌입)
+APPROACH_DRIVE_SEC   = 0.8   # 돌진 속도가 빨라진 만큼 돌진 시간 압축 (기존 1.2초 -> 0.8초로 지나침 방지)
+APPROACH_MAX_TIMEOUT = 3.5   # 접근 전체 타임아웃 소폭 압축
+SEARCH_TIMEOUT       = 1.6   # 회전 속도가 빨라졌으므로 360도 수색 타임아웃 단축 (기존 2.2초 -> 1.6초)
 
 # =========================================
 # [7조] ROI 도착 판정 파라미터
@@ -192,8 +192,9 @@ lidar_thread.start()
 # MOTOR
 # =========================================
 def send_cmd(v, w):
-    v = np.clip(v, -0.3, 0.3)
-    w = np.clip(w, -1.2, 1.2)
+    # 🌟 [속도 폭발 및 시간 최적화] 하드웨어 출력이 잘리지 않도록 클립 범위 확장 (v: 0.40, w: 1.60)
+    v = np.clip(v, -0.4, 0.4)
+    w = np.clip(w, -1.6, 1.6)
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
 def stop_robot():
@@ -262,7 +263,7 @@ def run_boundary_search():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("🏁 MISSION CONTROL v3 (Blind Dash Optimized)")
+print("🏁 MISSION CONTROL v3 (Maximum Speed Profile Loaded)")
 print(f"   카메라: h={CAM_H}cm  pitch={CAM_PITCH}°  fy={FY:.1f}px")
 print(f"   ROI y={ROI_Y} → 지면 거리 {pixel_to_ground_dist(ROI_Y):.1f}cm 이내 = 색지 내부")
 
@@ -468,7 +469,7 @@ try:
         # ── [객체 유실 - 완전히 잡히지 않을 때] ───────────────────
         else:
             if state == "APPROACH":
-                # 🌟 [블라인드 대시 강화] 유실 후에는 속도를 줄이지 않고 BLIND_V(0.25)의 강력한 속도로 돌진
+                # 🌟 [속도 폭발 및 시간 최적화] 사각지대 전진 돌진 속도 최고조 상향 (BLIND_V = 0.29)
                 cam_v, cam_w = BLIND_V, 0.0
                 cam_state    = "APPROACH_BLIND"
                 if time.time() - approach_start_time > APPROACH_DRIVE_SEC:
@@ -486,7 +487,8 @@ try:
                 if time.time() - search_start_time > SEARCH_TIMEOUT:
                     start_boundary_search(last_seen_x, frame_cx)
                 else:
-                    cam_v, cam_w = 0.03, 1.05
+                    # 🌟 [속도 폭발 및 시간 최적화] 강제 회전 수색 각속도 대폭 상향 (기존 1.05 -> 1.35)
+                    cam_v, cam_w = 0.03, 1.35
 
             elif state == "WANDERING":
                 cam_v, cam_w = 0.20, 0.0
@@ -499,7 +501,8 @@ try:
                 else:
                     cam_state = "SEARCH-L" if last_seen_x <= frame_cx else "SEARCH-R"
                     cam_v = 0.03
-                    cam_w = -1.00 if last_seen_x > frame_cx else 1.00
+                    # 🌟 [속도 폭발 및 시간 최적화] 일반 제자리 회전 탐색 각속도 대폭 상향 (기존 1.00 -> 1.30)
+                    cam_w = -1.30 if last_seen_x > frame_cx else 1.30
 
         # ── 모터 전달 ─────────────────────────────────────────────
         send_cmd(cam_v, cam_w)
