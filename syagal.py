@@ -47,12 +47,12 @@ scan_lock    = threading.Lock()
 # =========================================
 # 카메라 기하학 파라미터
 # =========================================
-CAM_H        = 73.0   
-CAM_PITCH    = 30.0   
-CAM_FOV_V    = 50.0   
+CAM_H        = 73.0
+CAM_PITCH    = 30.0
+CAM_FOV_V    = 50.0
 RES_W, RES_H = 320, 240
-CY           = RES_H / 2   
-FY           = (RES_H / 2) / math.tan(math.radians(CAM_FOV_V / 2))  
+CY           = RES_H / 2
+FY           = (RES_H / 2) / math.tan(math.radians(CAM_FOV_V / 2))
 
 def pixel_to_ground_dist(y_px):
     delta_deg  = math.degrees(math.atan2(y_px - CY, FY))
@@ -67,17 +67,17 @@ def pixel_to_ground_dist(y_px):
 MAX_V       = 0.24
 MIN_V       = 0.10
 KP_ROT      = 0.003
-MIN_AREA    = 900        
-TARGET_AREA = 6000       
+MIN_AREA    = 900
+TARGET_AREA = 6000
 
-APPROACH_V           = 0.24  
-BLIND_V              = 0.29  
+APPROACH_V           = 0.24
+BLIND_V              = 0.29
 
-APPROACH_DRIVE_SEC   = 1.2   
-APPROACH_MAX_TIMEOUT = 4.5   
-SEARCH_TIMEOUT       = 1.6   
+APPROACH_DRIVE_SEC   = 1.2
+APPROACH_MAX_TIMEOUT = 4.5
+SEARCH_TIMEOUT       = 1.6
 
-PARK_SEC        = 3.0     
+PARK_SEC        = 3.0
 
 # 바운더리 파라미터
 BOUNDARY_PHASE1_SEC = 1.0
@@ -85,6 +85,12 @@ BOUNDARY_PHASE2_SEC = 1.8
 BOUNDARY_PHASE3_SEC = 0.8
 BOUNDARY_W          = 0.55
 BOUNDARY_BACK_V     = -0.10
+
+# =========================================
+# 정렬(Align) 파라미터  ← 신규 추가
+# =========================================
+ALIGN_THRESHOLD = 30    # 이 픽셀 이내면 "정렬됨"으로 판단, 전진 허용
+ALIGN_SCALE     = 1.5   # 정렬 안 됐을 때 회전력 배율
 
 # =========================================
 # HSV & BGR 정밀 컬러 지정
@@ -118,20 +124,19 @@ MISSION = ["red", "yellow", "blue"]
 mission_index             = 0
 state                     = "SEARCH"
 last_seen_x               = 160
-last_seen_y               = 120    
+last_seen_y               = 120
 park_start                = None
 search_start_time         = None
 approach_start_time       = None
-blind_dash_start_time     = None  
+blind_dash_start_time     = None
 
-last_dist_cm         = 150.0  
+last_dist_cm         = 150.0
 boundary_phase       = 0
 boundary_phase_start = None
 boundary_direction   = 1
 
 morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
 
-# 출력을 제어하기 위한 프레임 카운터
 frame_count = 0
 
 # =========================================
@@ -195,7 +200,7 @@ def make_mask(frame, hsv, color_name):
         lo2, hi2 = np.array(cfg["hsv2"][0]), np.array(cfg["hsv2"][1])
         hsv_mask = cv2.bitwise_or(hsv_mask, cv2.inRange(hsv, lo2, hi2))
     bgr_mask = cv2.inRange(frame, np.array(cfg["bgr"][0]), np.array(cfg["bgr"][1]))
-    
+
     mask = cv2.bitwise_and(hsv_mask, bgr_mask)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, morph_kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, morph_kernel)
@@ -232,9 +237,19 @@ def run_boundary_search():
     return 0.0, 0.0
 
 # =========================================
+# 정렬 비율 계산 헬퍼  ← 신규 추가
+# =========================================
+def calc_align_ratio(error_x):
+    """
+    error_x가 ALIGN_THRESHOLD 이내면 1.0(풀 전진),
+    이상이면 0.0(전진 없음)으로 선형 보간.
+    """
+    return max(0.0, 1.0 - abs(error_x) / ALIGN_THRESHOLD)
+
+# =========================================
 # MAIN LOOP
 # =========================================
-print("🏁 MISSION CONTROL v7.4 Active (Auto Data Telemetry Engaged)")
+print("🏁 MISSION CONTROL v7.5 Active (Centroid-Align Drive)")
 
 try:
     while True:
@@ -259,7 +274,7 @@ try:
         mask   = make_mask(frame, hsv, target)
 
         contours_full, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
+
         with scan_lock:
             front_angles = list(range(345, 360)) + list(range(0, 15))
             front_dists = [_scan_shared[a] for a in front_angles if 3.0 < _scan_shared[a] < 150.0]
@@ -273,7 +288,7 @@ try:
 
             rect = cv2.minAreaRect(c)
             (cx, cy_obj), (w_box, h_box), angle = rect
-            
+
             if cy_obj < 55:
                 continue
 
@@ -295,31 +310,35 @@ try:
             c_main, area, rect, est_dist_cm, bottom_y = max(valid_contours, key=lambda x: x[1])
             (cx, cy_obj), _, _ = rect
             cx, cy_obj = int(cx), int(cy_obj)
-            
-            # 🎯 [수정] 회전 탐색(FORCED_SEARCH) 중 타겟을 발견하면 즉시 정지 후 추적 전환
+
             if state == "FORCED_SEARCH":
                 print(f"🎯 [타겟 포착] 회전 중 {target} 발견! 관성 제어를 위해 순간 정지.")
                 stop_robot()
-                time.sleep(0.4)           # 0.4초간 물리 브레이크 (카메라 블러 방지)
-                flush_camera_buffer(n=6)  # 정지하는 동안 밀린 프레임 버퍼 완전히 비우기
-            
+                time.sleep(0.4)
+                flush_camera_buffer(n=6)
+
             last_seen_x = int(0.6 * last_seen_x + 0.4 * cx)
             error_x = last_seen_x - frame_cx
             last_seen_y = bottom_y
-            
+
             if est_dist_cm != float('inf'):
                 last_dist_cm = est_dist_cm
-            
+
             cv2.drawContours(frame, [np.int32(cv2.boxPoints(rect))], 0, draw, 2)
+
+            # 정렬 상태 시각화: 센트로이드와 카메라 중심 사이 선
+            cv2.line(frame, (frame_cx, cy_obj), (cx, cy_obj), (0, 255, 255), 1)
+            cv2.circle(frame, (cx, cy_obj), 5, draw, -1)
+            cv2.circle(frame, (frame_cx, cy_obj), 4, (0, 255, 255), 1)
 
             if frame_count % 15 == 0:
                 cx_clamped = np.clip(cx, 0, WIDTH - 1)
                 cy_clamped = np.clip(cy_obj, 0, HEIGHT - 1)
                 bgr_val = frame[cy_clamped, cx_clamped]
                 hsv_val = hsv[cy_clamped, cx_clamped]
-                print(f"📊 Tracking [{target}] | Area: {int(area)} | Dist: {est_dist_cm:.1f}cm | BGR: {bgr_val} | HSV: {hsv_val}")
+                align_r = calc_align_ratio(error_x)
+                print(f"📊 Tracking [{target}] | Area: {int(area)} | Dist: {est_dist_cm:.1f}cm | AlignRatio: {align_r:.2f} | BGR: {bgr_val} | HSV: {hsv_val}")
 
-            # 탐색 상태였다면 추적(TRACK) 상태로 바로 전입하여 그 방향으로 전진 주행 시작
             if state in ["BOUNDARY", "FORCED_SEARCH", "WANDERING", "SEARCH"]:
                 boundary_phase = 0
                 state = "TRACK"
@@ -330,7 +349,7 @@ try:
 
         # ── 1. PARKING 상태 ───────────────────
         if state == "PARKING":
-            send_cmd(0.0, 0.0)  
+            send_cmd(0.0, 0.0)
             park_elapsed = time.time() - park_start
 
             cv2.putText(frame, f"STATE: PARKING ({PARK_SEC - park_elapsed:.1f}s)", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
@@ -338,20 +357,19 @@ try:
 
             if park_elapsed >= PARK_SEC:
                 print(f"✅ [{target}] 안착 완료 -> 다음 미션 전환")
-                arduino_ser.write(b"RESET\n") 
-                
+                arduino_ser.write(b"RESET\n")
+
                 mission_index += 1
                 blind_dash_start_time = None
                 boundary_phase = 0
-                last_seen_y = 120    
+                last_seen_y = 120
 
                 if mission_index < len(MISSION):
                     flush_camera_buffer(n=15)
-                    # 🎯 [수정] 두 조건을 만족하고 다음 탐색으로 넘어갈 때 바운더리 대신 회전 탐색(FORCED_SEARCH)부터 시작
                     state = "FORCED_SEARCH"
                     search_start_time = time.time()
                     print(f"🔄 다음 미션 [{MISSION[mission_index]}] 시작! 제자리 회전 탐색(FORCED_SEARCH) 돌입")
-            
+
             if cv2.waitKey(1) & 0xFF == 27: break
             continue
 
@@ -370,7 +388,7 @@ try:
             cam_w = 0.0
             cam_state = "APPROACH_BLIND"
 
-            time_condition = (time.time() - blind_dash_start_time >= APPROACH_DRIVE_SEC)
+            time_condition  = (time.time() - blind_dash_start_time >= APPROACH_DRIVE_SEC)
             clear_condition = (not object_detected)
 
             if time_condition and clear_condition:
@@ -396,15 +414,25 @@ try:
                         print("🚀 [하단 한계 진입] APPROACH_BLIND 시작")
                         cam_v, cam_w = BLIND_V, 0.0
                     else:
-                        cam_w = -KP_ROT * error_x * 0.5
-                        cam_v = APPROACH_V
+                        # ── APPROACH: 정렬 후 전진  ← 수정
+                        align_ratio = calc_align_ratio(error_x)
+                        cam_w = -KP_ROT * error_x * (1.0 if abs(error_x) > ALIGN_THRESHOLD else 0.5)
+                        cam_v = APPROACH_V * align_ratio
                     cam_state = "APPROACH"
+
                 else:
+                    # ── TRACK: 정렬 후 전진  ← 수정
+                    align_ratio = calc_align_ratio(error_x)
+
                     cam_w = -KP_ROT * error_x
+                    if abs(error_x) > ALIGN_THRESHOLD:
+                        cam_w *= ALIGN_SCALE  # 정렬 안 됐을 때 회전력 강화
+
                     rem_area = max(0.0, TARGET_AREA - area)
-                    cam_v = MIN_V + (MAX_V - MIN_V) * (rem_area / TARGET_AREA)
-                    cam_v = np.clip(cam_v, MIN_V, MAX_V)
+                    base_v   = MIN_V + (MAX_V - MIN_V) * (rem_area / TARGET_AREA)
+                    cam_v    = np.clip(base_v * align_ratio, 0.0, MAX_V)
                     cam_state = "TRACK"
+
             else:
                 if state == "APPROACH":
                     state = "APPROACH_BLIND"
@@ -414,14 +442,12 @@ try:
                 elif state == "BOUNDARY":
                     cam_v, cam_w = run_boundary_search()
                     cam_state = f"BOUNDARY-P{boundary_phase}"
-                # 🎯 [수정] 회전 탐색 모드일 때 마지막으로 객체를 보았던 방향을 기준으로 제자리 회전
                 elif state == "FORCED_SEARCH":
                     if time.time() - search_start_time > SEARCH_TIMEOUT:
-                        # 지정된 시간(1.6초) 동안 못 찾으면 최후의 수단으로 바운더리 서치 백업 가동
                         start_boundary_search(last_seen_x, frame_cx)
                     else:
-                        cam_v = 0.02  # 아주 미세한 전진력을 주어 회전 반경 최적화
-                        cam_w = -1.35 if last_seen_x > frame_cx else 1.35 # 마지막 목격 방향으로 빠르게 회전
+                        cam_v = 0.02
+                        cam_w = -1.35 if last_seen_x > frame_cx else 1.35
                 elif state == "WANDERING":
                     cam_v, cam_w = 0.20, 0.0
                 else:
@@ -433,8 +459,10 @@ try:
         send_cmd(cam_v, cam_w)
 
         # ── 디스플레이 ────────────────────────────────────────────
+        align_ratio_disp = calc_align_ratio(error_x) if object_detected else 0.0
         cv2.putText(frame, f"STATE: {cam_state}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(frame, f"TARGET: {target}", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, draw, 2)
+        cv2.putText(frame, f"ALIGN: {align_ratio_disp:.2f} | ERR: {error_x:+d}px", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
         cv2.putText(frame, f"LIDAR FRONT: {min_front_lidar:.1f} cm", (20, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         cv2.imshow("frame", frame)
 
