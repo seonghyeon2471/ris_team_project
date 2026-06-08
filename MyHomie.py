@@ -330,7 +330,7 @@ try:
                         f"[{color_name}] 화면 아래로 사라짐 "
                         f"(last_cy={last_cy}) → 주차 완료"
                     )
-                    time.sleep(0.5)
+                    time.sleep(1.2)
                     next_state()
                 else:
                     # 위쪽에서 놓친 것 → 재탐색
