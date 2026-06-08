@@ -1,12 +1,23 @@
-import cv2
 import serial
-import numpy as np
+import math
 import time
+import numpy as np
+import cv2
 
 # =========================================
 # SERIAL
 # =========================================
-arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
+arduino_ser = serial.Serial(
+    "/dev/serial0",
+    115200,
+    timeout=0.1
+)
+
+lidar_ser = serial.Serial(
+    "/dev/ttyUSB0",
+    460800,
+    timeout=0.1
+)
 
 # =========================================
 # CAMERA
@@ -14,256 +25,323 @@ arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+
+FRAME_W = 320
+FRAME_H = 240
+
+# 색상이 "아래로 사라졌다"고 판단할 Y 기준선
+# 화면 하단 20% 이내에 색상 중심이 있으면 → 도착
+BOTTOM_THRESHOLD = int(FRAME_H * 0.80)
+
+# 색상이 충분히 크면 추적 시작 (노이즈 제거)
+MIN_COLOR_AREA = 800
 
 # =========================================
-# CONTROL
+# LIDAR START
 # =========================================
-KP_ROT       = 0.0045
-MIN_AREA     = 500
-TARGET_AREA  = 18000   # 이 면적까지 접근
-MIN_FORWARD  = 0.05
-MIN_BACKWARD = -0.08
-
-# =========================================
-# 도착 판정 파라미터
-# =========================================
-# 구역이 화면 하단에 걸쳐있을 때 y 기준
-# 240 해상도에서 하단 20% = y > 192
-BOTTOM_THRESHOLD = 200   # 윤곽 하단이 이 y 이상이면 "구역이 발 밑에 있음"
-NEAR_AREA        = 12000  # 이 면적 이상일 때만 도착 판정 고려
-ARRIVE_CONFIRM   = 8      # 연속 N프레임 유지
-
-arrive_count  = 0
-
-# 도착 확정 후 구역 중앙까지 전진
-# 구역이 하단에서 사라질 때 앞 끝이 구역에 걸쳐있는 상태
-# 속도 0.06으로 1.2초 ≈ 7cm 전진 → 구역 중앙
-FINAL_SPEED    = 0.06
-FINAL_DURATION = 1.2
+lidar_ser.write(bytes([0xA5, 0x40]))
+time.sleep(2)
+lidar_ser.reset_input_buffer()
+lidar_ser.write(bytes([0xA5, 0x20]))
+lidar_ser.read(7)
+print("LIDAR START")
 
 # =========================================
-# 색상 범위
+# PARAMETERS
 # =========================================
-# RED (주황 오인식 방지: H 0~10, 165~179)
-lower_red_hsv1 = np.array([165, 100, 100])
-upper_red_hsv1 = np.array([179, 255, 255])
-lower_red_hsv2 = np.array([0,   100, 100])
-upper_red_hsv2 = np.array([10,  255, 255])
-lower_red_bgr  = np.array([80,  30,  150])
-upper_red_bgr  = np.array([200, 210, 255])
+MAX_SPEED   = 0.28
+MIN_SPEED   = 0.09
+TRACK_SPEED = 0.15      # 색상 추적 중 전진 속도
+MAX_W       = 0.9
 
-# YELLOW (H 15~35)
-lower_yellow_hsv = np.array([15, 100, 150])
-upper_yellow_hsv = np.array([35, 255, 255])
-lower_yellow_bgr = np.array([0,  120, 150])
-upper_yellow_bgr = np.array([180,255, 255])
+THRESH_30   = 32.0
+THRESH_20   = 22.0
+THRESH_10   = 12.0
+FRONT_CHECK_RANGE = 45
 
-# BLUE (H 100~135)
-lower_blue_hsv = np.array([100, 80,  70])
-upper_blue_hsv = np.array([135, 255, 255])
-lower_blue_bgr = np.array([80,  50,  30])
-upper_blue_bgr = np.array([255, 180, 180])
+# 조향 P 게인 (픽셀 오차 → 각속도)
+KP_STEER = 0.004
 
 # =========================================
-# FSM
+# HSV 색상 범위
 # =========================================
-mission_order = ["RED", "YELLOW", "BLUE"]
-mission_idx   = 0
-target_color  = mission_order[mission_idx]
+COLOR_RANGES = {
+    "RED": [
+        (np.array([0,   120,  70]),  np.array([10,  255, 255])),
+        (np.array([170, 120,  70]),  np.array([180, 255, 255])),
+    ],
+    "YELLOW": [
+        (np.array([20,  120,  70]),  np.array([35,  255, 255])),
+    ],
+    "BLUE": [
+        (np.array([100, 120,  70]),  np.array([130, 255, 255])),
+    ],
+}
 
-found_once   = False
-search_dir   = 1
-search_timer = 0
-last_seen_x  = 160
+# =========================================
+# 상태머신
+# =========================================
+STATE_SEQUENCE = [
+    "FIND_RED",
+    "PARK_RED",
+    "FIND_YELLOW",
+    "PARK_YELLOW",
+    "FIND_BLUE",
+    "PARK_BLUE",
+    "DONE",
+]
+
+state_idx = 0
+
+def current_state():
+    return STATE_SEQUENCE[state_idx]
+
+def next_state():
+    global state_idx
+    state_idx += 1
+    print(f">>> STATE: {current_state()}")
+
+# =========================================
+# FILTER
+# =========================================
+EMA_ALPHA = 0.35
+MEDIAN_K  = 2
+
+scan_data = np.full(360, 150.0, dtype=np.float32)
+
+def apply_ema(angle, new_dist_cm):
+    if not isinstance(new_dist_cm, (int, float)) or new_dist_cm <= 0:
+        return
+    scan_data[angle] = (
+        (1.0 - EMA_ALPHA) * scan_data[angle]
+        + EMA_ALPHA * new_dist_cm
+    )
+
+def apply_median_filter():
+    k = MEDIAN_K
+    window = 2 * k + 1
+    filtered = np.empty(360, dtype=np.float32)
+    for i in range(360):
+        idx = [(i + d) % 360 for d in range(-k, k + 1)]
+        values = np.sort(scan_data[idx])
+        filtered[i] = values[window // 2]
+    scan_data[:] = filtered
+
+def get_front_min():
+    idx = np.arange(-FRONT_CHECK_RANGE, FRONT_CHECK_RANGE + 1) % 360
+    return float(np.min(scan_data[idx]))
+
+def choose_avoid_direction():
+    left_avg  = float(np.mean(scan_data[1:90]))
+    right_avg = float(np.mean(scan_data[271:360]))
+    return 1 if left_avg >= right_avg else -1
 
 # =========================================
 # MOTOR
 # =========================================
 def send_cmd(v, w):
-    v = np.clip(v, -0.30, 0.30)
-    w = np.clip(w, -0.80, 0.80)
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
 def stop_robot():
-    send_cmd(0, 0)
+    send_cmd(0.0, 0.0)
 
-def get_mask(frame, hsv, color):
-    if color == "RED":
-        m1 = cv2.inRange(hsv, lower_red_hsv1, upper_red_hsv1)
-        m2 = cv2.inRange(hsv, lower_red_hsv2, upper_red_hsv2)
-        hsv_mask = cv2.bitwise_or(m1, m2)
-        bgr_mask = cv2.inRange(frame, lower_red_bgr, upper_red_bgr)
-    elif color == "YELLOW":
-        hsv_mask = cv2.inRange(hsv, lower_yellow_hsv, upper_yellow_hsv)
-        bgr_mask = cv2.inRange(frame, lower_yellow_bgr, upper_yellow_bgr)
+# =========================================
+# CAMERA: 색상 감지
+# 반환: (cx, cy, area) 또는 None
+# =========================================
+def detect_color(frame, color_name):
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+
+    for (lo, hi) in COLOR_RANGES[color_name]:
+        mask |= cv2.inRange(hsv, lo, hi)
+
+    # 모폴로지 노이즈 제거
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(
+        mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    if not contours:
+        return None
+
+    largest = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(largest)
+
+    if area < MIN_COLOR_AREA:
+        return None
+
+    M = cv2.moments(largest)
+    if M["m00"] == 0:
+        return None
+
+    cx = int(M["m10"] / M["m00"])
+    cy = int(M["m01"] / M["m00"])
+
+    return (cx, cy, area)
+
+# =========================================
+# 라이다 기반 회피 조향값 계산
+# (send 하지 않고 v, w 만 반환)
+# =========================================
+def lidar_avoid_cmd():
+    front_min = get_front_min()
+
+    if front_min < THRESH_10:
+        direction = choose_avoid_direction()
+        return MIN_SPEED, direction * MAX_W
+
+    elif front_min < THRESH_20:
+        direction = choose_avoid_direction()
+        return 0.12, direction * 0.8
+
+    elif front_min < THRESH_30:
+        direction = choose_avoid_direction()
+        return 0.15, direction * 0.7
+
     else:
-        hsv_mask = cv2.inRange(hsv, lower_blue_hsv, upper_blue_hsv)
-        bgr_mask = cv2.inRange(frame, lower_blue_bgr, upper_blue_bgr)
+        return MAX_SPEED, 0.0
 
-    mask = cv2.bitwise_and(hsv_mask, bgr_mask)
-    kernel = np.ones((3, 3), np.uint8)
-    return cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+# =========================================
+# 라이다 1프레임 읽기
+# 반환: s_flag (스캔 완료 여부)
+# =========================================
+def read_lidar_frame():
+    raw = lidar_ser.read(5)
+    if len(raw) != 5:
+        return False
 
-def do_arrival():
-    """도착 확정 후 처리"""
-    global arrive_count, mission_idx, target_color, found_once, search_timer
+    s_flag = raw[0] & 0x01
 
-    # 구역 중앙까지 짧게 전진 후 정지
-    print(f"[{target_color}] 구역 진입 - 전진 {FINAL_DURATION}초")
-    send_cmd(FINAL_SPEED, 0)
-    time.sleep(FINAL_DURATION)
+    if (
+        ((raw[0] & 0x02) >> 1) != (1 - s_flag)
+        or (raw[1] & 0x01) != 1
+        or (raw[0] >> 2) < 3
+    ):
+        return False
 
-    stop_robot()
-    print(f"[{target_color}] 1초 정지")
-    time.sleep(1.0)
-    print(f"[{target_color}] DONE")
+    angle    = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0) % 360
+    dist_cm  = (raw[3] | (raw[4] << 8)) / 40.0
 
-    arrive_count = 0
-    mission_idx += 1
+    if 3 < dist_cm < 150:
+        apply_ema(angle, dist_cm)
 
-    if mission_idx >= len(mission_order):
-        print("=== MISSION COMPLETE ===")
-        stop_robot()
-        return True  # 전체 완료
+    if s_flag == 1:
+        apply_median_filter()
+        return True
 
-    target_color = mission_order[mission_idx]
-    print(f"다음 목표: {target_color}")
-    found_once   = False
-    search_timer = 0
     return False
 
-print("=== MISSION START ===")
-print(f"첫 번째 목표: {target_color}")
+# =========================================
+# MAIN LOOP
+# =========================================
+print(f"START → {current_state()}")
+
+# 현재 추적 중인 색상 이름
+TARGET_COLOR = {
+    "FIND_RED":    "RED",
+    "PARK_RED":    "RED",
+    "FIND_YELLOW": "YELLOW",
+    "PARK_YELLOW": "YELLOW",
+    "FIND_BLUE":   "BLUE",
+    "PARK_BLUE":   "BLUE",
+}
 
 try:
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            continue
 
-        area = 0
-        frame = cv2.flip(frame, 1)
-        HEIGHT, WIDTH = frame.shape[:2]
-        frame_cx = WIDTH // 2
+        state = current_state()
 
-        hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = get_mask(frame, hsv, target_color)
-
-        contours, _ = cv2.findContours(
-            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-
-        state       = "SEARCH"
-        bottom_y    = 0
-
-        if contours:
-            found_once   = True
-            search_timer = 0
-
-            c    = max(contours, key=cv2.contourArea)
-            area = cv2.contourArea(c)
-
-            if area > MIN_AREA:
-
-                # 무게중심
-                M = cv2.moments(c)
-                if M["m00"] != 0:
-                    cx = int(M["m10"] / M["m00"])
-                    cy = int(M["m01"] / M["m00"])
-                else:
-                    cx, cy = frame_cx, HEIGHT // 2
-
-                last_seen_x = cx
-                error_x     = cx - frame_cx
-
-                # 윤곽 하단 y좌표 (구역이 발밑에 얼마나 걸쳐있는지)
-                bottom_y = int(c[:, :, 1].max())
-
-                # 시각화
-                cv2.circle(frame, (cx, cy), 6, (0, 0, 255), -1)
-                cv2.drawContours(frame, [c], -1, (0, 255, 0), 2)
-                cv2.line(frame, (frame_cx, 0), (frame_cx, HEIGHT),
-                         (255, 255, 0), 1)
-                # 하단 기준선 표시
-                cv2.line(frame, (0, BOTTOM_THRESHOLD),
-                         (WIDTH, BOTTOM_THRESHOLD), (0, 165, 255), 1)
-
-                w = -KP_ROT * error_x
-
-                # ─────────────────────────────────────
-                # 도착 판정
-                # 조건: x 정렬 + 면적 충분 + 하단이 화면 끝에 걸침
-                # ─────────────────────────────────────
-                centered    = abs(error_x) < 25
-                near_enough = area > NEAR_AREA
-                at_bottom   = bottom_y > BOTTOM_THRESHOLD
-
-                if centered and near_enough and at_bottom:
-                    arrive_count += 1
-                    state = f"CONFIRM {arrive_count}/{ARRIVE_CONFIRM}"
-
-                    # 확정 전까지 천천히 전진 (정렬 유지)
-                    send_cmd(0.04, w)
-
-                    if arrive_count >= ARRIVE_CONFIRM:
-                        done = do_arrival()
-                        if done:
-                            break
-                        continue
-
-                else:
-                    arrive_count = 0
-
-                    distance_error = TARGET_AREA - area
-                    if distance_error > 0:
-                        v = distance_error * 0.000025
-                        v = np.clip(v, MIN_FORWARD, 0.18)
-                        state = "TRACK"
-                    else:
-                        v = distance_error * 0.000020
-                        v = np.clip(v, MIN_BACKWARD, -0.03)
-                        state = "BACKWARD"
-
-                    send_cmd(v, w)
-
-        else:
-            arrive_count = 0
-            search_timer += 1
-
-            if not found_once:
-                send_cmd(0, 0.35 * search_dir)
-                state = "INIT SEARCH"
-                if search_timer > 70:
-                    search_dir  *= -1
-                    search_timer = 0
-            else:
-                if last_seen_x > frame_cx:
-                    send_cmd(0.03, -0.30)
-                    state = "SEARCH RIGHT"
-                else:
-                    send_cmd(0.03,  0.30)
-                    state = "SEARCH LEFT"
-
-        # HUD
-        cv2.putText(frame, state,
-                    (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(frame, f"TARGET:{target_color}",
-                    (20, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        cv2.putText(frame, f"AREA:{int(area)}  BOT:{bottom_y}",
-                    (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 0), 2)
-        cv2.putText(frame, f"MISSION:{mission_idx+1}/{len(mission_order)}",
-                    (20, 145), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
-
-        cv2.imshow("frame", frame)
-        if cv2.waitKey(1) == 27:
+        # ──────────────────────────────
+        # DONE
+        # ──────────────────────────────
+        if state == "DONE":
+            stop_robot()
+            print("ALL DONE. 모든 색상 주차 완료.")
             break
 
+        # ──────────────────────────────
+        # 라이다 읽기 (매 루프)
+        # ──────────────────────────────
+        scan_complete = read_lidar_frame()
+
+        # ──────────────────────────────
+        # 카메라 읽기 (매 루프)
+        # ──────────────────────────────
+        ret, frame = cap.read()
+        color_name = TARGET_COLOR[state]
+        detection  = detect_color(frame, color_name) if ret else None
+
+        # ──────────────────────────────
+        # FIND_* 상태
+        # 라이다로 주행, 색상 발견 시 PARK_* 전환
+        # ──────────────────────────────
+        if state.startswith("FIND_"):
+
+            if detection:
+                cx, cy, area = detection
+                print(
+                    f"[{color_name}] 발견! cx={cx} cy={cy} "
+                    f"area={area:.0f} → PARK 전환"
+                )
+                next_state()   # FIND_* → PARK_*
+                continue
+
+            # 색상 미발견 → 라이다 회피 주행
+            if scan_complete:
+                v, w = lidar_avoid_cmd()
+                send_cmd(v, w)
+
+        # ──────────────────────────────
+        # PARK_* 상태
+        # 색상 X축 중앙값으로 P 조향
+        # 색상이 하단으로 사라지면 정지 → 다음 FIND_* 전환
+        # ──────────────────────────────
+        elif state.startswith("PARK_"):
+
+            if detection is None:
+                # 색상을 잃었으면 잠깐 전진하며 재탐색
+                send_cmd(MIN_SPEED, 0.0)
+                print(f"[{color_name}] 추적 중 소실, 재탐색...")
+                continue
+
+            cx, cy, area = detection
+
+            # 도착 판정: 색상 중심이 화면 하단 아래로 내려옴
+            if cy >= BOTTOM_THRESHOLD:
+                stop_robot()
+                print(
+                    f"[{color_name}] 하단 도달 (cy={cy}) → 주차 완료"
+                )
+                time.sleep(0.5)
+                next_state()   # PARK_* → FIND_* (또는 DONE)
+                continue
+
+            # P 조향: 화면 중앙과 색상 중심의 X 오차
+            error = cx - (FRAME_W / 2)     # 양수 = 오른쪽
+            w     = KP_STEER * error       # 오른쪽이면 오른쪽 조향
+            v     = TRACK_SPEED
+
+            # 라이다 장애물이 매우 가까우면 속도 감소
+            front_min = get_front_min()
+            if front_min < THRESH_10:
+                v = MIN_SPEED
+
+            send_cmd(v, w)
+            print(
+                f"[{color_name}] PARK cx={cx} cy={cy} "
+                f"err={error:+.0f} w={w:+.3f}"
+            )
+
 except KeyboardInterrupt:
-    pass
+    print("STOP")
 
 finally:
     stop_robot()
     cap.release()
-    cv2.destroyAllWindows()
+    lidar_ser.write(bytes([0xA5, 0x25]))
+    lidar_ser.close()
+    arduino_ser.close()
