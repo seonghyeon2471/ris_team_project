@@ -69,9 +69,12 @@ MIN_V       = 0.10
 KP_ROT      = 0.003
 MIN_AREA    = 400        # 광각 대응 하한
 TARGET_AREA = 6000       # APPROACH 진입 면적
-APPROACH_V           = 0.22
+
+# 🌟 [블라인드 대시 강화] 유실 후 주차 패드까지 탄력 있게 밀고 들어가는 파라미터
+APPROACH_V           = 0.22  # 타겟이 보일 때 조준하며 다가가는 속도
+BLIND_V              = 0.25  # 타겟이 화면 아래로 사라진 직후 밀고 나가는 돌진 속도
+APPROACH_DRIVE_SEC   = 1.2   # BLIND_V 속도로 직진할 시간 (초) - 속도가 빨라진 만큼 시간은 소폭 최적화
 APPROACH_MAX_TIMEOUT = 4.0
-APPROACH_DRIVE_SEC   = 1.5
 SEARCH_TIMEOUT       = 2.2
 
 # =========================================
@@ -128,7 +131,7 @@ MISSION = ["red", "yellow", "blue"]
 mission_index        = 0
 state                = "SEARCH"
 last_seen_x          = 160
-last_seen_y          = 120    # 🌟 [추가] 마지막으로 목격된 Y 좌표 객체 (화면 중앙 부근 초기화)
+last_seen_y          = 120    
 park_start           = None
 inside_stop_start    = None
 search_start_time    = None
@@ -190,7 +193,7 @@ lidar_thread.start()
 # =========================================
 def send_cmd(v, w):
     v = np.clip(v, -0.3, 0.3)
-    w = np.clip(w, -0.8, 0.8)
+    w = np.clip(w, -1.2, 1.2)
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
 def stop_robot():
@@ -259,7 +262,7 @@ def run_boundary_search():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("🏁 MISSION CONTROL v3 (Blind Spot Logic Enhanced)")
+print("🏁 MISSION CONTROL v3 (Blind Dash Optimized)")
 print(f"   카메라: h={CAM_H}cm  pitch={CAM_PITCH}°  fy={FY:.1f}px")
 print(f"   ROI y={ROI_Y} → 지면 거리 {pixel_to_ground_dist(ROI_Y):.1f}cm 이내 = 색지 내부")
 
@@ -307,7 +310,6 @@ try:
                 bottom_y = min(bottom_y, RES_H - 1)
                 est_dist_cm = pixel_to_ground_dist(bottom_y)
                 
-                # 🌟 [추가] 목격된 Y좌표 실시간 최신화 (가장 하단 픽셀 기준)
                 last_seen_y = bottom_y
                 
                 if est_dist_cm != float('inf'):
@@ -355,7 +357,7 @@ try:
                 inside_stop_start = None
                 boundary_phase = 0
                 last_dist_cm = 150.0  
-                last_seen_y = 120    # 미션 초기화 시 Y좌표 리셋
+                last_seen_y = 120    
 
                 if mission_index < len(MISSION):
                     flush_camera_buffer(n=15)
@@ -450,11 +452,8 @@ try:
                             (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
             else:
-                # ── 형체는 유실되었으나 노이즈 수준의 작은 컨투어가 잡힌 경우 ──
                 if state not in ["BOUNDARY", "FORCED_SEARCH", "WANDERING", "PARKING", "APPROACH"]:
                     if last_dist_cm <= NEAR_DIST_THRESHOLD:
-                        
-                        # 🌟 [수정] 근거리 면적 축소 유실 시, 화면 아래쪽(Y>=210)으로 나갔다면 강제 진입 처리
                         if last_seen_y >= 210:
                             state = "APPROACH"
                             approach_start_time = time.time()
@@ -469,7 +468,8 @@ try:
         # ── [객체 유실 - 완전히 잡히지 않을 때] ───────────────────
         else:
             if state == "APPROACH":
-                cam_v, cam_w = APPROACH_V, 0.0
+                # 🌟 [블라인드 대시 강화] 유실 후에는 속도를 줄이지 않고 BLIND_V(0.25)의 강력한 속도로 돌진
+                cam_v, cam_w = BLIND_V, 0.0
                 cam_state    = "APPROACH_BLIND"
                 if time.time() - approach_start_time > APPROACH_DRIVE_SEC:
                     state             = "PARKING"
@@ -486,22 +486,20 @@ try:
                 if time.time() - search_start_time > SEARCH_TIMEOUT:
                     start_boundary_search(last_seen_x, frame_cx)
                 else:
-                    cam_v, cam_w = 0.03, 0.80
+                    cam_v, cam_w = 0.03, 1.05
 
             elif state == "WANDERING":
                 cam_v, cam_w = 0.20, 0.0
 
             else:
-                # 🌟 [추가] 완전유실 상태이나 근거리였고 화면 하단(Y>=210)으로 사라진 케이스라면 강제 직진(BLIND) 가동
                 if last_dist_cm <= NEAR_DIST_THRESHOLD and last_seen_y >= 210:
                     state = "APPROACH"
                     approach_start_time = time.time()
                     print(f"🚀 [하단 완전유실] Y={last_seen_y} -> 강제 직진(BLIND) 상태 트리거")
                 else:
-                    # 일반 원거리 유실 및 좌우 탈출은 기존 구조대로 제자리 회전 탐색
                     cam_state = "SEARCH-L" if last_seen_x <= frame_cx else "SEARCH-R"
                     cam_v = 0.03
-                    cam_w = -0.65 if last_seen_x > frame_cx else 0.65
+                    cam_w = -1.00 if last_seen_x > frame_cx else 1.00
 
         # ── 모터 전달 ─────────────────────────────────────────────
         send_cmd(cam_v, cam_w)
