@@ -1,7 +1,10 @@
+python
+
 import cv2
 import serial
 import numpy as np
 import time
+import math
 import threading
 
 # =========================================
@@ -44,6 +47,33 @@ _scan_shared = np.full(360, 150.0, dtype=np.float32)
 scan_lock    = threading.Lock()
 
 # =========================================
+# [2조] 카메라 기하학 파라미터
+# =========================================
+# 실측값: 높이 73cm, 수평 기준 하향 30°
+CAM_H        = 73.0   # cm, 지면 기준 카메라 높이
+CAM_PITCH    = 30.0   # deg, 수평 기준 하향각 (양수 = 아래 방향)
+CAM_FOV_V    = 50.0   # deg, V55 수직 FOV (광각 계열 추정값)
+                       # ※ 실측하려면: 체커보드 1m 거리 촬영 후 조정
+RES_W, RES_H = 320, 240
+CY           = RES_H / 2   # 광축 y픽셀 (120px)
+FY           = (RES_H / 2) / math.tan(math.radians(CAM_FOV_V / 2))  # ≈ 257px
+
+def pixel_to_ground_dist(y_px):
+    """
+    화면 y픽셀 → 카메라 정면 수평 거리(cm) 변환
+    y_px가 클수록(화면 아래) 가까운 지점
+    지평선 위(각도 ≤ 0)이면 inf 반환
+    """
+    delta_deg  = math.degrees(math.atan2(y_px - CY, FY))
+    total_deg  = CAM_PITCH + delta_deg
+    if total_deg <= 0:
+        return float('inf')
+    return CAM_H / math.tan(math.radians(total_deg))
+
+# 사전 계산: 주요 y픽셀별 거리 (디버그용)
+# y=180 → ~78cm, y=200 → ~67cm, y=220 → ~59cm, y=239 → ~52cm
+
+# =========================================
 # CAMERA PARAMETERS (V55 광각 기준)
 # =========================================
 MAX_V       = 0.24
@@ -51,7 +81,6 @@ MIN_V       = 0.10
 KP_ROT      = 0.003
 MIN_AREA    = 400        # 광각 대응 하한
 TARGET_AREA = 6000       # APPROACH 진입 면적
-PARK_SEC    = 3.0
 APPROACH_V           = 0.22
 APPROACH_MAX_TIMEOUT = 4.0
 APPROACH_DRIVE_SEC   = 1.5
@@ -60,23 +89,27 @@ SEARCH_TIMEOUT       = 2.2
 # =========================================
 # [7조] ROI 도착 판정 파라미터
 # =========================================
-# 화면 하단 ROI 영역에 색 픽셀이 N프레임 연속 유지되면 도착으로 판정
-# PARK_AREA(면적 임계값) 캘리브레이션 완전 제거
-# 광각 FOV·조명 변화에 무관하게 안정적으로 동작
-ROI_Y             = 180  # 하단 ROI 시작 y좌표 (240px 중 하단 60px 사용)
-ROI_MIN_PIXEL     = 800  # ROI 내 최소 색 픽셀 수
-ROI_CONFIRM_FRAMES = 8   # 연속 히트 프레임 수
+# y=180 기준: 카메라 정면 ~78cm 이내 = 색지 위(또는 직전)에 있는 상태
+ROI_Y             = 180   # 하단 ROI 시작 y
+ROI_MIN_PIXEL     = 800   # ROI 내 최소 색 픽셀
+ROI_CONFIRM_FRAMES = 8    # 연속 N프레임 히트 → 도착 확정
+
+# =========================================
+# 색지 내부 정지 조건
+# =========================================
+# "색지 내부에 1초 이상 정지"
+# 조건: ROI 확정 후 정지 상태에서도 ROI가 계속 유지되는 시간 측정
+INSIDE_STOP_SEC = 1.0     # 색지 내부 정지 유지 시간 (초)
+PARK_SEC        = 3.0     # 전체 PARKING 대기 시간 (내부 정지 포함)
 
 # =========================================
 # [1조] 바운더리 탐색 파라미터
 # =========================================
-# 마지막 인식 위치(last_seen_x) 기준으로 3단계 탐색
-# 기존 단순 좌/우 회전 SEARCH보다 복구 성공률이 높음
-BOUNDARY_PHASE1_SEC = 1.0   # 1단계: 유실 방향 호 탐색
-BOUNDARY_PHASE2_SEC = 1.8   # 2단계: 반대 방향 확장 탐색
-BOUNDARY_PHASE3_SEC = 0.8   # 3단계: 후진
-BOUNDARY_W          = 0.55  # 탐색 회전 속도
-BOUNDARY_BACK_V     = -0.10 # 3단계 후진 속도
+BOUNDARY_PHASE1_SEC = 1.0
+BOUNDARY_PHASE2_SEC = 1.8
+BOUNDARY_PHASE3_SEC = 0.8
+BOUNDARY_W          = 0.55
+BOUNDARY_BACK_V     = -0.10
 
 # =========================================
 # 색상별 HSV 범위
@@ -109,16 +142,17 @@ MISSION = ["red", "yellow", "blue"]
 # =========================================
 mission_index        = 0
 state                = "SEARCH"
-last_seen_x          = 160     # [1조] 마지막 인식 x좌표 (탐색 기준점)
+last_seen_x          = 160
 park_start           = None
+inside_stop_start    = None   # 색지 내부 정지 시작 시각
 search_start_time    = None
 approach_start_time  = None
-roi_count            = 0       # [7조] ROI 연속 히트 카운터
+roi_count            = 0
 
 # [1조] 바운더리 탐색 내부 상태
-boundary_phase       = 0       # 0=비활성 1=유실방향호 2=반대방향호 3=후진
+boundary_phase       = 0
 boundary_phase_start = None
-boundary_direction   = 1       # +1=우회전 -1=좌회전
+boundary_direction   = 1
 
 # =========================================
 # LIDAR
@@ -190,32 +224,19 @@ def flush_camera_buffer(n=8):
         cap.grab()
 
 # =========================================
-# [1조] 바운더리 탐색 함수
+# [1조] 바운더리 탐색
 # =========================================
 def start_boundary_search(lost_x, frame_cx):
-    """
-    객체 유실 시 호출.
-    last_seen_x 기반으로 방향을 결정하고 3단계 탐색을 시작.
-      1단계: 객체가 이동했을 방향으로 호 탐색
-      2단계: 반대 방향으로 더 넓게 탐색
-      3단계: 후진 후 재시도 기회 부여
-    """
     global boundary_phase, boundary_phase_start, boundary_direction, state
-    # 유실 위치가 오른쪽이면 객체가 오른쪽으로 이동 → 우회전 탐색
     boundary_direction = 1 if lost_x > frame_cx else -1
     boundary_phase = 1
     boundary_phase_start = time.time()
     state = "BOUNDARY"
-    dir_str = "우" if boundary_direction > 0 else "좌"
-    print(f"🔍 [1조] 바운더리 탐색 시작 | 유실x={lost_x} | 1단계={dir_str}")
+    print(f"🔍 [1조] 바운더리 탐색 | 유실x={lost_x} | "
+          f"1단계={'우' if boundary_direction > 0 else '좌'}")
 
 def run_boundary_search():
-    """
-    BOUNDARY 상태에서 매 프레임 호출하여 (v, w) 반환.
-    3단계 모두 실패 시 기본 SEARCH로 복귀.
-    """
     global boundary_phase, boundary_phase_start, state, search_start_time
-
     elapsed = time.time() - boundary_phase_start
 
     if boundary_phase == 1:
@@ -223,21 +244,20 @@ def run_boundary_search():
             return 0.03, BOUNDARY_W * boundary_direction
         boundary_phase = 2
         boundary_phase_start = time.time()
-        print("🔍 [1조] 2단계: 반대 방향 확장 탐색")
         elapsed = 0.0
+        print("🔍 [1조] 2단계: 반대 방향 확장 탐색")
 
     if boundary_phase == 2:
         if elapsed < BOUNDARY_PHASE2_SEC:
             return 0.03, BOUNDARY_W * -boundary_direction
         boundary_phase = 3
         boundary_phase_start = time.time()
-        print("🔍 [1조] 3단계: 후진")
         elapsed = 0.0
+        print("🔍 [1조] 3단계: 후진")
 
     if boundary_phase == 3:
         if elapsed < BOUNDARY_PHASE3_SEC:
             return BOUNDARY_BACK_V, 0.0
-        # 3단계도 실패 → SEARCH 복귀
         boundary_phase = 0
         state = "SEARCH"
         search_start_time = time.time()
@@ -249,7 +269,10 @@ def run_boundary_search():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("🏁 MISSION CONTROL v2 (7조 ROI 도착판정 + 1조 바운더리 탐색)")
+print("🏁 MISSION CONTROL v3")
+print(f"   카메라: h={CAM_H}cm  pitch={CAM_PITCH}°  fy={FY:.1f}px")
+print(f"   ROI y={ROI_Y} → 지면 거리 {pixel_to_ground_dist(ROI_Y):.1f}cm 이내 = 색지 내부")
+print(f"   내부 정지 조건: {INSIDE_STOP_SEC}초 이상")
 
 try:
     while True:
@@ -276,29 +299,78 @@ try:
         target = MISSION[mission_index]
         draw   = COLOR_CFG[target]["draw"]
 
+        # ── 마스크 (PARKING 포함 전 구간에서 ROI 계산 필요) ───────
+        mask = make_mask(frame, hsv, target)
+
+        # ── [7조 + 2조] ROI 및 거리 계산 ─────────────────────────
+        roi_mask   = mask[ROI_Y:, :]
+        roi_pixels = cv2.countNonZero(roi_mask)
+        roi_hit    = (roi_pixels >= ROI_MIN_PIXEL)
+
+        # 색지 하단 경계 y픽셀 → 실제 거리 추정 (2조 방식)
+        contours_full, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                             cv2.CHAIN_APPROX_SIMPLE)
+        est_dist_cm = float('inf')
+        if contours_full:
+            c_main = max(contours_full, key=cv2.contourArea)
+            if cv2.contourArea(c_main) > MIN_AREA:
+                # 색지의 화면상 가장 아래 y픽셀 = 가장 가까운 지점
+                bottom_y = int(cv2.boundingRect(c_main)[1] +
+                               cv2.boundingRect(c_main)[3])
+                bottom_y = min(bottom_y, RES_H - 1)
+                est_dist_cm = pixel_to_ground_dist(bottom_y)
+
         # ── [PARKING 격리 레이어] ─────────────────────────────────
         if state == "PARKING":
             send_cmd(0.0, 0.0)
-            elapsed = time.time() - park_start
-            remain  = max(0.0, PARK_SEC - elapsed)
 
+            # 색지 내부 정지 시간 측정
+            # PARKING 진입 직후부터 ROI가 유지되는 시간을 측정
+            if roi_hit:
+                if inside_stop_start is None:
+                    inside_stop_start = time.time()
+                    print(f"🟢 [{target}] 색지 내부 정지 시작")
+                inside_elapsed = time.time() - inside_stop_start
+            else:
+                # ROI 유실 (색지를 벗어남) → 타이머 리셋
+                if inside_stop_start is not None:
+                    print(f"⚠️  [{target}] ROI 유실 → 내부 정지 타이머 리셋")
+                inside_stop_start = None
+                inside_elapsed = 0.0
+
+            park_elapsed = time.time() - park_start
+            remain_park  = max(0.0, PARK_SEC - park_elapsed)
+            remain_inside = max(0.0, INSIDE_STOP_SEC -
+                                (inside_elapsed if inside_stop_start else 0.0))
+
+            # 디스플레이
             cv2.putText(frame, "STATE: PARKING", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            cv2.putText(frame, f"WAIT [{target}]: {remain:.1f}s", (20, 70),
+            cv2.putText(frame, f"TARGET: {target}", (20, 70),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, draw, 2)
+            cv2.putText(frame, f"PARK: {remain_park:.1f}s", (20, 100),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+            color_inside = (0, 255, 0) if roi_hit else (0, 100, 100)
+            cv2.putText(frame, f"INSIDE: {remain_inside:.1f}s  ROI:{roi_pixels}px",
+                        (20, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_inside, 1)
+            cv2.line(frame, (0, ROI_Y), (WIDTH, ROI_Y), color_inside, 1)
             cv2.imshow("frame", frame)
+            cv2.imshow("mask",  mask)
 
-            if elapsed >= PARK_SEC:
-                print(f"✅ [{target}] 주차 완료 → 다음 미션")
+            # 종료 조건: 전체 PARK_SEC 경과 AND 내부 정지 INSIDE_STOP_SEC 충족
+            inside_ok = (inside_stop_start is not None and
+                         (time.time() - inside_stop_start) >= INSIDE_STOP_SEC)
+            if park_elapsed >= PARK_SEC and inside_ok:
+                print(f"✅ [{target}] 내부 정지 {INSIDE_STOP_SEC}s 완료 → 다음 미션")
                 mission_index += 1
                 roi_count = 0
+                inside_stop_start = None
                 boundary_phase = 0
 
                 if mission_index < len(MISSION):
                     flush_camera_buffer(n=15)
-                    # 다음 타겟은 현재 위치 기준 바운더리 탐색으로 시작
                     start_boundary_search(last_seen_x, frame_cx)
-                    print(f"➡️  NEXT TARGET: [{MISSION[mission_index]}] 바운더리 탐색 시작")
+                    print(f"➡️  NEXT TARGET: [{MISSION[mission_index]}]")
                 else:
                     print("🏁 모든 미션 클리어")
 
@@ -309,42 +381,38 @@ try:
         # ── APPROACH 타임아웃 안전장치 ────────────────────────────
         if state == "APPROACH" and approach_start_time is not None:
             if time.time() - approach_start_time > APPROACH_MAX_TIMEOUT:
-                print(f"🚨 [안전장치] APPROACH {APPROACH_MAX_TIMEOUT}초 만료 → PARKING")
-                state      = "PARKING"
-                park_start = time.time()
-                roi_count  = 0
+                print(f"🚨 [안전장치] APPROACH {APPROACH_MAX_TIMEOUT}s 만료 → PARKING")
+                state             = "PARKING"
+                park_start        = time.time()
+                inside_stop_start = None
+                roi_count         = 0
                 continue
 
-        # ── 마스크 & 컨투어 ───────────────────────────────────────
-        mask = make_mask(frame, hsv, target)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # ── [7조] ROI 도착 판정 (APPROACH 중) ────────────────────
+        if state == "APPROACH":
+            if roi_hit:
+                roi_count += 1
+            else:
+                roi_count = 0
 
-        # ── [7조] ROI 도착 판정 ───────────────────────────────────
-        roi_mask   = mask[ROI_Y:, :]
-        roi_pixels = cv2.countNonZero(roi_mask)
-        roi_hit    = (roi_pixels >= ROI_MIN_PIXEL)
+            if roi_count >= ROI_CONFIRM_FRAMES:
+                state             = "PARKING"
+                park_start        = time.time()
+                inside_stop_start = None  # PARKING 레이어에서 측정 시작
+                roi_count         = 0
+                print(f"🅿️  [{target}] [7조] ROI {ROI_CONFIRM_FRAMES}f 확정 "
+                      f"(dist≈{est_dist_cm:.1f}cm) → PARKING")
+                continue
 
-        # APPROACH 중에만 카운트 (TRACK 중 오인 방지)
-        if roi_hit and state == "APPROACH":
-            roi_count += 1
-        else:
-            roi_count = 0
+        # ── 컨투어 ────────────────────────────────────────────────
+        contours = contours_full  # 이미 위에서 계산함
 
-        # N프레임 연속 히트 → 도착
-        if roi_count >= ROI_CONFIRM_FRAMES:
-            state      = "PARKING"
-            park_start = time.time()
-            roi_count  = 0
-            print(f"🅿️  [{target}] [7조] ROI {ROI_CONFIRM_FRAMES}f 확정 → PARKING "
-                  f"(roi_px={roi_pixels})")
-            continue
+        # ROI 시각화
+        roi_color = (0, 255, 0) if roi_hit else (100, 100, 100)
+        cv2.line(frame, (0, ROI_Y), (WIDTH, ROI_Y), roi_color, 1)
+        cv2.putText(frame, f"ROI:{roi_pixels}px {roi_count}f  dist:{est_dist_cm:.0f}cm",
+                    (5, ROI_Y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.38, roi_color, 1)
 
-        # ROI 라인 시각화
-        cv2.line(frame, (0, ROI_Y), (WIDTH, ROI_Y), (0, 255, 0), 1)
-        cv2.putText(frame, f"ROI:{roi_pixels}px {roi_count}f",
-                    (5, ROI_Y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-
-        # ── 주행 연산 ─────────────────────────────────────────────
         cam_v, cam_w = 0.0, 0.0
         cam_state = state
 
@@ -354,72 +422,68 @@ try:
             area = cv2.contourArea(c)
 
             if area > MIN_AREA:
-                # 객체 발견 → 바운더리/탐색 해제
                 if state in ["BOUNDARY", "FORCED_SEARCH", "WANDERING", "SEARCH"]:
                     boundary_phase = 0
                     state = "TRACK"
-                    print(f"🎯 [{target}] 포착 → TRACK (area={int(area)})")
+                    print(f"🎯 [{target}] 포착 → TRACK (area={int(area)}  "
+                          f"dist≈{est_dist_cm:.1f}cm)")
 
                 rect = cv2.minAreaRect(c)
-                (cx, cy), _, _ = rect
-                cx, cy = int(cx), int(cy)
-                last_seen_x = cx  # [1조] 마지막 인식 위치 갱신
+                (cx, cy_obj), _, _ = rect
+                cx, cy_obj = int(cx), int(cy_obj)
+                last_seen_x = cx
 
                 cv2.drawContours(frame, [np.int32(cv2.boxPoints(rect))], 0, draw, 2)
-                cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)
+                cv2.circle(frame, (cx, cy_obj), 5, (255, 0, 0), -1)
                 error_x = cx - frame_cx
 
-                # 캘리브레이션 로그 (TRACK 상태)
+                # [2조] 거리 로그
                 if state == "TRACK":
                     with scan_lock:
                         lidar_front = float(_scan_shared[0])
-                    print(f"[CAL] lidar={lidar_front:.1f}cm  area={int(area):6d}")
+                    print(f"[CAL] lidar={lidar_front:.1f}cm  "
+                          f"cam_dist={est_dist_cm:.1f}cm  area={int(area):6d}")
 
                 # APPROACH 진입
                 if state == "APPROACH" or area > TARGET_AREA:
                     if state != "APPROACH":
                         state = "APPROACH"
                         approach_start_time = time.time()
-                        print(f"📥 [{target}] APPROACH 진입 (area={int(area)})")
-
-                    elapsed_ap = time.time() - approach_start_time
-                    print(f"[APPROACH] area={int(area):6d}  roi={roi_pixels}px  "
-                          f"roi_count={roi_count}  elapsed={elapsed_ap:.2f}s")
+                        roi_count = 0
+                        print(f"📥 [{target}] APPROACH 진입 "
+                              f"(area={int(area)}  dist≈{est_dist_cm:.1f}cm)")
 
                     cam_w = -KP_ROT * error_x * 0.5
                     cam_v = APPROACH_V
                     cam_state = "APPROACH"
 
                 else:
-                    # TRACK: 면적 비례 속도
                     cam_w    = -KP_ROT * error_x
                     rem_area = max(0.0, TARGET_AREA - area)
                     cam_v    = MIN_V + (MAX_V - MIN_V) * (rem_area / TARGET_AREA)
                     cam_v    = np.clip(cam_v, MIN_V, MAX_V)
                     cam_state = "TRACK"
 
-                cv2.putText(frame, f"Area:{int(area)}", (20, 100),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                cv2.putText(frame, f"Area:{int(area)}  {est_dist_cm:.0f}cm",
+                            (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
             else:
-                # 면적 미달(노이즈) → 바운더리 시작
                 if state not in ["BOUNDARY", "FORCED_SEARCH", "WANDERING", "PARKING"]:
                     start_boundary_search(last_seen_x, frame_cx)
 
         # ── [객체 유실] ───────────────────────────────────────────
         else:
             if state == "APPROACH":
-                # 사각지대 블라인드 직진
                 cam_v, cam_w = APPROACH_V, 0.0
                 cam_state    = "APPROACH_BLIND"
                 if time.time() - approach_start_time > APPROACH_DRIVE_SEC:
-                    state      = "PARKING"
-                    park_start = time.time()
-                    roi_count  = 0
-                    print(f"🅿️  [{target}] 블라인드 {APPROACH_DRIVE_SEC}s 완료 → PARKING")
+                    state             = "PARKING"
+                    park_start        = time.time()
+                    inside_stop_start = None
+                    roi_count         = 0
+                    print(f"🅿️  [{target}] 블라인드 완료 → PARKING")
 
             elif state == "BOUNDARY":
-                # [1조] 바운더리 탐색 실행
                 cam_v, cam_w = run_boundary_search()
                 cam_state = f"BOUNDARY-P{boundary_phase}"
 
@@ -433,12 +497,11 @@ try:
                 cam_v, cam_w = 0.20, 0.0
 
             else:
-                # 기본 SEARCH: last_seen_x 방향 회전
                 cam_state = "SEARCH-L" if last_seen_x <= frame_cx else "SEARCH-R"
                 cam_v = 0.03
                 cam_w = -0.65 if last_seen_x > frame_cx else 0.65
 
-        # ── 모터 명령 ─────────────────────────────────────────────
+        # ── 모터 전달 ─────────────────────────────────────────────
         send_cmd(cam_v, cam_w)
 
         # ── 디스플레이 ────────────────────────────────────────────
