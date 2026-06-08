@@ -67,13 +67,12 @@ def pixel_to_ground_dist(y_px):
 MAX_V       = 0.24
 MIN_V       = 0.10
 KP_ROT      = 0.003
-MIN_AREA    = 400        
+MIN_AREA    = 900        
 TARGET_AREA = 6000       
 
 APPROACH_V           = 0.24  
 BLIND_V              = 0.29  
 
-# 강제 전진 돌진 시간 (1.2초)
 APPROACH_DRIVE_SEC   = 1.2   
 APPROACH_MAX_TIMEOUT = 4.5   
 SEARCH_TIMEOUT       = 1.6   
@@ -99,7 +98,6 @@ COLOR_CFG = {
     },
     "yellow": {
         "hsv1": ([15,  30,  60], [40,  255, 255]),
-        # 🌟 [수정 적용] 채도(S) 하한선을 0에서 15로 높여 순수 흰색 조명 오인식 방지
         "hsv2": ([10,  15,  190], [45,  45,  255]),
         "bgr":  ([0, 0, 0], [255, 255, 255]),
         "draw": (0, 200, 255),
@@ -132,6 +130,9 @@ boundary_phase_start = None
 boundary_direction   = 1
 
 morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+
+# 🌟 출력을 제어하기 위한 프레임 카운터 추가
+frame_count = 0
 
 # =========================================
 # LIDAR 쓰레드 함수들
@@ -233,13 +234,14 @@ def run_boundary_search():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("🏁 MISSION CONTROL v7.1 Active")
+print("🏁 MISSION CONTROL v7.3 Active (Auto Data Telemetry Engaged)")
 
 try:
     while True:
         ret, frame = cap.read()
         if not ret: continue
 
+        frame_count += 1
         frame = cv2.flip(frame, 1)
         HEIGHT, WIDTH = frame.shape[:2]
         frame_cx = WIDTH // 2
@@ -258,168 +260,7 @@ try:
 
         contours_full, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # 라이다 전방 데이터 추출
         with scan_lock:
             front_angles = list(range(345, 360)) + list(range(0, 15))
             front_dists = [_scan_shared[a] for a in front_angles if 3.0 < _scan_shared[a] < 150.0]
-            min_front_lidar = min(front_dists) if front_dists else float('inf')
-
-        # 유효 컨투어 판정부 (파란색 장애물 차단 적용 상태)
-        valid_contours = []
-        for c in contours_full:
-            area = cv2.contourArea(c)
-            if area < MIN_AREA:
-                continue
-
-            rect = cv2.minAreaRect(c)
-            (cx, cy_obj), (w_box, h_box), angle = rect
-            
-            bottom_y = int(cv2.boundingRect(c)[1] + cv2.boundingRect(c)[3])
-            bottom_y = min(bottom_y, RES_H - 1)
-            est_dist_cm = pixel_to_ground_dist(bottom_y)
-
-            if target == "blue":
-                # 1. 센서 퓨전 필터
-                if min_front_lidar != float('inf') and abs(est_dist_cm - min_front_lidar) < 22.0:
-                    continue
-                # 2. 형상 보조 필터
-                if h_box > w_box * 1.3:
-                    continue
-
-            valid_contours.append((c, area, rect, est_dist_cm, bottom_y))
-
-        object_detected = len(valid_contours) > 0
-
-        if object_detected:
-            c_main, area, rect, est_dist_cm, bottom_y = max(valid_contours, key=lambda x: x[1])
-            (cx, cy_obj), _, _ = rect
-            cx, cy_obj = int(cx), int(cy_obj)
-            
-            last_seen_x = int(0.6 * last_seen_x + 0.4 * cx)
-            error_x = last_seen_x - frame_cx
-            last_seen_y = bottom_y
-            
-            if est_dist_cm != float('inf'):
-                last_dist_cm = est_dist_cm
-            
-            cv2.drawContours(frame, [np.int32(cv2.boxPoints(rect))], 0, draw, 2)
-        else:
-            area = 0
-            error_x = last_seen_x - frame_cx
-
-        # ── 1. PARKING 상태 ───────────────────
-        if state == "PARKING":
-            send_cmd(0.0, 0.0)  
-            park_elapsed = time.time() - park_start
-
-            cv2.putText(frame, f"STATE: PARKING ({PARK_SEC - park_elapsed:.1f}s)", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            cv2.imshow("frame", frame)
-
-            if park_elapsed >= PARK_SEC:
-                print(f"✅ [{target}] 안착 완료 -> 다음 미션 전환")
-                arduino_ser.write(b"RESET\n") 
-                
-                mission_index += 1
-                blind_dash_start_time = None
-                boundary_phase = 0
-                last_seen_y = 120    
-
-                if mission_index < len(MISSION):
-                    flush_camera_buffer(n=15)
-                    start_boundary_search(last_seen_x, frame_cx)
-            if cv2.waitKey(1) & 0xFF == 27: break
-            continue
-
-        # ── 2. APPROACH 상태 타임아웃 ────────────────────────────
-        if state == "APPROACH" and approach_start_time is not None:
-            if time.time() - approach_start_time > APPROACH_MAX_TIMEOUT:
-                state = "APPROACH_BLIND"
-                blind_dash_start_time = time.time()
-
-        # ── 3. 주행 로직 및 AND 조건 판단 레이어 ────────────────────────
-        cam_v, cam_w = 0.0, 0.0
-        cam_state = state
-
-        if state == "APPROACH_BLIND":
-            cam_v = BLIND_V
-            cam_w = 0.0
-            cam_state = "APPROACH_BLIND"
-
-            time_condition = (time.time() - blind_dash_start_time >= APPROACH_DRIVE_SEC)
-            clear_condition = (not object_detected)
-
-            if time_condition and clear_condition:
-                state = "PARKING"
-                park_start = time.time()
-                print("🏁 [조건 충족] 강제 전진 완료 및 화면 클리어 -> 정차(PARKING) 진입")
-            else:
-                if not time_condition:
-                    cv2.putText(frame, f"DASHING: {time.time()-blind_dash_start_time:.1f}s / {APPROACH_DRIVE_SEC}s", (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-                if not clear_condition:
-                    cv2.putText(frame, "WAITING: OBJ STILL VISIBLE", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-
-        else:
-            if object_detected:
-                if state in ["BOUNDARY", "FORCED_SEARCH", "WANDERING", "SEARCH"]:
-                    boundary_phase = 0
-                    state = "TRACK"
-
-                if state == "APPROACH" or area > TARGET_AREA or last_seen_y >= 200:
-                    if state != "APPROACH":
-                        state = "APPROACH"
-                        approach_start_time = time.time()
-
-                    if last_seen_y >= 215:
-                        state = "APPROACH_BLIND"
-                        blind_dash_start_time = time.time()
-                        print("🚀 [하단 한계 진입] APPROACH_BLIND 시작")
-                        cam_v, cam_w = BLIND_V, 0.0
-                    else:
-                        cam_w = -KP_ROT * error_x * 0.5
-                        cam_v = APPROACH_V
-                    cam_state = "APPROACH"
-                else:
-                    cam_w = -KP_ROT * error_x
-                    rem_area = max(0.0, TARGET_AREA - area)
-                    cam_v = MIN_V + (MAX_V - MIN_V) * (rem_area / TARGET_AREA)
-                    cam_v = np.clip(cam_v, MIN_V, MAX_V)
-                    cam_state = "TRACK"
-            else:
-                if state == "APPROACH":
-                    state = "APPROACH_BLIND"
-                    blind_dash_start_time = time.time()
-                    print("🚀 [접근 중 급작 유실] APPROACH_BLIND 즉시 시작")
-                    cam_v, cam_w = BLIND_V, 0.0
-                elif state == "BOUNDARY":
-                    cam_v, cam_w = run_boundary_search()
-                    cam_state = f"BOUNDARY-P{boundary_phase}"
-                elif state == "FORCED_SEARCH":
-                    if time.time() - search_start_time > SEARCH_TIMEOUT:
-                        start_boundary_search(last_seen_x, frame_cx)
-                    else:
-                        cam_v, cam_w = 0.03, 1.35
-                elif state == "WANDERING":
-                    cam_v, cam_w = 0.20, 0.0
-                else:
-                    cam_state = "SEARCH-L" if last_seen_x <= frame_cx else "SEARCH-R"
-                    cam_v = 0.03
-                    cam_w = -1.30 if last_seen_x > frame_cx else 1.30
-
-        # ── 모터 명령 전송 ─────────────────────────────────────────
-        send_cmd(cam_v, cam_w)
-
-        # ── 디스플레이 ────────────────────────────────────────────
-        cv2.putText(frame, f"STATE: {cam_state}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(frame, f"TARGET: {target}", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, draw, 2)
-        cv2.putText(frame, f"LIDAR FRONT: {min_front_lidar:.1f} cm", (20, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        cv2.imshow("frame", frame)
-
-        if cv2.waitKey(1) & 0xFF == 27: break
-
-except KeyboardInterrupt:
-    print("USER INTERRUPT")
-finally:
-    stop_robot()
-    cap.release()
-    lidar_ser.write(bytes([0xA5, 0x25]))
-    cv2.destroyAllWindows()
+            min_front_lidar = min(front_dists) if front
