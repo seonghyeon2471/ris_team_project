@@ -87,25 +87,25 @@ BOUNDARY_W          = 0.55
 BOUNDARY_BACK_V     = -0.10
 
 # =========================================
-# HSV 범위
+# HSV & BGR 정밀 컬러 지정
 # =========================================
 COLOR_CFG = {
     "red": {
-        "hsv1": ([0,   80,  70], [10,  255, 255]),
-        "hsv2": ([170, 80,  70], [179, 255, 255]),
-        "bgr":  ([0, 0, 0], [255, 255, 255]),
+        "hsv1": ([0, 60, 120], [12, 255, 255]),
+        "hsv2": ([160, 60, 120], [179, 255, 255]),
+        "bgr": ([20, 20, 80], [255, 255, 255]),
         "draw": (0, 0, 255),
     },
     "yellow": {
-        "hsv1": ([15,  30,  60], [40,  255, 255]),
-        "hsv2": ([10,  15,  190], [45,  45,  255]),
-        "bgr":  ([0, 0, 0], [255, 255, 255]),
+        "hsv1": ([18, 15, 180], [45, 255, 255]),
+        "hsv2": None,
+        "bgr": ([0, 80, 80], [255, 255, 255]),
         "draw": (0, 200, 255),
     },
     "blue": {
-        "hsv1": ([90,  45,  40], [140, 255, 255]),
+        "hsv1": ([95, 50, 50], [130, 255, 255]),
         "hsv2": None,
-        "bgr":  ([0, 0, 0], [255, 255, 255]),
+        "bgr": ([40, 0, 0], [255, 220, 220]),
         "draw": (255, 80, 0),
     },
 }
@@ -234,7 +234,7 @@ def run_boundary_search():
 # =========================================
 # MAIN LOOP
 # =========================================
-print("🏁 MISSION CONTROL v7.3 Active (Auto Data Telemetry Engaged)")
+print("🏁 MISSION CONTROL v7.4 Active (Auto Data Telemetry Engaged)")
 
 try:
     while True:
@@ -296,6 +296,13 @@ try:
             (cx, cy_obj), _, _ = rect
             cx, cy_obj = int(cx), int(cy_obj)
             
+            # 🎯 [수정] 회전 탐색(FORCED_SEARCH) 중 타겟을 발견하면 즉시 정지 후 추적 전환
+            if state == "FORCED_SEARCH":
+                print(f"🎯 [타겟 포착] 회전 중 {target} 발견! 관성 제어를 위해 순간 정지.")
+                stop_robot()
+                time.sleep(0.4)           # 0.4초간 물리 브레이크 (카메라 블러 방지)
+                flush_camera_buffer(n=6)  # 정지하는 동안 밀린 프레임 버퍼 완전히 비우기
+            
             last_seen_x = int(0.6 * last_seen_x + 0.4 * cx)
             error_x = last_seen_x - frame_cx
             last_seen_y = bottom_y
@@ -305,13 +312,17 @@ try:
             
             cv2.drawContours(frame, [np.int32(cv2.boxPoints(rect))], 0, draw, 2)
 
-            # 15프레임(약 0.5초)마다 타겟 오브젝트 중심점의 색상 상태를 실시간 출력
             if frame_count % 15 == 0:
                 cx_clamped = np.clip(cx, 0, WIDTH - 1)
                 cy_clamped = np.clip(cy_obj, 0, HEIGHT - 1)
                 bgr_val = frame[cy_clamped, cx_clamped]
                 hsv_val = hsv[cy_clamped, cx_clamped]
                 print(f"📊 Tracking [{target}] | Area: {int(area)} | Dist: {est_dist_cm:.1f}cm | BGR: {bgr_val} | HSV: {hsv_val}")
+
+            # 탐색 상태였다면 추적(TRACK) 상태로 바로 전입하여 그 방향으로 전진 주행 시작
+            if state in ["BOUNDARY", "FORCED_SEARCH", "WANDERING", "SEARCH"]:
+                boundary_phase = 0
+                state = "TRACK"
 
         else:
             area = 0
@@ -336,7 +347,11 @@ try:
 
                 if mission_index < len(MISSION):
                     flush_camera_buffer(n=15)
-                    start_boundary_search(last_seen_x, frame_cx)
+                    # 🎯 [수정] 두 조건을 만족하고 다음 탐색으로 넘어갈 때 바운더리 대신 회전 탐색(FORCED_SEARCH)부터 시작
+                    state = "FORCED_SEARCH"
+                    search_start_time = time.time()
+                    print(f"🔄 다음 미션 [{MISSION[mission_index]}] 시작! 제자리 회전 탐색(FORCED_SEARCH) 돌입")
+            
             if cv2.waitKey(1) & 0xFF == 27: break
             continue
 
@@ -370,10 +385,6 @@ try:
 
         else:
             if object_detected:
-                if state in ["BOUNDARY", "FORCED_SEARCH", "WANDERING", "SEARCH"]:
-                    boundary_phase = 0
-                    state = "TRACK"
-
                 if state == "APPROACH" or area > TARGET_AREA or last_seen_y >= 200:
                     if state != "APPROACH":
                         state = "APPROACH"
@@ -403,11 +414,14 @@ try:
                 elif state == "BOUNDARY":
                     cam_v, cam_w = run_boundary_search()
                     cam_state = f"BOUNDARY-P{boundary_phase}"
+                # 🎯 [수정] 회전 탐색 모드일 때 마지막으로 객체를 보았던 방향을 기준으로 제자리 회전
                 elif state == "FORCED_SEARCH":
                     if time.time() - search_start_time > SEARCH_TIMEOUT:
+                        # 지정된 시간(1.6초) 동안 못 찾으면 최후의 수단으로 바운더리 서치 백업 가동
                         start_boundary_search(last_seen_x, frame_cx)
                     else:
-                        cam_v, cam_w = 0.03, 1.35
+                        cam_v = 0.02  # 아주 미세한 전진력을 주어 회전 반경 최적화
+                        cam_w = -1.35 if last_seen_x > frame_cx else 1.35 # 마지막 목격 방향으로 빠르게 회전
                 elif state == "WANDERING":
                     cam_v, cam_w = 0.20, 0.0
                 else:
