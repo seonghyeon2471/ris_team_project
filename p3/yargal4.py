@@ -109,7 +109,8 @@ def make_mask(frame, hsv, name):
 
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
-KP_ROT         = 0.003
+KP_ROT         = 0.010   # 픽셀당 회전속도 (기존 0.003 → 강화)
+W_MIN          = 0.25    # 최소 회전 속도 (너무 약한 회전 방지)
 APPROACH_V     = 0.22
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
@@ -123,10 +124,14 @@ ARRIVE_X_MARGIN = 60               # 화면 중앙에서 ±60px 이내
 ARRIVE_FORWARD_SEC = 1.0
 ARRIVE_FORWARD_V   = 0.15          # 도착 후 전진 속도
 
+# centroid가 이 프레임 수만큼 연속으로 영역 안에 있어야 도착 판정
+ARRIVE_CONFIRM     = 8
+
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
 mission_idx   = 0
 detect_count  = 0
+arrive_count  = 0              # 연속 도착 판정 카운터
 
 # PARK 세부 상태
 park_state    = "TRACK"
@@ -248,21 +253,35 @@ try:
             elif found:
                 park_state = "TRACK"
 
-                # centroid가 도착 판정 영역 안에 들어오면 → 전진 시작
+                # centroid가 영역 안에 있으면 카운터 증가, 벗어나면 리셋
                 if centroid_in_arrive_zone():
+                    arrive_count += 1
+                else:
+                    arrive_count = 0
+
+                # 연속 ARRIVE_CONFIRM 프레임 동안 영역 안에 있어야 도착 판정
+                if arrive_count >= ARRIVE_CONFIRM:
+                    arrive_count = 0
                     park_state = "FORWARD"
                     park_t = time.time()
-                    print(f"[{target}] centroid 도착 영역 진입 → {ARRIVE_FORWARD_SEC}초 전진")
+                    print(f"[{target}] centroid {ARRIVE_CONFIRM}프레임 확정 → {ARRIVE_FORWARD_SEC}초 전진")
                     send_cmd(ARRIVE_FORWARD_V, 0.0)
                     continue
 
                 else:
                     err_x = cx_obj - cx_mid
+                    # err_x 비례 회전 + 최솟값 보장 (약한 회전 방지)
+                    def cam_w(ex):
+                        raw = -KP_ROT * ex
+                        if abs(raw) < W_MIN and ex != 0:
+                            return -W_MIN if ex > 0 else W_MIN
+                        return raw
+
                     if fm >= THRESH_SLOW:
                         v = APPROACH_V
-                        w = -KP_ROT * err_x
+                        w = cam_w(err_x)
                     else:
-                        w_cam = -KP_ROT * err_x
+                        w_cam = cam_w(err_x)
                         w_lid = adir * 0.7
                         if fm < THRESH_STOP:
                             v, w = 0.09, w_lid
