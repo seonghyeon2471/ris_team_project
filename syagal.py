@@ -91,7 +91,7 @@ COLOR_CFG = {
     "yellow": {"hsv1": ([16, 137, 142], [30, 214, 195]),
                "hsv2": None,
                "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
-    "blue":   {"hsv1": ([[106, 168, 54], [131, 210, 82]]),
+    "blue":   {"hsv1": ([106, 168, 54], [131, 210, 82]),
                "hsv2": None,
                "bgr":  ([40,  0,   0], [255, 220, 220]), "draw": (255, 80, 0)},
 }
@@ -113,7 +113,11 @@ KP_ROT         = 0.003
 APPROACH_V     = 0.22
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
-BOTTOM_10PCT   = int(240 * 0.90)  
+
+# [바운더리 파라미터] 가로 320, 세로 240 기준 10% 폭 정의
+BOTTOM_10PCT   = int(240 * 0.90)  # 216px (하단)
+LEFT_10PCT     = int(320 * 0.10)  # 32px  (좌측 외곽)
+RIGHT_10PCT    = int(320 * 0.90)  # 288px (우측 외곽)
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
@@ -124,7 +128,12 @@ detect_count  = 0
 park_state    = "TRACK"
 last_seen_x   = 160
 last_bottom_y = 0
+
+# 객체가 사라진 경계 상태 저장 플래그
 was_in_bottom = False
+was_in_left   = False
+was_in_right  = False
+
 park_t        = None
 
 print(f"START | MISSION: {MISSION}")
@@ -157,18 +166,27 @@ try:
         big   = max(cnts, key=cv2.contourArea) if cnts else None
         found = big is not None and cv2.contourArea(big) > MIN_AREA
 
+        # 화면에 타겟 가이드라인 그리기 (디버깅용)
+        cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
+        cv2.line(frame, (LEFT_10PCT, 0), (LEFT_10PCT, H), (255, 0, 0), 1)
+        cv2.line(frame, (RIGHT_10PCT, 0), (RIGHT_10PCT, H), (255, 0, 0), 1)
+
         if found:
             bx, by_top, bw, bh = cv2.boundingRect(big)
             ox     = bx + bw // 2
             by_bot = min(by_top + bh, 239)
             err_x  = ox - cx_mid
+            
             last_seen_x   = ox
             last_bottom_y = by_bot
+            
+            # 객체 중심 또는 바운딩 박스가 경계 영역 내에 있는지 실시간 판정
             was_in_bottom = (by_bot >= BOTTOM_10PCT)
+            was_in_left   = (bx <= LEFT_10PCT)
+            was_in_right  = ((bx + bw) >= RIGHT_10PCT)
 
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
-            cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
 
         # ══ LIDAR 모드 ═══════════════════════════════════════════
         if mode == "LIDAR":
@@ -201,7 +219,9 @@ try:
                     mission_idx += 1
                     if mission_idx < len(MISSION):
                         park_state = "SEARCH"
-                        last_seen_x = cx_mid + 40 # 주차 후 약간 우회전하며 탐색 유도
+                        # 다음 미션을 찾을 때는 강제로 우회전 탐색 하도록 세팅
+                        last_seen_x = cx_mid + 40 
+                        was_in_bottom = was_in_left = was_in_right = False 
                         print(f"다음 미션 [{MISSION[mission_idx]}] 탐색 회전 시작")
                     continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
@@ -222,13 +242,29 @@ try:
             # 3. 객체 놓침 또는 다음 객체 탐색 (SEARCH)
             else:
                 if was_in_bottom:
+                    # 완벽하게 하단으로 정상 소실된 경우에만 주차 확정
                     park_state = "PARKING"
                     park_t = time.time()
-                    was_in_bottom = False
-                    print(f"[{target}] 도착 판정")
+                    was_in_bottom = was_in_left = was_in_right = False
+                    print(f"[{target}] 정상 전방 하단 도착 판정 → 주차")
+                
                 else:
                     park_state = "SEARCH"
-                    v, w = 0.0, (-1.3 if last_seen_x > cx_mid else 1.3)
+                    v = 0.0
+                    
+                    # [바운더리 이탈 피드백 조향 로직]
+                    if was_in_left:
+                        # 왼쪽 바운더리를 치며 사라졌다면 -> 좌회전으로 확 꺾기
+                        w = 1.60  # 최대 조향값 인가
+                        cv2.putText(frame, "ESCAPE: LEFT SIDE! SNAP TURN", (10, 50), 0, 0.5, (0, 0, 255), 2)
+                    elif was_in_right:
+                        # 오른쪽 바운더리를 치며 사라졌다면 -> 우회전으로 확 꺾기
+                        w = -1.60 # 최대 조향값 인가
+                        cv2.putText(frame, "ESCAPE: RIGHT SIDE! SNAP TURN", (10, 50), 0, 0.5, (0, 0, 255), 2)
+                    else:
+                        # 경계면이 아니었는데 놓쳤거나 주차 직후 기본 회전인 경우
+                        w = -1.3 if last_seen_x > cx_mid else 1.3
+                    
                     send_cmd(v, w)
                     cv2.putText(frame, f"SEARCHING: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
 
