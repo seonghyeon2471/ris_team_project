@@ -159,14 +159,20 @@ try:
         if found:
             bx, by_top, bw, bh = cv2.boundingRect(big)
             ox     = bx + bw // 2
-            by_bot = min(by_top + bh, 239)
-            err_x  = ox - cx_mid
-            last_seen_x   = ox
+            by_bot = by_top + bh
+
             last_bottom_y = by_bot
+            LOST_BOTTOM_COUNT = 0
 
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
             cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
+        else:
+            # 객체가 안 보임
+            if last_bottom_y >= BOTTOM_10PCT:
+                LOST_BOTTOM_COUNT += 1
+            else:
+                LOST_BOTTOM_COUNT = 0
 
         # ══ LIDAR 모드 ═══════════════════════════════════════════
         if mode == "LIDAR":
@@ -190,6 +196,13 @@ try:
             cv2.putText(frame, "MODE: LIDAR", (10, 25), 0, 0.5, (255, 255, 255), 1)
 
         # ══ PARK 모드 (추적 / 정차 / 탐색) ══════════════════════════
+        LOST_BOTTOM_COUNT = 0
+
+        if LOST_BOTTOM_COUNT > 5:
+            stop_robot()
+            print("OBJECT LEFT BOTTOM → STOP")
+            break   # 또는 mode 변경
+        
         elif mode == "PARK":
             # 1. 정차 중 (PARKING)
             if park_state == "PARKING":
