@@ -34,7 +34,7 @@ cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 time.sleep(1.0)
 
 # 자동 노출 OFF
-cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, -3)
+cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, -6)
 
 # 자동 화이트밸런스 OFF
 cap.set(cv2.CAP_PROP_AUTO_WB, 0)
