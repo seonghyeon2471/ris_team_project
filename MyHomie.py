@@ -2,7 +2,6 @@ import cv2
 import serial
 import numpy as np
 import time
-import math
 import threading
 
 # ── SERIAL ────────────────────────────────────────────────────────────
@@ -25,7 +24,7 @@ lidar_ser.reset_input_buffer()
 lidar_ser.write(bytes([0xA5, 0x20])); lidar_ser.read(7)
 print("LIDAR OK")
 
-# ── LIDAR ─────────────────────────────────────────────────────────────
+# ── LIDAR 설정 ────────────────────────────────────────────────────────
 EMA_ALPHA   = 0.35
 MEDIAN_K    = 2
 FRONT_RANGE = 45
@@ -76,7 +75,7 @@ def avoid_dir(scan):
     return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
 
 def lidar_vw(fm, adir):
-    if fm < THRESH_STOP:  return 0.09, adir * 0.9
+    if fm < THRESH_STOP:   return 0.09, adir * 0.9
     elif fm < THRESH_TURN: return 0.13, adir * 0.7
     elif fm < THRESH_SLOW: return 0.18, adir * 0.4
     else:                  return 0.28, 0.0
@@ -107,50 +106,75 @@ def make_mask(frame, hsv_img, name):
     return m
 
 # ── PARAMS ────────────────────────────────────────────────────────────
-MIN_AREA       = 400
-KP_ROT         = 0.006
-APPROACH_V     = 0.14          # ★ 0.22 → 0.14 (접근 속도 낮춤, 색지 놓치지 않게)
-PARK_SEC       = 1.2
-DETECT_CONFIRM = 6
+MIN_AREA        = 400
+MIN_AREA_PARK   = 3000          # 주차 근접 판단용 면적
+KP_ROT          = 0.006
+APPROACH_V      = 0.22
+PARK_SEC        = 1.2
+DETECT_CONFIRM  = 6
 
-# ★ BOTTOM_Y 75%로 완화 (기존 90% → 너무 끝까지 와야 했음)
-BOTTOM_Y    = int(240 * 0.75)  # 180px
-SIDE_LIM_L  = int(320 * 0.10)  # 32px
-SIDE_LIM_R  = int(320 * 0.90)  # 288px
+BOTTOM_Y    = int(240 * 0.70)   # 168px  하단 30%
+SIDE_LIM_L  = int(320 * 0.10)   # 32px
+SIDE_LIM_R  = int(320 * 0.90)   # 288px
 
-OUTER_L  = int(320 * 0.20)     # 64px
-OUTER_R  = int(320 * 0.80)     # 256px
-CENTER_L = int(320 * 0.40)     # 128px
-CENTER_R = int(320 * 0.60)     # 192px
-
-# ★ 면적 기반 주차 트리거 (색지가 충분히 가까워지면 바로 주차)
-PARK_AREA_THRESH = 7000
+CENTER_L = int(320 * 0.40)      # 128px  중앙 정렬 완료 구역
+CENTER_R = int(320 * 0.60)      # 192px
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
 mission_idx   = 0
 detect_count  = 0
 
+# PARK 내부 상태
+#   "TRACK"   : 색지 추적 중
+#   "SEARCH"  : 색지 유실 → 재탐색
+#   "PARKING" : 정차 중
 park_state    = "TRACK"
 last_seen_x   = 160
 last_bottom_y = 0
-last_area     = 0              # ★ 마지막으로 본 색지 면적
-was_in_bottom = False
+was_near      = False           # 하단 도달 OR 면적 충분히 클 때 True
 park_t        = None
 
-print(f"START | BOTTOM_Y={BOTTOM_Y}  SIDE={SIDE_LIM_L}~{SIDE_LIM_R}  AREA_THRESH={PARK_AREA_THRESH}")
+# 카메라→라이다 전환 플래그 (중앙 정렬 완료 여부)
+# True  : 중앙 정렬된 적 있음 → 라이다 조향 유지
+# False : 아직 정렬 안 됨 OR 색지가 벗어남 → 카메라 조향
+aligned = False
 
-# ── 주차 확정 판단 함수 ───────────────────────────────────────────────
-def should_park(in_x_ok):
-    """
-    주차 확정 조건 (OR 관계):
-      1) 색지가 하단(BOTTOM_Y)까지 내려온 적 있음  AND  x 범위 OK
-      2) 마지막 본 색지 면적이 임계값 초과          AND  x 범위 OK
-    둘 중 하나만 만족해도 주차
-    """
-    cond_bottom = was_in_bottom and in_x_ok
-    cond_area   = (last_area >= PARK_AREA_THRESH) and in_x_ok
-    return cond_bottom or cond_area
+print(f"START | BOTTOM_Y={BOTTOM_Y}  CENTER={CENTER_L}~{CENTER_R}")
+print(f"       SIDE={SIDE_LIM_L}~{SIDE_LIM_R}  MIN_AREA_PARK={MIN_AREA_PARK}")
+
+# ── 공통 조향 함수 ────────────────────────────────────────────────────
+# 로직:
+#   1) 색지 보임 + 미정렬 → 카메라 조향 (v=0, w=KP*err)
+#   2) 색지가 CENTER 진입 → aligned=True
+#   3) aligned + CENTER 유지 → 라이다 조향
+#   4) aligned 중 색지가 CENTER 이탈 → aligned=False → 다시 카메라 조향
+#   5) 색지 안 보임 → 라이다 조향 (aligned 유지)
+def compute_vw(found, ox, err_x, fm, adir):
+    global aligned
+    label = ""
+
+    if found:
+        if CENTER_L <= ox <= CENTER_R:
+            # 중앙 구역 진입/유지
+            aligned = True
+            v, w    = lidar_vw(fm, adir)
+            label   = "LIDAR_FWD"
+        else:
+            # 중앙 이탈 → 카메라 재조향
+            aligned = False
+            v = 0.0
+            w = -KP_ROT * err_x * 3.0   # 빠른 복귀를 위해 게인 강화
+            # 너무 멀리 있으면 강한 회전
+            if abs(err_x) > 100:
+                w = -1.4 if err_x > 0 else 1.4
+            label = "CAM_ALIGN"
+    else:
+        # 색지 없음 → 라이다 조향 (aligned 상태 유지)
+        v, w  = lidar_vw(fm, adir)
+        label = "LIDAR_FWD(no_tgt)"
+
+    return v, w, label
 
 # ── MAIN LOOP ─────────────────────────────────────────────────────────
 try:
@@ -191,59 +215,48 @@ try:
             err_x  = ox - cx_mid
             last_seen_x   = ox
             last_bottom_y = by_bot
-            last_area     = area           # ★ 면적 갱신
-            if by_bot >= BOTTOM_Y:
-                was_in_bottom = True
 
+            # 시각화
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
-            cv2.line(frame, (cx_mid, 0), (cx_mid, H), (80, 80, 80), 1)
-            # ★ 면적 표시
-            cv2.putText(frame, f"area={int(area)}", (bx, by_top - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, draw, 1)
 
-        # 구역 기준선 표시
-        cv2.line(frame, (0, BOTTOM_Y), (W, BOTTOM_Y), (0, 0, 255), 1)
-        cv2.line(frame, (SIDE_LIM_L, 0), (SIDE_LIM_L, H), (0, 0, 200), 1)
-        cv2.line(frame, (SIDE_LIM_R, 0), (SIDE_LIM_R, H), (0, 0, 200), 1)
-        cv2.line(frame, (OUTER_L, 0), (OUTER_L, H), (0, 200, 0), 1)
-        cv2.line(frame, (OUTER_R, 0), (OUTER_R, H), (0, 200, 0), 1)
-        cv2.line(frame, (CENTER_L, 0), (CENTER_L, H), (200, 200, 0), 1)
-        cv2.line(frame, (CENTER_R, 0), (CENTER_R, H), (200, 200, 0), 1)
+        # 구역 기준선
+        cv2.line(frame, (cx_mid, 0), (cx_mid, H), (80, 80, 80), 1)
+        cv2.line(frame, (0, BOTTOM_Y),    (W, BOTTOM_Y),    (0, 0, 255),   1)
+        cv2.line(frame, (SIDE_LIM_L, 0),  (SIDE_LIM_L, H),  (0, 0, 200),   1)
+        cv2.line(frame, (SIDE_LIM_R, 0),  (SIDE_LIM_R, H),  (0, 0, 200),   1)
+        cv2.line(frame, (CENTER_L, 0),    (CENTER_L, H),    (0, 255, 255), 1)
+        cv2.line(frame, (CENTER_R, 0),    (CENTER_R, H),    (0, 255, 255), 1)
 
         # ══ LIDAR 주행 모드 ═══════════════════════════════════════════
         if mode == "LIDAR":
             if found:
                 detect_count += 1
-                cv2.putText(frame, f"DETECT [{detect_count}/{DETECT_CONFIRM}]",
-                            (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, draw, 2)
-
-                if ox < OUTER_L or ox > OUTER_R:
-                    v, w = 0.0, (-1.4 if err_x > 0 else 1.4)
-                elif CENTER_L <= ox <= CENTER_R:
-                    v, w = lidar_vw(fm, adir)
-                else:
-                    v = min(0.22, lidar_vw(fm, adir)[0])
-                    w = -KP_ROT * err_x
             else:
                 detect_count = 0
-                v, w = lidar_vw(fm, adir)
 
+            v, w, label = compute_vw(found, ox, err_x, fm, adir)
+
+            # PARK 진입 조건: 색지 N프레임 확정 + 전방 여유
             if detect_count >= DETECT_CONFIRM and fm >= THRESH_SLOW:
                 detect_count  = 0
+                aligned       = False
                 mode          = "PARK"
                 park_state    = "TRACK"
-                was_in_bottom = False
+                was_near      = False
                 last_bottom_y = 0
-                last_area     = 0
                 park_t        = None
                 stop_robot()
                 print(f"[{target}] PARK 진입 (front={fm:.0f}cm)")
                 cv2.imshow("f", frame); cv2.waitKey(1); continue
 
             send_cmd(v, w)
-            cv2.putText(frame, f"LIDAR front={fm:.0f}cm  [{target}]",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 255, 200), 1)
+            cv2.putText(frame,
+                f"LIDAR [{target}] {label} front={fm:.0f}cm det={detect_count}",
+                (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 255, 200), 1)
+            cv2.putText(frame,
+                f"aligned={aligned} ox={ox} err={err_x}",
+                (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1)
             cv2.imshow("f", frame)
             if cv2.waitKey(1) & 0xFF == 27: break
             continue
@@ -262,67 +275,55 @@ try:
                 mission_idx   += 1
                 mode           = "LIDAR"
                 park_state     = "TRACK"
-                was_in_bottom  = False
+                was_near       = False
                 last_bottom_y  = 0
-                last_area      = 0
                 detect_count   = 0
+                aligned        = False
                 print(f"[{target}] 완료 → LIDAR")
             cv2.waitKey(1)
             continue
 
-        # ─ TRACK / SEARCH: 색지 보임 ─────────────────────────────────
+        # ─ TRACK / SEARCH ─────────────────────────────────────────────
         if park_state in ["TRACK", "SEARCH"]:
             if found:
                 park_state = "TRACK"
-                in_x_ok    = SIDE_LIM_L < ox < SIDE_LIM_R
 
-                # ★ 색지가 보이는 상태에서도 면적/하단 조건 충족 시 바로 주차
-                if should_park(in_x_ok):
-                    park_state = "PARKING"
-                    park_t     = time.time()
-                    stop_robot()
-                    print(f"[{target}] 주차 확정 (found 상태) area={int(area)} y={by_bot}")
-                    cv2.imshow("f", frame); cv2.waitKey(1); continue
+                # 근접 판단 업데이트
+                if by_bot >= BOTTOM_Y or area >= MIN_AREA_PARK:
+                    was_near = True
 
-                # 조건 미달 → 계속 접근
-                if ox < OUTER_L or ox > OUTER_R:
-                    # ★ 회전 속도 살짝 낮춤 (1.4 → 1.1) 색지 놓치지 않게
-                    v, w  = 0.0, (-1.1 if err_x > 0 else 1.1)
-                    label = "CAM_TURN"
-                elif CENTER_L <= ox <= CENTER_R:
-                    # ★ PARK 모드 직진 속도 절반으로
-                    v     = min(0.14, lidar_vw(fm, adir)[0])
-                    w     = -KP_ROT * err_x
-                    label = "LIDAR_FWD"
-                else:
-                    v     = APPROACH_V          # 0.14
-                    w     = -KP_ROT * err_x
-                    label = "CAM_ALIGN"
-
+                v, w, label = compute_vw(found, ox, err_x, fm, adir)
                 send_cmd(v, w)
+
                 cv2.putText(frame,
-                    f"TRACK [{target}] {label} area={int(area)} y={by_bot} bot={was_in_bottom}",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.40, draw, 1)
+                    f"PARK [{target}] {label} near={was_near}",
+                    (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, draw, 1)
+                cv2.putText(frame,
+                    f"aligned={aligned} ox={ox} y={last_bottom_y} area={int(area)}",
+                    (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1)
 
             else:
                 # ── 색지 사라짐 ───────────────────────────────────────
                 in_x_ok = SIDE_LIM_L < last_seen_x < SIDE_LIM_R
-                print(f"[LOST] was_in_bottom={was_in_bottom} last_y={last_bottom_y} "
-                      f"last_area={int(last_area)} in_x={in_x_ok} last_x={last_seen_x}")
+                print(f"[LOST] was_near={was_near} last_y={last_bottom_y} "
+                      f"in_x={in_x_ok} last_x={last_seen_x}")
 
-                if should_park(in_x_ok):
+                if was_near and in_x_ok:
+                    # 주차 확정
                     park_state = "PARKING"
                     park_t     = time.time()
                     stop_robot()
-                    print(f"[{target}] 주차 확정 (lost 상태) area={int(last_area)} y={last_bottom_y}")
+                    print(f"[{target}] 주차 확정 → {PARK_SEC}s")
                 else:
+                    # 재탐색: 마지막으로 본 방향으로 회전
                     park_state = "SEARCH"
+                    aligned    = False
                     v = 0.0
-                    w = -1.30 if last_seen_x > cx_mid else 1.30
+                    w = -1.3 if last_seen_x > cx_mid else 1.3
                     send_cmd(v, w)
                     cv2.putText(frame,
-                        f"SEARCH [{target}] last_area={int(last_area)} last_y={last_bottom_y}",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 0), 1)
+                        f"SEARCH [{target}] near={was_near} in_x={in_x_ok}",
+                        (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 0), 1)
 
         cv2.imshow("f", frame)
         if cv2.waitKey(1) & 0xFF == 27: break
