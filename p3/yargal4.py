@@ -111,7 +111,7 @@ def make_mask(frame, hsv, name):
 MIN_AREA       = 400
 KP_ROT         = 0.020   # 픽셀당 회전속도 (기존 0.003 → 강화)
 W_MIN          = 0.25    # 최소 회전 속도 (너무 약한 회전 방지)
-APPROACH_V     = 0.22
+APPROACH_V     = 0.17
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 
