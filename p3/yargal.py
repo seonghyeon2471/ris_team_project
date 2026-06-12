@@ -222,14 +222,14 @@ try:
 
                             # 2초 동안만 직진
                             if time.time() - post_t < 2.0:
-                            send_cmd(0.18, 0.0)   # 직진
-                            cv2.putText(frame, "POST FORWARD", (10, 25), 0, 0.6, draw, 2)
+                                send_cmd(0.18, 0.0)   # 직진
+                                cv2.putText(frame, "POST FORWARD", (10, 25), 0, 0.6, draw, 2)
 
-                        else:
-                            # 2초 끝 → 완전 정지
-                            stop_robot()
-                            park_state = "SEARCH"
-                            print("POST FORWARD 완료 → STOP 후 SEARCH")
+                            else:
+                                # 2초 끝 → 완전 정지
+                                stop_robot()
+                                park_state = "SEARCH"
+                                print("POST FORWARD 완료 → STOP 후 SEARCH")
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
 
             # 2. 객체 추적 중 (TRACK)
