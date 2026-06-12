@@ -75,15 +75,15 @@ def front_min(scan):
 def avoid_dir(scan):
     return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
 
-# ── MOTOR (각속도 제한 대폭 해제) ───────────────────────────────────────
+# ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
     v = np.clip(v, -0.4, 0.4)
-    w = np.clip(w, -2.8, 2.8)  # [수정] 기존 1.6에서 2.8로 상한선 크게 확장
+    w = np.clip(w, -1.6, 1.6)
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
 def stop_robot(): send_cmd(0.0, 0.0)
 
-# ── COLOR CONFIG ──────────────────────────────────────────────────────
+# ── COLOR CONFIG (새로운 HSV 값 반영) ──────────────────────────────────
 COLOR_CFG = {
     "red":    {"hsv1": ([169, 168, 96], [179, 222, 157]),
                "hsv2": None,
@@ -91,7 +91,7 @@ COLOR_CFG = {
     "yellow": {"hsv1": ([16, 137, 142], [30, 214, 195]),
                "hsv2": None,
                "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
-    "blue":   {"hsv1": ([106, 168, 54], [131, 210, 82]),
+    "blue":   {"hsv1": ([[106, 168, 54], [131, 210, 82]]),
                "hsv2": None,
                "bgr":  ([40,  0,   0], [255, 220, 220]), "draw": (255, 80, 0)},
 }
@@ -109,16 +109,11 @@ def make_mask(frame, hsv, name):
 
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
-MAX_W_TRACK = 0.5
-DEADZONE = 0.05
+KP_ROT         = 0.003
 APPROACH_V     = 0.22
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
-
-# [바운더리 파라미터] 좌우 외곽 10% 정의
-BOTTOM_10PCT   = int(240 * 0.90)  # 216px
-LEFT_10PCT     = int(320 * 0.10)  # 32px
-RIGHT_10PCT    = int(320 * 0.90)  # 288px
+BOTTOM_10PCT   = int(240 * 0.90)  
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
@@ -129,12 +124,7 @@ detect_count  = 0
 park_state    = "TRACK"
 last_seen_x   = 160
 last_bottom_y = 0
-
-# 경계 상태 플래그
 was_in_bottom = False
-was_in_left   = False
-was_in_right  = False
-
 park_t        = None
 
 print(f"START | MISSION: {MISSION}")
@@ -167,37 +157,18 @@ try:
         big   = max(cnts, key=cv2.contourArea) if cnts else None
         found = big is not None and cv2.contourArea(big) > MIN_AREA
 
-        # 디버깅용 가이드라인 선 그리기
-        cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
-        cv2.line(frame, (LEFT_10PCT, 0), (LEFT_10PCT, H), (255, 0, 0), 1)
-        cv2.line(frame, (RIGHT_10PCT, 0), (RIGHT_10PCT, H), (255, 0, 0), 1)
-
         if found:
             bx, by_top, bw, bh = cv2.boundingRect(big)
             ox     = bx + bw // 2
             by_bot = min(by_top + bh, 239)
-            err_x = ox - cx_mid
-
-            # -1 ~ +1 정규화
-            err_norm = err_x / (W / 2)
-
-            # 중앙 근처 흔들림 제거
-            if abs(err_norm) < DEADZONE:
-                err_norm = 0.0
-
-            # 센트로이드 오차에 비례한 회전량
-            w_track = -MAX_W_TRACK * err_norm
-            
+            err_x  = ox - cx_mid
             last_seen_x   = ox
             last_bottom_y = by_bot
-            
-            # 실시간 이탈 경계면 저장
             was_in_bottom = (by_bot >= BOTTOM_10PCT)
-            was_in_left   = (bx <= LEFT_10PCT)
-            was_in_right  = ((bx + bw) >= RIGHT_10PCT)
 
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
+            cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
 
         # ══ LIDAR 모드 ═══════════════════════════════════════════
         if mode == "LIDAR":
@@ -230,9 +201,7 @@ try:
                     mission_idx += 1
                     if mission_idx < len(MISSION):
                         park_state = "SEARCH"
-                        # 주차 후 우회전 탐색 속도도 더 빠르게 기동 시퀀스로 연결되도록 유도
-                        last_seen_x = cx_mid + 40 
-                        was_in_bottom = was_in_left = was_in_right = False 
+                        last_seen_x = cx_mid + 40 # 주차 후 약간 우회전하며 탐색 유도
                         print(f"다음 미션 [{MISSION[mission_idx]}] 탐색 회전 시작")
                     continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
@@ -241,29 +210,12 @@ try:
             elif found:
                 park_state = "TRACK"
                 if fm >= THRESH_SLOW:
-
-                    v = APPROACH_V
-                    w = w_track
-
+                    v, w = APPROACH_V, -KP_ROT * err_x
                 else:
-
-                    w_cam = w_track
-                    w_lid = adir * 0.7
-
-                    if fm < THRESH_STOP:
-
-                        v = 0.09
-                        w = w_lid
-
-                    elif fm < THRESH_TURN:
-
-                        v = 0.13
-                        w = 0.7 * w_lid + 0.3 * w_cam
-
-                    else:
-
-                        v = 0.18
-                        w = 0.3 * w_lid + 0.7 * w_cam
+                    w_cam, w_lid = -KP_ROT * err_x, adir * 0.7
+                    if fm < THRESH_STOP: v, w = 0.09, w_lid
+                    elif fm < THRESH_TURN: v, w = 0.13, 0.7*w_lid + 0.3*w_cam
+                    else: v, w = 0.18, 0.3*w_lid + 0.7*w_cam
                 send_cmd(v, w)
                 cv2.putText(frame, f"TRACKING: {target}", (10, 25), 0, 0.6, draw, 1)
 
@@ -272,24 +224,11 @@ try:
                 if was_in_bottom:
                     park_state = "PARKING"
                     park_t = time.time()
-                    was_in_bottom = was_in_left = was_in_right = False
-                    print(f"[{target}] 전방 하단 도착 판정 → 주차")
-                
+                    was_in_bottom = False
+                    print(f"[{target}] 도착 판정")
                 else:
                     park_state = "SEARCH"
-                    v = 0.0
-                    
-                    # [강화된 초고속 바운더리 복귀 조향]
-                    if was_in_left:
-                        w = 2.50  # [수정] 기존 1.60 -> 2.50으로 제자리 좌회전 대폭 강화
-                        cv2.putText(frame, "ESCAPE: LEFT SIDE! FAST SNAP TURN", (10, 50), 0, 0.5, (0, 0, 255), 2)
-                    elif was_in_right:
-                        w = -2.50 # [수정] 기존 -1.60 -> -2.50으로 제자리 우회전 대폭 강화
-                        cv2.putText(frame, "ESCAPE: RIGHT SIDE! FAST SNAP TURN", (10, 50), 0, 0.5, (0, 0, 255), 2)
-                    else:
-                        # 주차 직후 다음 타겟 탐색 등 일반 SEARCH 상태 회전 속도도 상향
-                        w = -1.8 if last_seen_x > cx_mid else 1.8  # [수정] 기존 1.3 -> 1.8
-                    
+                    v, w = 0.0, (-1.3 if last_seen_x > cx_mid else 1.3)
                     send_cmd(v, w)
                     cv2.putText(frame, f"SEARCHING: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
 
