@@ -178,7 +178,9 @@ try:
             err_x  = ox - cx_mid
             last_seen_x   = ox
             last_bottom_y = by_bot
-            was_in_bottom = (by_bot >= BOTTOM_10PCT)
+            # 한번 하단 진입하면 True 유지 (사라지기 전까지 초기화 안 함)
+            if by_bot >= BOTTOM_10PCT:
+                was_in_bottom = True
 
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
