@@ -111,7 +111,7 @@ def make_mask(frame, hsv, name):
     bm = cv2.inRange(frame, np.array(cfg["bgr"][0]), np.array(cfg["bgr"][1]))
     return cv2.bitwise_and(m, bm)
   
-  def obstacle_mask(frame, hsv):
+def obstacle_mask(frame, hsv):
     lo, hi = OBSTACLE_HSV
 
     m = cv2.inRange(hsv, lo, hi)
