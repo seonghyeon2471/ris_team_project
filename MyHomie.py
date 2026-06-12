@@ -75,6 +75,13 @@ def front_min(scan):
 def avoid_dir(scan):
     return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
 
+def lidar_v_limit(fm):
+    """전방 거리에 따라 최대 선속도 제한"""
+    if fm < THRESH_STOP: return 0.09
+    elif fm < THRESH_TURN: return 0.13
+    elif fm < THRESH_SLOW: return 0.18
+    else: return 0.28
+
 # ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
     v = np.clip(v, -0.4, 0.4)
@@ -210,15 +217,41 @@ try:
                 cv2.putText(frame, f"WAIT obstacle {fm:.0f}cm",
                             (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 100, 255), 1)
 
-            # 라이다 장애물 회피
-            if fm < THRESH_STOP:
-                v, w = 0.09, adir * 0.9
-            elif fm < THRESH_TURN:
-                v, w = 0.13, adir * 0.7
-            elif fm < THRESH_SLOW:
-                v, w = 0.18, adir * 0.4
+            # 라이다 장애물 회피 (색지 보이면 구역별 조향)
+            if found:
+                OUTER_L = int(320 * 0.20)   # 64px  바깥 20% 경계
+                OUTER_R = int(320 * 0.80)   # 256px
+                CENTER_L = int(320 * 0.40)  # 128px 중앙 20% 경계
+                CENTER_R = int(320 * 0.60)  # 192px
+
+                if ox < OUTER_L or ox > OUTER_R:
+                    # 양끝 20% → 카메라 조향 (제자리 강한 회전)
+                    v = 0.0
+                    w = -1.4 if err_x > 0 else 1.4
+                elif CENTER_L <= ox <= CENTER_R:
+                    # 중앙 20% → 라이다 조향 (장애물 회피 직진)
+                    if fm < THRESH_STOP:
+                        v, w = 0.09, adir * 0.9
+                    elif fm < THRESH_TURN:
+                        v, w = 0.13, adir * 0.7
+                    elif fm < THRESH_SLOW:
+                        v, w = 0.18, adir * 0.4
+                    else:
+                        v, w = 0.28, 0.0
+                else:
+                    # 중간 40% → 카메라 조향 유지 (부드럽게 중앙으로)
+                    v = min(lidar_v_limit(fm), APPROACH_V)
+                    w = -KP_ROT * err_x
             else:
-                v, w = 0.28, 0.0
+                # 색지 없음 → 순수 라이다 회피
+                if fm < THRESH_STOP:
+                    v, w = 0.09, adir * 0.9
+                elif fm < THRESH_TURN:
+                    v, w = 0.13, adir * 0.7
+                elif fm < THRESH_SLOW:
+                    v, w = 0.18, adir * 0.4
+                else:
+                    v, w = 0.28, 0.0
 
             send_cmd(v, w)
             cv2.putText(frame, f"LIDAR  front={fm:.0f}cm",
@@ -260,25 +293,32 @@ try:
         if found:
             park_state = "TRACK"
 
-            # 매 프레임 라이다 전방 체크
-            if fm >= THRESH_SLOW:
-                # 장애물 없음 → 카메라만으로 조향
+            OUTER_L  = int(320 * 0.20)   # 64px
+            OUTER_R  = int(320 * 0.80)   # 256px
+            CENTER_L = int(320 * 0.40)   # 128px
+            CENTER_R = int(320 * 0.60)   # 192px
+
+            if ox < OUTER_L or ox > OUTER_R:
+                # 양끝 20% → 카메라 조향 (제자리 강한 회전)
+                v = 0.0
+                w = -1.4 if err_x > 0 else 1.4
+                lidar_label = "CAM_TURN"
+            elif CENTER_L <= ox <= CENTER_R:
+                # 중앙 20% → 라이다 조향 (장애물 회피 직진)
+                if fm < THRESH_STOP:
+                    v, w = 0.09, adir * 0.9
+                elif fm < THRESH_TURN:
+                    v, w = 0.13, adir * 0.7
+                elif fm < THRESH_SLOW:
+                    v, w = 0.18, adir * 0.4
+                else:
+                    v, w = APPROACH_V, 0.0
+                lidar_label = "LIDAR_FWD"
+            else:
+                # 중간 40% → 카메라 조향 유지 (부드럽게 중앙으로)
                 v = APPROACH_V
                 w = -KP_ROT * err_x
-                lidar_label = "LIDAR_OFF"
-            else:
-                # 장애물 감지 → 블렌딩
-                w_cam   = -KP_ROT * err_x
-                w_lidar = adir * 0.7
-                if fm < THRESH_STOP:
-                    v, w = 0.09, w_lidar
-                elif fm < THRESH_TURN:
-                    v = 0.13
-                    w = 0.7 * w_lidar + 0.3 * w_cam
-                else:
-                    v = 0.18
-                    w = 0.3 * w_lidar + 0.7 * w_cam
-                lidar_label = "LIDAR_ON"
+                lidar_label = "CAM_ALIGN"
 
             send_cmd(v, w)
             cv2.putText(frame, f"TRACK [{target}] {lidar_label} front={fm:.0f}cm",
