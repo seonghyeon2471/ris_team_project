@@ -4,15 +4,9 @@ import numpy as np
 import time
 import threading
 
-# =========================================
-# SERIAL
-# =========================================
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
 lidar_ser   = serial.Serial("/dev/ttyUSB0",  460800, timeout=0.1)
 
-# =========================================
-# CAMERA
-# =========================================
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH,  320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
@@ -22,9 +16,6 @@ time.sleep(1.0)
 cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
 cap.set(cv2.CAP_PROP_AUTO_WB, 0)
 
-# =========================================
-# LIDAR BOOT
-# =========================================
 lidar_ser.write(bytes([0xA5, 0x40]))
 time.sleep(2)
 lidar_ser.reset_input_buffer()
@@ -32,9 +23,6 @@ lidar_ser.write(bytes([0xA5, 0x20]))
 lidar_ser.read(7)
 print("LIDAR OK")
 
-# =========================================
-# LIDAR PARAMETERS (첫 번째 코드 기반)
-# =========================================
 MAX_SPEED = 0.30
 MIN_SPEED = 0.09
 MAX_W = 0.9
@@ -49,9 +37,6 @@ MEDIAN_K = 2
 scan_data = np.full(360, 150.0, dtype=np.float32)
 scan_lock = threading.Lock()
 
-# =========================================
-# LIDAR UTILS (첫 번째 코드 기반)
-# =========================================
 def apply_ema(angle, new_dist_cm):
     if not isinstance(new_dist_cm, (int, float)) or new_dist_cm <= 0:
         return
@@ -76,9 +61,6 @@ def choose_avoid_direction():
     right_avg = float(np.mean(scan_data[271:360]))
     return 1 if left_avg >= right_avg else -1
 
-# =========================================
-# LIDAR THREAD
-# =========================================
 def lidar_loop():
     while True:
         raw = lidar_ser.read(5)
@@ -101,9 +83,6 @@ def get_scan():
     with scan_lock:
         return scan_data.copy()
 
-# =========================================
-# MOTOR
-# =========================================
 def send_cmd(v, w):
     v = np.clip(v, -0.4, 0.4)
     w = np.clip(w, -1.6, 1.6)
@@ -112,9 +91,6 @@ def send_cmd(v, w):
 def stop_robot():
     send_cmd(0.0, 0.0)
 
-# =========================================
-# COLOR CONFIG (두 번째 코드 기반)
-# =========================================
 COLOR_CFG = {
     "red": {
         "hsv1": ([169, 168, 96], [179, 222, 157]),
@@ -147,19 +123,13 @@ def make_mask(frame, hsv, name):
     bm = cv2.inRange(frame, np.array(cfg["bgr"][0]), np.array(cfg["bgr"][1]))
     return cv2.bitwise_and(m, bm)
 
-# =========================================
-# PARK PARAMETERS (두 번째 코드 기반)
-# =========================================
 MIN_AREA = 400
 KP_ROT = 0.003
 APPROACH_V = 0.22
 PARK_SEC = 1.2
-BOTTOM_10PCT = int(240 * 0.94)  # 225px
-PARK_X_TOLERANCE = 20  # 중앙 20px 이내
+BOTTOM_10PCT = int(240 * 0.80)  # [수정] 225px → 192px (색상이 조금만 가까이 가면 주차)
+PARK_X_TOLERANCE = 30  # [수정] 20 → 30px (중앙 오차 완화)
 
-# =========================================
-# STATE
-# =========================================
 mission_idx = 0
 parking = False
 park_t = None
@@ -168,9 +138,6 @@ last_seen_x = 160
 print(f"START | MISSION: {MISSION}")
 print("라이다 회피 우선 + 가다가 색상 발견 시 즉시 주차")
 
-# =========================================
-# MAIN LOOP
-# =========================================
 try:
     while True:
         ret, frame = cap.read()
@@ -192,9 +159,6 @@ try:
         target = MISSION[mission_idx]
         draw = COLOR_CFG[target]["draw"]
 
-        # =========================================
-        # COLOR DETECTION
-        # =========================================
         mask = make_mask(frame, hsv, target)
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         big = max(cnts, key=cv2.contourArea) if cnts else None
@@ -215,9 +179,6 @@ try:
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
 
-        # =========================================
-        # PARKING STATES
-        # =========================================
         if parking:
             stop_robot()
             elapsed = time.time() - park_t
@@ -237,24 +198,19 @@ try:
                     continue
             continue
 
-        # =========================================
-        # 라이다 회피 우선 + 색상 발견 시 즉시 주차
-        # =========================================
         scan = get_scan()
         front_min = get_front_min()
         avoid_dir = choose_avoid_direction()
 
-        # [핵심] 색상 발견 시 즉시 주차 (뱅글뱅글 안 도는게)
         if found:
+            print(f"[DEBUG] by_bot={by_bot}, BOTTOM_10PCT={BOTTOM_10PCT}, err_x={err_x}")
             if by_bot >= BOTTOM_10PCT and abs(err_x) < PARK_X_TOLERANCE:
-                # 가까우면서 중앙이면 즉시 주차
                 parking = True
                 park_t = time.time()
                 cv2.putText(frame, f"PARKING NOW: {target}", (10, 50), 0, 0.7, draw, 2)
-                print(f"[{target}] 즉시 주차 (by_bot={by_bot}, err_x={err_x})")
+                print(f"[{target}] 즉시 주차 ✅")
                 continue
             else:
-                # 색상이 가까워지면 추적, 아니면 회피 계속
                 if front_min >= THRESH_30:
                     v = APPROACH_V
                     w = -KP_ROT * err_x
@@ -270,7 +226,6 @@ try:
                 send_cmd(v, w)
                 cv2.putText(frame, f"TRACKING → PARK: {target}", (10, 25), 0, 0.5, (0, 255, 0), 2)
         else:
-            # [핵심] 색상이 안 보이면 라이다 회피 주행 계속 (첫 번째 코드 기반)
             if front_min < THRESH_10:
                 v = MIN_SPEED
                 w = avoid_dir * MAX_W
