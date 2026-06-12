@@ -88,10 +88,10 @@ COLOR_CFG = {
     "red":    {"hsv1": ([169, 136, 175], [179, 207, 255]),
                "hsv2": None,
                "bgr":  ([20, 20, 80],  [255, 255, 255]), "draw": (0, 0, 255)},
-    "yellow": {"hsv1": ([24, 19, 214], [41, 143, 255]),
+    "yellow": {"hsv1": ([24, 19, 214], [41, 124, 255]),
                "hsv2": None,
                "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
-    "blue":   {"hsv1": ([98, 96, 175], [138, 168, 230]),
+    "blue":   {"hsv1": ([98, 96, 175], [138, 168, 214]),
                "hsv2": None,
                "bgr":  ([40,  0,   0], [255, 220, 220]), "draw": (255, 80, 0)},
 }
@@ -109,7 +109,7 @@ def make_mask(frame, hsv, name):
 
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
-KP_ROT         = 0.020   # 픽셀당 회전속도 (기존 0.003 → 강화)
+KP_ROT         = 0.010   # 픽셀당 회전속도 (기존 0.003 → 강화)
 W_MIN          = 0.25    # 최소 회전 속도 (너무 약한 회전 방지)
 APPROACH_V     = 0.22
 PARK_SEC       = 1.2
@@ -138,6 +138,7 @@ park_state    = "TRACK"
 last_seen_x   = 160
 last_bottom_y = 0
 park_t        = None
+last_cmd      = (0.0, 0.0)   # 도착 직전 마지막 v, w
 
 print(f"START | MISSION: {MISSION}")
 
@@ -233,7 +234,7 @@ try:
                     park_t = time.time()
                     print(f"[{target}] 전진 완료 → 정차")
                 else:
-                    send_cmd(ARRIVE_FORWARD_V, 0.0)
+                    send_cmd(*last_cmd)   # 도착 직전 v, w 그대로 유지
                 cv2.putText(frame, f"FORWARD: {target}", (10, 25), 0, 0.6, draw, 2)
 
             # ── 2. 정차 중 (PARKING) ───────────────────────────────
@@ -290,6 +291,7 @@ try:
                         else:
                             v, w = 0.18, 0.3 * w_lid + 0.7 * w_cam
 
+                    last_cmd = (v, w)
                     send_cmd(v, w)
 
                 cv2.putText(frame, f"TRACKING: {target}", (10, 25), 0, 0.6, draw, 1)
