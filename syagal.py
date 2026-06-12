@@ -200,8 +200,8 @@ try:
                 v, w = 0.0, 0.0  
             else:
                 detect_count = 0
-                # [수정] 초기 제자리 회전 탐색 속도를 0.4 -> 0.8로 상향
-                v, w = 0.0, 0.8  
+                # [수정] 제자리 회전 탐색 속도를 0.8 -> 1.3으로 조정
+                v, w = 0.0, 1.3  
 
             send_cmd(v, w)
             cv2.putText(frame, "MODE: START_SEARCH", (10, 25), 0, 0.5, (0, 255, 255), 1)
@@ -281,8 +281,8 @@ try:
                         w = -2.00 
                         cv2.putText(frame, "ESCAPE: RIGHT SIDE! SNAP TURN", (10, 50), 0, 0.5, (0, 0, 255), 2)
                     else:
-                        # [수정] 평시 미션 전환/유실 서칭 각속도 역시 0.4 -> 0.8로 상향 동기화
-                        w = -0.8 if last_seen_x > cx_mid else 0.8  
+                        # [수정] 미션 유실/전환 탐색 속도도 1.3으로 동기화 상향
+                        w = -1.3 if last_seen_x > cx_mid else 1.3  
                     
                     send_cmd(v, w)
                     cv2.putText(frame, f"SEARCHING: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
