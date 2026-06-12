@@ -36,7 +36,7 @@ time.sleep(1.0)
 # 자동 노출 OFF
 cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
 
-# 자동 화밸 OFF
+# 자동 화이트밸런스 OFF
 cap.set(cv2.CAP_PROP_AUTO_WB, 0)
 
 # --------------------------------------------------
@@ -52,8 +52,6 @@ cv2.createTrackbar("H_hi", WIN, init[3], 179, lambda x: None)
 cv2.createTrackbar("S_hi", WIN, init[4], 255, lambda x: None)
 cv2.createTrackbar("V_hi", WIN, init[5], 255, lambda x: None)
 
-cv2.createTrackbar("ROI%", WIN, 30, 80, lambda x: None)
-
 print()
 print("====================================")
 print("HSV TUNER")
@@ -66,7 +64,7 @@ prev_time = time.time()
 
 while True:
 
-    # 최신 프레임만 사용
+    # 최신 프레임 사용
     for _ in range(2):
         cap.grab()
 
@@ -77,8 +75,6 @@ while True:
 
     frame = cv2.flip(frame, 1)
 
-    H, W = frame.shape[:2]
-
     hlo = cv2.getTrackbarPos("H_lo", WIN)
     slo = cv2.getTrackbarPos("S_lo", WIN)
     vlo = cv2.getTrackbarPos("V_lo", WIN)
@@ -87,22 +83,12 @@ while True:
     shi = cv2.getTrackbarPos("S_hi", WIN)
     vhi = cv2.getTrackbarPos("V_hi", WIN)
 
-    roi_percent = cv2.getTrackbarPos("ROI%", WIN)
-
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
     lower = np.array([hlo, slo, vlo])
     upper = np.array([hhi, shi, vhi])
 
     mask = cv2.inRange(hsv, lower, upper)
-
-    # ROI
-    roi_y = int(H * (roi_percent / 100.0))
-
-    roi_mask = np.zeros((H, W), dtype=np.uint8)
-    roi_mask[roi_y:H, :] = 255
-
-    mask = cv2.bitwise_and(mask, roi_mask)
 
     # Morphology
     kernel = cv2.getStructuringElement(
@@ -190,15 +176,6 @@ while True:
                 1
             )
 
-    # ROI 선
-    cv2.line(
-        frame,
-        (0, roi_y),
-        (W, roi_y),
-        (0,0,255),
-        2
-    )
-
     # FPS
     now = time.time()
     fps = 1.0 / (now - prev_time)
@@ -224,9 +201,11 @@ while True:
         1
     )
 
+    mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+
     stack = np.hstack([
         frame,
-        cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR),
+        mask_bgr,
         result
     ])
 
@@ -241,10 +220,8 @@ while True:
         print()
         print(f"# {COLOR}")
         print(
-            f'"{COLOR}": '
-            f'{{"hsv1": ([{hlo}, {slo}, {vlo}], '
-            f'[{hhi}, {shi}, {vhi}]), '
-            f'"hsv2": None}},'
+            f'(np.array([{hlo}, {slo}, {vlo}]), '
+            f'np.array([{hhi}, {shi}, {vhi}])),'
         )
         print()
 
