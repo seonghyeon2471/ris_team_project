@@ -31,7 +31,7 @@ MEDIAN_K     = 2
 FRONT_RANGE  = 50  
 THRESH_SLOW  = 55.0  
 THRESH_TURN  = 35.0  
-THRESH_STOP  = 8.0   # 최저 정지/비상 거리를 8cm로 유지
+THRESH_STOP  = 8.0   
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -115,8 +115,9 @@ PARK_SEC       = 1.2
 DETECT_CONFIRM = 3 
 BOTTOM_10PCT   = int(240 * 0.90)  
 
-LEFT_20PCT     = int(320 * 0.20)  
-RIGHT_20PCT    = int(320 * 0.80)  
+# 🚨 [후한 버전 핵심 수정] 20% -> 10% 구역으로 축소하여 정면 인정 범위를 좌우 80%로 확대!
+LEFT_LIMIT     = int(320 * 0.10)  # 32px보다 왼쪽일 때만 구석으로 판정
+RIGHT_LIMIT    = int(320 * 0.90)  # 288px보다 오른쪽일 때만 구석으로 판정
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "START_SEARCH"  
@@ -162,10 +163,10 @@ try:
         big   = max(cnts, key=cv2.contourArea) if cnts else None
         found = big is not None and cv2.contourArea(big) > MIN_AREA
 
-        # 가이드라인 시각화
+        # 넓어진 가이드라인 시각화 (빨간선 사이가 전부 정면 영역)
         cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
-        cv2.line(frame, (LEFT_20PCT, 0), (LEFT_20PCT, H), (255, 0, 0), 1)   
-        cv2.line(frame, (RIGHT_20PCT, 0), (RIGHT_20PCT, H), (255, 0, 0), 1) 
+        cv2.line(frame, (LEFT_LIMIT, 0), (LEFT_LIMIT, H), (0, 0, 255), 1)   
+        cv2.line(frame, (RIGHT_LIMIT, 0), (RIGHT_LIMIT, H), (0, 0, 255), 1) 
 
         if found:
             bx, by_top, bw, bh = cv2.boundingRect(big)
@@ -175,11 +176,11 @@ try:
             last_seen_x   = ox
             last_bottom_y = by_bot
             
-            # 🚨 [중요 수정] 정면 구역(좌우 20% 사이)에 완벽하게 안착한 상태에서만 하단 바닥 진입으로 인정
-            was_in_bottom = (by_bot >= BOTTOM_10PCT) and (LEFT_20PCT < ox < RIGHT_20PCT)
+            # 🚨 [후한 판정] 가로축 32px ~ 288px 사이의 드넓은 공간에서 바닥에 닿으면 합격!
+            was_in_bottom = (by_bot >= BOTTOM_10PCT) and (LEFT_LIMIT < ox < RIGHT_LIMIT)
             
-            was_in_left   = (ox <= LEFT_20PCT)
-            was_in_right  = (ox >= RIGHT_20PCT)
+            was_in_left   = (ox <= LEFT_LIMIT)
+            was_in_right  = (ox >= RIGHT_LIMIT)
 
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
@@ -211,7 +212,6 @@ try:
                 was_in_bottom = was_in_left = was_in_right = False
                 continue
 
-            # 전진 속도는 0.0으로 묶고, 제자리에서 안전 방향으로만 회전
             v = 0.0
             w = adir * 1.3
             
@@ -251,14 +251,14 @@ try:
 
             # 3. 객체 놓침 또는 다음 객체 탐색 (SEARCH)
             else:
-                # 🚨 [중요 수정] 정면 바닥 구역에 정상 도달했다가 시야에서 사라진 게 확실할 때만 골인 인정
+                # 🚨 [후한 조건 검증] 좌우 완전 끝자락(양옆 32px 구석)이 아니었고, 아래쪽 구역을 밟고 사라진 게 맞다면 주차!
                 if was_in_bottom and not was_in_left and not was_in_right:
                     park_state = "PARKING"
                     park_t = time.time()
                     was_in_bottom = was_in_left = was_in_right = False
-                    print(f"[{target}] 정면 골인 인식을 통한 확실한 도착 판정!")
+                    print(f"[{target}] 후한 판정 통과! 정상 주차 시퀀스 진입")
                 else:
-                    # 측면 구석 노이즈로 인해 객체를 놓친 경우라면 주차하지 않고 SEARCH 모드로 유지
+                    # 진짜 완전 구석탱이로 빠져나간 경우에만 예외 없이 SEARCH 상태 유지 및 급선회
                     park_state = "SEARCH"
                     v = 0.0
                     
@@ -271,7 +271,6 @@ try:
                     else:
                         w = -1.3 if last_seen_x > cx_mid else 1.3
                     
-                    # 스캔 회전 중 오작동 타이밍 방지를 위해 매 프레임 바닥 플래그 리셋
                     was_in_bottom = False 
                     send_cmd(v, w)
                     cv2.putText(frame, f"SEARCHING: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
