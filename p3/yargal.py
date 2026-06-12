@@ -126,7 +126,6 @@ detect_count  = 0
 park_state    = "TRACK"
 last_seen_x   = 160
 last_bottom_y = 0
-was_in_bottom = False
 park_t        = None
 
 print(f"START | MISSION: {MISSION}")
@@ -166,7 +165,6 @@ try:
             err_x  = ox - cx_mid
             last_seen_x   = ox
             last_bottom_y = by_bot
-            was_in_bottom = (by_bot >= BOTTOM_10PCT)
 
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
@@ -270,16 +268,23 @@ try:
                 )
             # 3. 객체 놓침 또는 다음 객체 탐색 (SEARCH)
             else:
-                if was_in_bottom:
-                    park_state = "PARKING"
-                    park_t = time.time()
-                    was_in_bottom = False
-                    print(f"[{target}] 도착 판정")
-                else:
-                    park_state = "SEARCH"
-                    v, w = 0.0, (-1.3 if last_seen_x > cx_mid else 1.3)
-                    send_cmd(v, w)
-                    cv2.putText(frame, f"SEARCHING: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
+
+                park_state = "SEARCH"
+
+                v = 0.0
+                w = (-1.3 if last_seen_x > cx_mid else 1.3)
+
+                send_cmd(v, w)
+
+                cv2.putText(
+                    frame,
+                    f"SEARCHING: {target}",
+                    (10, 25),
+                    0,
+                    0.6,
+                    (0, 255, 255),
+                    1
+                )
 
         cv2.imshow("f", frame)
         if cv2.waitKey(1) & 0xFF == 27: break
