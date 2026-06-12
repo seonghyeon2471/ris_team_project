@@ -28,15 +28,10 @@ print("LIDAR OK")
 EMA_ALPHA   = 0.35
 MEDIAN_K    = 2
 FRONT_RANGE = 45
-
-# LIDAR 임계값 - LIDAR 모드 주행 전용
 THRESH_SLOW = 55.0
 THRESH_TURN = 35.0
 THRESH_STOP = 18.0
-
-# PARK 모드 진입 시 라이다는 완전히 꺼짐 (색지 자체가 장애물로 잡히기 때문)
-# 단, 색지가 아닌 진짜 장애물이 막는 경우를 위한 비상 임계값만 유지
-PARK_EMERGENCY_DIST = 12.0   # cm: PARK 중 이것보다 가까우면 즉시 정지 (충돌 방지)
+PARK_EMERGENCY_DIST = 12.0
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -116,28 +111,42 @@ def make_mask(frame, hsv, name):
 MIN_AREA        = 400
 DETECT_CONFIRM  = 6
 
-# x+y 제어 이득
 KP_X            = 0.003
 KP_Y            = 0.004
 APPROACH_W_MAX  = 0.85
 APPROACH_V_MAX  = 0.20
-APPROACH_V_MIN  = 0.07     # 전진 최소 속도
+APPROACH_V_MIN  = 0.07
 
-# 목표 위치 (화면 비율)
 TARGET_X_RATIO  = 0.5
 TARGET_Y_RATIO  = 0.72
 
-# 도착 판정
 ARRIVE_X_PX     = 35
 ARRIVE_Y_PX     = 30
-ARRIVE_CONFIRM  = 8        # 연속 N프레임 충족 시 정차
+ARRIVE_CONFIRM  = 8
 
-# 정차 및 회전
 PARK_SEC        = 1.2
-SPIN_W          = 0.50
-SPIN_SEC        = 6.0
+
+# ── SPIN 파라미터 ──────────────────────────────────────────────────────
+SPIN_W          = 0.50     # 회전 각속도
+SPIN_SEC        = 6.0      # 한 바퀴 목표 시간 (실험으로 조정)
+
+# ── 색상 탐색(HUNT) 파라미터 ──────────────────────────────────────────
+# SPIN 후에도 색상 못 찾으면 전진하며 탐색하는 시간
+HUNT_DRIVE_SEC  = 2.0      # 전진 탐색 지속 시간
+HUNT_V          = 0.18     # 전진 탐색 속도
 
 # ── STATE ─────────────────────────────────────────────────────────────
+#
+# [LIDAR 모드 서브상태]
+#   DRIVE  : 일반 라이다 장애물 회피 주행
+#   SPIN   : 주차 완료 후 제자리 한 바퀴 회전 (도중 색상 발견 시 즉시 PARK 전환)
+#   HUNT   : SPIN 후에도 색상 못 찾으면 전진하며 탐색
+#
+# [PARK 모드 서브상태]
+#   TRACK   : 카메라 x+y 제어로 색지 중심 접근
+#   SEARCH  : 색지 소실 시 제자리 회전 탐색
+#   PARKING : 정차 대기
+#
 mode           = "LIDAR"
 park_state     = "DRIVE"
 mission_idx    = 0
@@ -148,6 +157,7 @@ last_seen_x    = 160
 park_t         = None
 spin_t         = None
 spin_dir       = 1
+hunt_t         = None
 
 print("START")
 
@@ -207,23 +217,89 @@ try:
         # ══════════════════════════════════════════════════════════════
         if mode == "LIDAR":
 
-            # SPIN: 주차 완료 후 제자리 한 바퀴
+            # ── SPIN: 제자리 회전하면서 다음 색상 탐색 ───────────────
             if park_state == "SPIN":
                 elapsed = time.time() - spin_t
                 remain  = max(0.0, SPIN_SEC - elapsed)
+
+                # ★ SPIN 도중 색상 발견 → 즉시 PARK 전환
+                if found:
+                    detect_count += 1
+                    cv2.putText(frame, f"SPIN+DETECT [{detect_count}/{DETECT_CONFIRM}]",
+                                (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, draw, 1)
+                    if detect_count >= DETECT_CONFIRM:
+                        stop_robot()
+                        detect_count = 0
+                        arrive_count = 0
+                        mode         = "PARK"
+                        park_state   = "TRACK"
+                        print(f"[{target}] SPIN 중 색상 발견 → PARK/TRACK")
+                        cv2.imshow("f", frame); cv2.waitKey(1); continue
+                else:
+                    detect_count = 0
+
+                # 회전 계속
                 send_cmd(0.0, spin_dir * SPIN_W)
-                cv2.putText(frame, f"SPIN {remain:.1f}s",
-                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 200), 2)
+                cv2.putText(frame, f"SPIN {remain:.1f}s  찾는중: {target}",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 200), 2)
                 cv2.imshow("f", frame); cv2.waitKey(1)
+
+                # SPIN 시간 종료 → 색상 못 찾음 → HUNT로 전환
                 if elapsed >= SPIN_SEC:
                     stop_robot()
-                    park_state   = "DRIVE"
-                    arrive_count = 0
+                    park_state   = "HUNT"
+                    hunt_t       = time.time()
                     detect_count = 0
-                    print(f"SPIN 완료 → 다음 목표: {MISSION[mission_idx] if mission_idx < len(MISSION) else 'DONE'}")
+                    print(f"[{target}] SPIN 후 미발견 → HUNT 전진 탐색")
                 continue
 
-            # 색지 감지 카운트
+            # ── HUNT: 전진하면서 색상 탐색 ───────────────────────────
+            if park_state == "HUNT":
+                elapsed = time.time() - hunt_t
+
+                # ★ HUNT 도중 색상 발견 → 즉시 PARK 전환
+                if found:
+                    detect_count += 1
+                    cv2.putText(frame, f"HUNT+DETECT [{detect_count}/{DETECT_CONFIRM}]",
+                                (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, draw, 1)
+                    if detect_count >= DETECT_CONFIRM:
+                        stop_robot()
+                        detect_count = 0
+                        arrive_count = 0
+                        mode         = "PARK"
+                        park_state   = "TRACK"
+                        print(f"[{target}] HUNT 중 색상 발견 → PARK/TRACK")
+                        cv2.imshow("f", frame); cv2.waitKey(1); continue
+                else:
+                    detect_count = 0
+
+                # 장애물 피하면서 전진 탐색
+                if fm < THRESH_STOP:
+                    v, w = 0.09, adir * 0.9
+                elif fm < THRESH_TURN:
+                    v, w = 0.13, adir * 0.7
+                elif fm < THRESH_SLOW:
+                    v, w = 0.18, adir * 0.4
+                else:
+                    v, w = HUNT_V, 0.0
+
+                send_cmd(v, w)
+                remain = max(0.0, HUNT_DRIVE_SEC - elapsed)
+                cv2.putText(frame, f"HUNT {remain:.1f}s  front={fm:.0f}cm",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 2)
+                cv2.imshow("f", frame); cv2.waitKey(1)
+
+                # HUNT 시간 종료 → 또 못 찾음 → SPIN 반대 방향으로 다시
+                if elapsed >= HUNT_DRIVE_SEC:
+                    stop_robot()
+                    park_state = "SPIN"
+                    spin_t     = time.time()
+                    spin_dir   = -spin_dir   # ★ 반대 방향으로 다시 회전
+                    detect_count = 0
+                    print(f"[{target}] HUNT 후 미발견 → SPIN 반대방향 재탐색")
+                continue
+
+            # ── DRIVE: 일반 라이다 주행 + 색상 감지 ─────────────────
             if found:
                 detect_count += 1
                 cv2.putText(frame, f"DETECT [{detect_count}/{DETECT_CONFIRM}]",
@@ -237,10 +313,10 @@ try:
                 mode         = "PARK"
                 park_state   = "TRACK"
                 stop_robot()
-                print(f"[{target}] 인식 확정 → PARK/TRACK  (라이다 OFF)")
+                print(f"[{target}] 인식 확정 → PARK/TRACK")
                 cv2.imshow("f", frame); cv2.waitKey(1); continue
 
-            # 장애물 회피 주행 (LIDAR 모드에서만 라이다 사용)
+            # 장애물 회피 주행
             if fm < THRESH_STOP:
                 v, w = 0.09, adir * 0.9
             elif fm < THRESH_TURN:
@@ -258,7 +334,7 @@ try:
             continue
 
         # ══════════════════════════════════════════════════════════════
-        # PARK 모드  ★ 라이다 완전 비활성 - 카메라만으로 제어
+        # PARK 모드  (라이다 완전 비활성 - 카메라만)
         # ══════════════════════════════════════════════════════════════
 
         # PARKING: 정차 대기
@@ -272,29 +348,27 @@ try:
             if elapsed >= PARK_SEC:
                 mission_idx += 1
                 mode         = "LIDAR"
-                park_state   = "SPIN"
+                park_state   = "SPIN"      # 완료 후 SPIN으로 다음 색상 탐색
                 spin_t       = time.time()
                 spin_dir     = 1
                 detect_count = 0
                 arrive_count = 0
                 stop_robot()
-                print(f"[{target}] 정차 완료 → SPIN ({SPIN_SEC}초 한 바퀴)")
+                print(f"[{target}] 정차 완료 → SPIN 다음 색상 탐색 시작")
             continue
 
-        # TRACK: x + y 카메라 제어만 사용 (라이다 완전 무시)
+        # TRACK: 카메라 x+y 제어
         if found:
             park_state = "TRACK"
 
-            # ── 비상 정지: 색지 외 실제 장애물 충돌 직전 방지 ──────────
-            # 색지는 보통 바닥에 있어 라이다에 잘 안 잡힘
-            # 이 거리까지 왔는데 아직 err_y가 크다 = 진짜 장애물
+            # 비상 정지 (진짜 장애물)
             if fm < PARK_EMERGENCY_DIST:
                 stop_robot()
                 cv2.putText(frame, f"EMERGENCY STOP  front={fm:.0f}cm",
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
                 cv2.imshow("f", frame); cv2.waitKey(1); continue
 
-            # ── 도착 판정 ─────────────────────────────────────────────
+            # 도착 판정
             x_ok = abs(err_x) <= ARRIVE_X_PX
             y_ok = abs(err_y) <= ARRIVE_Y_PX
 
@@ -303,10 +377,8 @@ try:
                 cv2.putText(frame, f"ARRIVE [{arrive_count}/{ARRIVE_CONFIRM}]",
                             (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             else:
-                # ★ 진동 방지: 조건 미충족 시 카운트 즉시 리셋 대신 허용 범위를
-                #   1.5배로 넓혀서 한 번 진입하면 쉽게 안 빠지도록 히스테리시스 적용
                 if abs(err_x) > ARRIVE_X_PX * 1.5 or abs(err_y) > ARRIVE_Y_PX * 1.5:
-                    arrive_count = 0  # 크게 벗어날 때만 리셋
+                    arrive_count = 0
 
             if arrive_count >= ARRIVE_CONFIRM:
                 stop_robot()
@@ -316,26 +388,16 @@ try:
                 print(f"[{target}] 중심 일치 → PARKING")
                 cv2.imshow("f", frame); cv2.waitKey(1); continue
 
-            # ── 카메라만으로 x + y 제어 ───────────────────────────────
-            # x 오차 → 회전
+            # x+y 카메라 제어
             w_out = float(np.clip(-KP_X * err_x, -APPROACH_W_MAX, APPROACH_W_MAX))
-
-            # y 오차 → 전진/정지 (후진 제거: 진동 원인)
-            #   err_y > 0 : 색지가 목표보다 위 → 전진
-            #   err_y <= 0: 목표에 도달했거나 지나침 → 정지만 (후진 안 함)
-            #   후진을 허용하면 라이다 + v_cam 후진이 충돌해 진동 발생
             raw_v = KP_Y * err_y
-            if raw_v > 0:
-                v_out = float(np.clip(raw_v, APPROACH_V_MIN, APPROACH_V_MAX))
-            else:
-                # y 방향 초과 시 정지 → arrive_count 증가 대기
-                v_out = 0.0
+            v_out = float(np.clip(raw_v, APPROACH_V_MIN, APPROACH_V_MAX)) if raw_v > 0 else 0.0
 
             send_cmd(v_out, w_out)
             cv2.putText(frame,
                         f"TRACK [{target}] ex={err_x:+d} ey={err_y:+d} "
-                        f"v={v_out:.2f} w={w_out:.2f} LIDAR=OFF",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.38, draw, 1)
+                        f"v={v_out:.2f} w={w_out:.2f}",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, draw, 1)
 
         # SEARCH: 색지 소실
         else:
