@@ -109,35 +109,38 @@ def make_mask(frame, hsv, name):
 
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
-KP_ROT         = 0.004   # 정밀 조향을 위해 약간 상향 조정 (중심 맞추기 강화)
-APPROACH_V     = 0.20   # 주차 안정성을 위해 접근 속도 살짝 하향 (0.22 -> 0.20)
-PARK_SEC       = 1.2
+KP_ROT         = 0.0035  # 부드러운 회전을 위한 조향 감도 조정
+APPROACH_V     = 0.18    # 정확한 안착을 위해 전진 속도를 안정적으로 하향
+PARK_SEC       = 1.5     # 정차 유지 시간
 DETECT_CONFIRM = 3 
 BOTTOM_10PCT   = int(240 * 0.90)  
 
 LEFT_20PCT     = int(320 * 0.20)  
 RIGHT_20PCT    = int(320 * 0.80)  
 
-# 🔄 탐색 실패 시 전진 시퀀스 파라미터
-ROTATION_2_TURNS_TIME = 4.5  # 각속도 1.3 기준 2바퀴 도는데 걸리는 추정 시간 (초)
-MOVE_5CM_TIME         = 0.25 # 속도 0.2로 약 5cm 이동하는 데 걸리는 시간 (초)
+# 탐색 실패 시 시퀀스 파라미터
+ROTATION_2_TURNS_TIME = 4.5  
+MOVE_5CM_TIME         = 0.25 
+
+# 🚨 [신규] 사각지대 진입 시 마지막 메모리 주행 파라미터
+BLIND_PARK_SEC        = 0.65 # 카메라에서 사라진 뒤 마지막 오차 방향으로 돌며 정인입할 시간 (초)
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "START_SEARCH"  
 mission_idx   = 0
 detect_count  = 0
 
-park_state    = "SEARCH" # 초기 SEARCH 상태로 수정
+park_state    = "SEARCH" 
 last_seen_x   = 160
-last_bottom_y = 0
+last_err_x    = 0        # 🎯 마지막으로 기억한 추적 오차값
 was_in_bottom = False
 was_in_left   = False
 was_in_right  = False
 
 park_t        = None
+blind_start_t = None     # 사각지대 진입 타임스탬프
 
-# 탐색 제어 변수
-search_sub_state = "ROTATE"  # "ROTATE" 또는 "GO_FORWARD"
+search_sub_state = "ROTATE"  
 search_start_t   = time.time()
 
 print(f"START | MISSION: {MISSION}")
@@ -180,20 +183,20 @@ try:
             ox     = bx + bw // 2
             by_bot = min(by_top + bh, 239)
             err_x  = ox - cx_mid
+            
+            # 🎯 실시간 중심점 데이터 및 오차 갱신 저장
             last_seen_x   = ox
-            last_bottom_y = by_bot
+            last_err_x    = err_x 
             
-            # 정면 구역(좌우 20% 사이) 및 중심점 정렬이 잘 되어있는지 확인
-            # 조향 오차 정밀도 조건 추가 abs(err_x) < 25 (정면 중심에 가깝게 정렬되었는가?)
-            was_in_bottom = (by_bot >= BOTTOM_10PCT) and (LEFT_20PCT < ox < RIGHT_20PCT) and (abs(err_x) < 25)
-            
+            # 색지가 하단 영역에 도달했고 + 정면 범위 내에 안착했는지 기록
+            was_in_bottom = (by_bot >= BOTTOM_10PCT) and (LEFT_20PCT < ox < RIGHT_20PCT)
             was_in_left   = (ox <= LEFT_20PCT)
             was_in_right  = (ox >= RIGHT_20PCT)
 
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
 
-        # ══ START_SEARCH 모드 (시작 시 제자리 회전 탐색) ══════════════
+        # ══ START_SEARCH 모드 ═════════════════════════════════════════
         if mode == "START_SEARCH":
             if found:
                 detect_count += 1
@@ -201,7 +204,7 @@ try:
                     detect_count = 0
                     mode = "PARK"
                     park_state = "TRACK"
-                    print(f" 정면 즉시 포착 완료! [{target}] 미션 바로 진입.")
+                    print(f" 정면 즉시 포착 완료! [{target}] 미션 진입.")
                     continue
                 v, w = 0.0, 0.0 
             else:
@@ -218,103 +221,107 @@ try:
                 mode = "PARK"
                 park_state = "SEARCH" 
                 search_sub_state = "ROTATE"
-                search_start_t = time.time() # 타임아웃 초기화
+                search_start_t = time.time()
                 was_in_bottom = was_in_left = was_in_right = False
                 continue
 
-            # 전진 속도는 0.0으로 묶고, 제자리에서 안전 방향으로만 회전
             v = 0.0
             w = adir * 1.3
-            
             send_cmd(v, w)
             cv2.putText(frame, "MODE: LIDAR (PIVOT AVOID)", (10, 25), 0, 0.5, (0, 0, 255), 1)
 
-        # ══ PARK 모드 (추적 / 정차 / 탐색) ══════════════════════════
+        # ══ PARK 모드 (추적 / 메모리 주행 / 정차 / 탐색) ═══════════════════
         elif mode == "PARK":
-            # 주행(TRACK) 또는 탐색전진 중 장애물이 슬로우 영역(55cm) 안으로 들어오면 회피모드로 변경
-            if fm < THRESH_SLOW:
+            if fm < THRESH_SLOW and park_state != "PARKING":
                 print("⚠️ 장애물 감지! 제자리 회피(LIDAR) 모드로 전환합니다.")
                 mode = "LIDAR"
                 continue
 
-            # 1. 정차 중 (PARKING)
+            # 1. 완벽 정차 중 (PARKING)
             if park_state == "PARKING":
                 stop_robot()
-                elapsed = time.time() - park_t
-                if elapsed >= PARK_SEC:
+                if time.time() - park_t >= PARK_SEC:
                     mission_idx += 1
                     if mission_idx < len(MISSION):
                         park_state = "SEARCH"
                         search_sub_state = "ROTATE"
                         search_start_t = time.time()
                         last_seen_x = cx_mid + 40 
+                        last_err_x = 0
                         was_in_bottom = was_in_left = was_in_right = False
                         print(f"다음 미션 [{MISSION[mission_idx]}] 탐색 회전 시작")
                     continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
 
-            # 2. 객체 추적 중 (TRACK)
+            # 2. 🎯 [신규 변환] 메모리 기반 최종 진입 중 (BLIND_ENTRY)
+            elif park_state == "BLIND_ENTRY":
+                # 카메라엔 안 보이지만, 마지막 오차(last_err_x)를 보정하는 조향을 유지하며 최종 직진 전진
+                w_cam = -KP_ROT * last_err_x
+                v, w = APPROACH_V, w_cam
+                
+                send_cmd(v, w)
+                cv2.putText(frame, f"BLIND ENTRY: LAST ERR {last_err_x:.1f}", (10, 25), 0, 0.6, (255, 0, 255), 2)
+                
+                # 지정된 시간만큼 밀고 들어갔다면 완전 정차(PARKING)로 전환
+                if time.time() - blind_start_t >= BLIND_PARK_SEC:
+                    print(f"[{target}] 최종 메모리 주행 완료 -> 완벽 안착 판정!")
+                    park_state = "PARKING"
+                    park_t = time.time()
+                continue
+
+            # 3. 객체 추적 중 (TRACK)
             elif found:
                 park_state = "TRACK"
                 w_cam = -KP_ROT * err_x
                 
-                # 조향각 w_cam이 클 경우(로봇 중심과 색지 중심 차이가 클 때) 전진 속도를 줄여 정렬 정밀도 확보
-                v_adj = APPROACH_V * max(0.4, (1.0 - abs(err_x) / (W/2)))
+                # 중심점 정렬 상태에 따라 속도를 가감하여 오버슈팅 방지
+                v_adj = APPROACH_V * max(0.5, (1.0 - abs(err_x) / cx_mid))
                 v, w = v_adj, w_cam
                 
                 send_cmd(v, w)
                 cv2.putText(frame, f"TRACKING: {target} | Err: {err_x}", (10, 25), 0, 0.6, draw, 1)
 
-            # 3. 객체 놓침 또는 다음 객체 탐색 (SEARCH)
+            # 4. 객체 놓침 또는 다음 객체 탐색 (SEARCH)
             else:
-                # 정면 바닥 구역에 정상 도달했다가 시야에서 완전히 사라진 게 확실할 때만 골인 인정
+                # 🚨 정면 바닥까지 잘 정렬되어 들어오다가 시야에서 '방금 막' 사라진 상황 판정!
                 if was_in_bottom and not was_in_left and not was_in_right:
-                    park_state = "PARKING"
-                    park_t = time.time()
+                    print(f"🎯 중심점 락온 상태에서 사각지대 진입 -> BLIND_ENTRY 전환 (기억된 오차: {last_err_x})")
+                    park_state = "BLIND_ENTRY"
+                    blind_start_t = time.time()
                     was_in_bottom = was_in_left = was_in_right = False
-                    print(f"[{target}] 정면 골인 인식을 통한 확실한 도착 판정!")
+                    continue
+                
+                # 정면 진입 실패 후 완전히 놓친 일반 탐색 상태
+                park_state = "SEARCH"
+                now = time.time()
+                
+                if was_in_left:
+                    v, w = 0.0, 1.6  
+                    cv2.putText(frame, "SNAP TURN: LEFT ESCAPE", (10, 50), 0, 0.5, (0, 0, 255), 2)
+                    search_start_t = now
+                elif was_in_right:
+                    v, w = 0.0, -1.6 
+                    cv2.putText(frame, "SNAP TURN: RIGHT ESCAPE", (10, 50), 0, 0.5, (0, 0, 255), 2)
+                    search_start_t = now
                 else:
-                    # 색지를 놓쳤을 때 수행하는 탐색(SEARCH) 루프
-                    park_state = "SEARCH"
-                    now = time.time()
-                    
-                    if was_in_left:
-                        v, w = 0.0, 1.6  
-                        cv2.putText(frame, "SNAP TURN: LEFT ESCAPE", (10, 50), 0, 0.5, (0, 0, 255), 2)
-                        # 탈출 회전 시에는 회전 타임아웃 타이머 리셋
-                        search_start_t = now
-                    elif was_in_right:
-                        v, w = 0.0, -1.6 
-                        cv2.putText(frame, "SNAP TURN: RIGHT ESCAPE", (10, 50), 0, 0.5, (0, 0, 255), 2)
-                        search_start_t = now
-                    else:
-                        # 🔄 [핵심 수정] 2바퀴 회전 후 미발견 시 5cm 전진 패턴 제어
-                        if search_sub_state == "ROTATE":
-                            # 기본 제자리 회전 탐색
-                            v = 0.0
-                            w = -1.3 if last_seen_x > cx_mid else 1.3
+                    # 2바퀴 회전 후 5cm 전진 로직
+                    if search_sub_state == "ROTATE":
+                        v = 0.0
+                        w = -1.3 if last_seen_x > cx_mid else 1.3
+                        if now - search_start_t >= ROTATION_2_TURNS_TIME:
+                            search_sub_state = "GO_FORWARD"
+                            search_start_t = now
                             
-                            # 2바퀴 회전 시간(약 4.5초) 초과 시 전진 상태로 전환
-                            if now - search_start_t >= ROTATION_2_TURNS_TIME:
-                                print(" [탐색 실패] 2바퀴 회전 동안 발견 불가 -> 5cm 전진 시퀀스 작동")
-                                search_sub_state = "GO_FORWARD"
-                                search_start_t = now
-                                
-                        elif search_sub_state == "GO_FORWARD":
-                            # 약 5cm 전진 제어 (0.25초 동안 속도 0.2)
-                            v = 0.2
-                            w = 0.0
-                            
-                            # 시간 다 되면 다시 회전 상태로 복귀
-                            if now - search_start_t >= MOVE_5CM_TIME:
-                                print(" 5cm 이동 완료 -> 해당 지점에서 다시 제자리 회전 탐색")
-                                search_sub_state = "ROTATE"
-                                search_start_t = now
-                    
-                    # 오작동 방지 플래그 리셋
-                    was_in_bottom = False 
-                    send_cmd(v, w)
-                    cv2.putText(frame, f"SEARCH ({search_sub_state}): {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
+                    elif search_sub_state == "GO_FORWARD":
+                        v = 0.2
+                        w = 0.0
+                        if now - search_start_t >= MOVE_5CM_TIME:
+                            search_sub_state = "ROTATE"
+                            search_start_t = now
+                
+                was_in_bottom = False 
+                send_cmd(v, w)
+                cv2.putText(frame, f"SEARCH ({search_sub_state}): {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
 
         cv2.imshow("f", frame)
         if cv2.waitKey(1) & 0xFF == 27: break
