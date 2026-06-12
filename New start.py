@@ -26,15 +26,15 @@ lidar_ser.write(bytes([0xA5, 0x20]))
 lidar_ser.read(7)
 print("LIDAR OK")
 
-# ── LIDAR FILTER ──────────────────────────────────────────────────────
+# ── LIDAR ─────────────────────────────────────────────────────────────
 EMA_ALPHA   = 0.35
 MEDIAN_K    = 2
 FRONT_RANGE = 45
 
-THRESH_STOP = 18.0
-THRESH_TURN = 35.0
-THRESH_SLOW = 55.0
-OBS_LIMIT   = 100.0
+OBS_EMERGENCY = 12.0
+OBS_STOP      = 18.0
+OBS_TURN      = 35.0
+OBS_SLOW      = 55.0
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -143,26 +143,33 @@ ALIGN_FWD_V     = 0.08
 HOLD_SEC        = 1.0
 PARK_SEC        = 1.2
 
-PARK_ENTRY_GRACE = 8
-
-# LIDAR 우선순위
-OBS_EMERGENCY = 12.0
-OBS_STOP      = 18.0
-OBS_TURN      = 35.0
-OBS_SLOW      = 55.0
+SEARCH_SPIN_W   = 1.30
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mission_idx      = 0
-mode             = "TRACK"   # TRACK / ALIGN_FWD / HOLD / PARKING / SEARCH
+mode             = "TRACK"
 detect_count     = 0
 arrive_count     = 0
 align_t          = None
 hold_t           = None
 park_t           = None
-park_entry_count = 0
 last_seen_x      = 160
+last_seen_y      = 0
+reacquire_count  = 0
+reacquire_need   = 4
 
 print("START")
+
+def reset_approach_state(cx_mid):
+    global detect_count, arrive_count, align_t, hold_t, park_t, last_seen_x, last_seen_y, reacquire_count
+    detect_count = 0
+    arrive_count = 0
+    align_t = None
+    hold_t = None
+    park_t = None
+    last_seen_x = cx_mid
+    last_seen_y = 0
+    reacquire_count = 0
 
 try:
     while True:
@@ -213,6 +220,7 @@ try:
             err_x = centroid_x - cx_mid
             err_y = centroid_y - cy_mid
             last_seen_x = centroid_x
+            last_seen_y = centroid_y
 
             cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), draw, 2)
             cv2.circle(frame, (centroid_x, centroid_y), 5, (0, 255, 255), -1)
@@ -224,62 +232,61 @@ try:
         cv2.line(frame, (cx_mid, 0), (cx_mid, H), (120, 120, 120), 1)
         cv2.line(frame, (0, cy_mid), (W, cy_mid), (120, 120, 120), 1)
 
-        # ── LIDAR 우선: 위험하면 카메라보다 먼저 회피 ───────────────
-        if fm < OBS_EMERGENCY:
-            stop_robot()
-            cv2.putText(frame, f"EMERGENCY STOP front={fm:.0f}cm",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
-            cv2.imshow("f", frame)
-            if cv2.waitKey(1) & 0xFF == 27:
-                break
-            continue
+        # ── 공통: 라이다 회피 우선 ─────────────────────────────────
+        if mode != "AVOID" and fm < OBS_EMERGENCY:
+            mode = "AVOID"
+            reset_approach_state(cx_mid)
+            print(f"[{target}] EMERGENCY -> AVOID")
 
-        if fm < OBS_STOP:
-            v, w = 0.0, adir * 1.0
-            label = "OBS_STOP"
-            send_cmd(v, w)
-            cv2.putText(frame, f"{label} front={fm:.0f}cm",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
-            cv2.imshow("f", frame)
-            if cv2.waitKey(1) & 0xFF == 27:
-                break
-            continue
-
-        if fm < OBS_TURN:
-            v_ob = 0.08
-            w_ob = adir * 0.9
-            label = "OBS_TURN"
-            if mode == "TRACK" and found:
-                w_cam = -KP_X * err_x
-                w = 0.7 * w_ob + 0.3 * w_cam
-                v = v_ob
+        if mode == "AVOID":
+            if fm < OBS_EMERGENCY:
+                stop_robot()
+                cv2.putText(frame, f"EMERGENCY STOP front={fm:.0f}cm",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
             else:
-                v, w = v_ob, w_ob
-            send_cmd(v, w)
-            cv2.putText(frame, f"{label} front={fm:.0f}cm",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 2)
+                if fm < OBS_STOP:
+                    v, w = 0.0, adir * 1.0
+                elif fm < OBS_TURN:
+                    v, w = 0.08, adir * 0.9
+                elif fm < OBS_SLOW:
+                    v, w = 0.14, adir * 0.6
+                else:
+                    v, w = 0.20, 0.0
+                send_cmd(v, w)
+                cv2.putText(frame, f"AVOID front={fm:.0f}cm",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 2)
+
+            if fm >= OBS_SLOW:
+                mode = "REACQUIRE"
+                reset_approach_state(cx_mid)
+                print(f"[{target}] AVOID done -> REACQUIRE")
             cv2.imshow("f", frame)
             if cv2.waitKey(1) & 0xFF == 27:
                 break
             continue
 
-        if fm < OBS_SLOW:
-            if mode == "TRACK" and found:
-                w = -KP_X * err_x
-                raw_v = KP_Y * err_y
-                v = float(np.clip(raw_v, V_MIN, V_MAX)) if raw_v > 0 else 0.0
+        if mode == "REACQUIRE":
+            if found:
+                reacquire_count += 1
+                cv2.putText(frame, f"REACQUIRE [{reacquire_count}/{reacquire_need}]",
+                            (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, draw, 2)
+                if reacquire_count >= reacquire_need:
+                    mode = "TRACK"
+                    detect_count = 0
+                    arrive_count = 0
+                    print(f"[{target}] REACQUIRE -> TRACK")
             else:
-                v = 0.14
-                w = 0.0
-            send_cmd(v, w)
-            cv2.putText(frame, f"OBS_SLOW front={fm:.0f}cm",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 2)
+                reacquire_count = 0
+                send_cmd(0.0, SEARCH_SPIN_W if last_seen_x < cx_mid else -SEARCH_SPIN_W)
+                cv2.putText(frame, f"SEARCH [{target}] last_x={last_seen_x}",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 0), 1)
+
             cv2.imshow("f", frame)
             if cv2.waitKey(1) & 0xFF == 27:
                 break
             continue
 
-        # ── 일반 TRACK ───────────────────────────────────────────────
+        # ── TRACK ───────────────────────────────────────────────────
         if mode == "TRACK":
             if found:
                 detect_count += 1
@@ -301,11 +308,12 @@ try:
             cv2.putText(frame, f"TRACK [{target}] front={fm:.0f}cm",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 255, 200), 1)
 
-        # ── APPROACH: 센트로이드 기준 정렬 ─────────────────────────
+        # ── APPROACH ────────────────────────────────────────────────
         elif mode == "APPROACH":
             if not found:
-                mode = "SEARCH"
-                print(f"[{target}] 소실 -> SEARCH")
+                mode = "REACQUIRE"
+                reacquire_count = 0
+                print(f"[{target}] 소실 -> REACQUIRE")
             else:
                 x_ok = abs(err_x) <= CX_OK_PX
                 y_ok = abs(err_y) <= CY_OK_PX
@@ -332,12 +340,14 @@ try:
                                 f"APPROACH [{target}] ex={err_x:+d} ey={err_y:+d} v={v_out:.2f} w={w_out:.2f}",
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.45, draw, 1)
 
-        # ── ALIGN_FWD: 색 위로 조금 더 진입 ─────────────────────────
+        # ── ALIGN_FWD ───────────────────────────────────────────────
         elif mode == "ALIGN_FWD":
             if not found:
                 stop_robot()
-                mode = "SEARCH"
-                print(f"[{target}] ALIGN_FWD 중 소실 -> SEARCH")
+                mode = "REACQUIRE"
+                reacquire_count = 0
+                arrive_count = 0
+                print(f"[{target}] ALIGN_FWD 중 소실 -> REACQUIRE")
             else:
                 elapsed = time.time() - align_t
                 if elapsed < ALIGN_FWD_SEC:
@@ -350,7 +360,7 @@ try:
                     hold_t = time.time()
                     print(f"[{target}] 색 위 안착 -> HOLD")
 
-        # ── HOLD: 색 위에서 1초 정지 ─────────────────────────────────
+        # ── HOLD ────────────────────────────────────────────────────
         elif mode == "HOLD":
             stop_robot()
             elapsed = time.time() - hold_t
@@ -363,7 +373,7 @@ try:
                 park_t = time.time()
                 print(f"[{target}] HOLD 완료 -> PARKING")
 
-        # ── PARKING: 다음 색으로 이동 ──────────────────────────────
+        # ── PARKING ────────────────────────────────────────────────
         elif mode == "PARKING":
             stop_robot()
             elapsed = time.time() - park_t
@@ -376,20 +386,8 @@ try:
                 mode = "TRACK"
                 detect_count = 0
                 arrive_count = 0
-                park_entry_count = 0
+                reset_approach_state(cx_mid)
                 print(f"[{target}] 완료 -> 다음 색")
-
-        # ── SEARCH ──────────────────────────────────────────────────
-        elif mode == "SEARCH":
-            if found:
-                mode = "APPROACH"
-                print(f"[{target}] 재검출 -> APPROACH")
-            else:
-                stop_robot()
-                w = -1.30 if last_seen_x > cx_mid else 1.30
-                send_cmd(0.0, w)
-                cv2.putText(frame, f"SEARCH [{target}] last_x={last_seen_x}",
-                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 0), 1)
 
         cv2.imshow("f", frame)
         if cv2.waitKey(1) & 0xFF == 27:
