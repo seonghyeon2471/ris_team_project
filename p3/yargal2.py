@@ -141,6 +141,8 @@ last_seen_x   = 160
 last_bottom_y = 0
 park_t        = None
 
+target_under_robot = False
+
 print(f"START | MISSION: {MISSION}")
 
 # ── MAIN LOOP ─────────────────────────────────────────────────────────
@@ -283,6 +285,7 @@ try:
 
                 # 가까우면서 중앙이면 도착
                 if by_bot >= BOTTOM_10PCT and abs(err_x) < 30:
+                    target_under_robot = True
                     stop_robot()
 
                     park_state = "PARKING"
@@ -327,12 +330,26 @@ try:
             # 3. 객체 놓침 또는 다음 객체 탐색 (SEARCH)
             else:
 
-                park_state = "SEARCH"
+                # 아래까지 왔다가 사라짐 = 밟음
+                if target_under_robot:
 
-                v = 0.0
-                w = (-1.3 if last_seen_x > cx_mid else 1.3)
+                    stop_robot()
 
-                send_cmd(v, w)
+                    park_state = "PARKING"
+                    park_t = time.time()
+
+                    target_under_robot = False
+
+                    print(f"[{target}] 도착 판정")
+
+                else:
+
+                    park_state = "SEARCH"
+
+                    v = 0.1
+                    w = (-1.3 if last_seen_x > cx_mid else 1.3)
+
+                    send_cmd(v, w)
 
                 cv2.putText(
                     frame,
