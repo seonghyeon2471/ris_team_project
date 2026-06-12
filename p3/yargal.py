@@ -114,8 +114,6 @@ APPROACH_V     = 0.22
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 BOTTOM_10PCT   = int(240 * 0.90)  
-CENTER_TOL = 25
-ALIGN_W = 0.012
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
@@ -212,7 +210,7 @@ try:
                 park_state = "TRACK"
 
                 # 가까우면서 중앙이면 도착
-                if by_bot >= BOTTOM_10PCT and abs(err_x) < 20:
+                if by_bot >= BOTTOM_10PCT and abs(err_x) < 20::
 
                     stop_robot()
 
@@ -222,28 +220,6 @@ try:
                     print(f"[{target}] 도착 판정")
 
                     continue
-                # 색지가 화면 아래까지 왔으면
-                if by_bot >= BOTTOM_10PCT:
-
-                    # 아직 중앙 정렬 안됨
-                    if abs(err_x) > CENTER_TOL:
-
-                        v = 0.1
-                        w = -ALIGN_W * err_x
-
-                        send_cmd(v, w)
-
-                    # 중앙 정렬 완료 → 도착
-                    else:
-
-                        stop_robot()
-
-                        park_state = "PARKING"
-                        park_t = time.time()
-
-                        print(f"[{target}] 도착 판정")
-
-                        continue
 
                 else:
 
