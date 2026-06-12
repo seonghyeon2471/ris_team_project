@@ -158,6 +158,9 @@ try:
         scan = get_scan()
         fm = front_min(scan)
         adir = avoid_dir(scan)
+        
+        # ✅ [수정] err_x 초기화 (found 가 False일 때도 오류 방지)
+        err_x = 0
 
         if mission_idx >= len(MISSION):
             stop_robot()
@@ -182,9 +185,8 @@ try:
             bx, by_top, bw, bh = cv2.boundingRect(big)
             ox = bx + bw // 2
             by_bot = min(by_top + bh, 239)
-            err_x = ox - cx_mid  # ✅ [수정] err_x 를 먼저 정의
+            err_x = ox - cx_mid
 
-            # ✅ [수정] err_x 정의 후 디버그 출력
             print(f"[DEBUG] target={target}, by_bot={by_bot}, BOTTOM_10PCT={BOTTOM_10PCT}, fm={fm:.1f}cm, err_x={err_x:.1f}")
 
             if target == "blue":
@@ -206,4 +208,130 @@ try:
             else:
                 detect_count = 0
 
-            if detect_count >= 
+            if detect_count >= DETECT_CONFIRM:
+                detect_count = 0
+                mode = "PARK"
+                park_state = "TRACK"
+                avoid_started = False
+                avoid_pos = None
+                print(f"[{target}] 발견 → 추적 시작")
+                continue
+
+            if fm < THRESH_STOP:
+                v, w = 0.09, adir * 0.9
+                if found and not avoid_started:
+                    avoid_started = True
+                    avoid_pos = last_target_x
+                    print(f"[장애물 회피 시작] 목표 위치 저장: x={avoid_pos}")
+            elif fm < THRESH_TURN:
+                v, w = 0.13, adir * 0.7
+            elif fm < THRESH_SLOW:
+                v, w = 0.18, adir * 0.4
+            else:
+                v, w = 0.28, 0.0
+
+            send_cmd(v, w)
+            cv2.putText(frame, "MODE: LIDAR", (10, 25), 0, 0.5, (255, 255, 255), 1)
+            if avoid_started:
+                cv2.putText(frame, "AVOIDING OBSTACLE...", (10, 50), 0, 0.5, (255, 0, 0), 2)
+
+        elif mode == "PARK":
+            if park_state == "PARKING":
+                stop_robot()
+                elapsed = time.time() - park_t if park_t else 0
+                if elapsed >= PARK_SEC:
+                    mission_idx += 1
+                    print(f"[PARKING 완료] mission_idx 증가: {mission_idx-1} → {mission_idx}")
+
+                    if mission_idx < len(MISSION):
+                        park_state = "SEARCH"
+                        park_t = None
+                        last_seen_x = cx_mid + 40
+                        was_in_bottom = False
+                        was_in_left = False
+                        was_in_right = False
+                        avoid_started = False
+                        avoid_pos = None
+                        print(f"다음 미션 [{MISSION[mission_idx]}] 탐색 회전 시작")
+                        continue
+                    else:
+                        stop_robot()
+                        cv2.putText(frame, "ALL MISSIONS DONE", (30, H // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                        cv2.imshow("f", frame)
+                        cv2.waitKey(1)
+                        continue
+                cv2.putText(frame, f"PARKING: {target} ({elapsed:.1f}s)", (10, 25), 0, 0.6, draw, 2)
+
+            elif found:
+                park_state = "TRACK"
+
+                if fm < PARK_START_DIST:
+                    park_state = "PARKING"
+                    park_t = time.time()
+                    avoid_started = False
+                    avoid_pos = None
+                    print(f"[{target}] 주차 시작 (거리={fm:.1f}cm)")
+                    continue
+
+                if fm >= THRESH_SLOW:
+                    v, w = APPROACH_V, -KP_ROT * err_x
+                else:
+                    w_cam, w_lid = -KP_ROT * err_x, adir * 0.7
+                    if fm < THRESH_STOP:
+                        v, w = 0.09, w_lid
+                    elif fm < THRESH_TURN:
+                        v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
+                    else:
+                        v, w = 0.18, 0.3 * w_lid + 0.7 * w_cam
+                send_cmd(v, w)
+                cv2.putText(frame, f"TRACKING: {target}", (10, 25), 0, 0.6, draw, 1)
+                if avoid_started:
+                    cv2.putText(frame, f"AVOID→RETURN (target x={avoid_pos})", (10, 50), 0, 0.4, (255, 0, 0), 1)
+
+            else:
+                if avoid_started and avoid_pos is not None:
+                    err_to_target = avoid_pos - cx_mid
+                    if abs(err_to_target) > 10:
+                        w = -2.0 if err_to_target > 0 else 2.0
+                        v = 0.15
+                        send_cmd(v, w)
+                        cv2.putText(frame, f"RETURNING TO target x={avoid_pos}", (10, 50), 0, 0.5, (0, 255, 0), 2)
+                    else:
+                        avoid_started = False
+                        avoid_pos = None
+                        park_state = "SEARCH"
+
+                if park_state == "SEARCH":
+                    if was_in_bottom:
+                        park_state = "PARKING"
+                        park_t = time.time()
+                        was_in_bottom = False
+                        was_in_left = False
+                        was_in_right = False
+                        avoid_started = False
+                        avoid_pos = None
+                        print(f"[{target}] 전방 하단 도착 판정 → 주차")
+                    else:
+                        v = 0.0
+                        if was_in_left:
+                            w = 2.50
+                            cv2.putText(frame, "ESCAPE: LEFT SIDE! FAST SNAP TURN", (10, 50), 0, 0.5, (0, 0, 255), 2)
+                        elif was_in_right:
+                            w = -2.50
+                            cv2.putText(frame, "ESCAPE: RIGHT SIDE! FAST SNAP TURN", (10, 50), 0, 0.5, (0, 0, 255), 2)
+                        else:
+                            w = -1.8 if last_seen_x > cx_mid else 1.8
+                        send_cmd(v, w)
+                        cv2.putText(frame, f"SEARCHING: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
+
+        cv2.imshow("f", frame)
+        if cv2.waitKey(1) & 0xFF == 27:
+            break
+
+except KeyboardInterrupt:
+    print("STOP")
+finally:
+    stop_robot()
+    cap.release()
+    lidar_ser.write(bytes([0xA5, 0x25]))
+    cv2.destroyAllWindows()
