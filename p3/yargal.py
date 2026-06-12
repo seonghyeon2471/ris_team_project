@@ -217,7 +217,7 @@ try:
                     # 아직 중앙 정렬 안됨
                     if abs(err_x) > CENTER_TOL:
 
-                        v = 0.0
+                        v = 0.1
                         w = -ALIGN_W * err_x
 
                         send_cmd(v, w)
