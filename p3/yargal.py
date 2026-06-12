@@ -109,7 +109,7 @@ def make_mask(frame, hsv, name):
 
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
-MAX_W_TRACK = 1.8
+MAX_W_TRACK = 0.5
 DEADZONE = 0.05
 APPROACH_V     = 0.22
 PARK_SEC       = 1.2
