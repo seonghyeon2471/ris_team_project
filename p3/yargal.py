@@ -221,7 +221,7 @@ try:
                         elif park_state == "POST_FORWARD":
 
                             # 2초 동안만 직진
-                        if time.time() - post_t < 2.0:
+                            if time.time() - post_t < 2.0:
                             send_cmd(0.18, 0.0)   # 직진
                             cv2.putText(frame, "POST FORWARD", (10, 25), 0, 0.6, draw, 2)
 
