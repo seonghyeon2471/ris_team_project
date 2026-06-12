@@ -28,7 +28,7 @@ print("LIDAR OK")
 # ── LIDAR ─────────────────────────────────────────────────────────────
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
-FRONT_RANGE  = 45
+FRONT_RANGE  = 50  # 🚨 모서리 충돌 방지를 위해 감지 범위를 45 -> 50으로 약간 상향
 THRESH_SLOW  = 55.0  
 THRESH_TURN  = 35.0  
 THRESH_STOP  = 18.0  
@@ -78,12 +78,12 @@ def avoid_dir(scan):
 # ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
     v = np.clip(v, -0.4, 0.4)
-    w = np.clip(w, -1.6, 1.6) # 최대 제어각 속도 제한 유지
+    w = np.clip(w, -1.6, 1.6) 
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
 def stop_robot(): send_cmd(0.0, 0.0)
 
-# ── COLOR CONFIG (새로운 HSV 값 반영) ──────────────────────────────────
+# ── COLOR CONFIG ──────────────────────────────────────────────────────
 COLOR_CFG = {
     "red":    {"hsv1": ([169, 168, 96], [179, 222, 157]),
                "hsv2": None,
@@ -112,25 +112,21 @@ MIN_AREA       = 400
 KP_ROT         = 0.003
 APPROACH_V     = 0.22
 PARK_SEC       = 1.2
-DETECT_CONFIRM = 3 # 시작 시 빠른 타겟팅 전환을 위해 프레임 카운트 최적화(6->3)
-BOTTOM_10PCT   = int(240 * 0.90)  # 216px
+DETECT_CONFIRM = 3 
+BOTTOM_10PCT   = int(240 * 0.90)  
 
-# 좌우 바운더리 라인 설정 (각각 20% 영역)
-LEFT_20PCT     = int(320 * 0.20)  # 64px
-RIGHT_20PCT    = int(320 * 0.80)  # 256px
+LEFT_20PCT     = int(320 * 0.20)  
+RIGHT_20PCT    = int(320 * 0.80)  
 
 # ── STATE ─────────────────────────────────────────────────────────────
-mode          = "START_SEARCH"  # 기존 LIDAR에서 START_SEARCH(초기 회전 탐색) 상태로 변경 시작
+mode          = "START_SEARCH"  
 mission_idx   = 0
 detect_count  = 0
 
-# PARK 세부 상태
 park_state    = "TRACK"
 last_seen_x   = 160
 last_bottom_y = 0
 was_in_bottom = False
-
-# 좌우 이탈 검증을 위한 플래그 추가
 was_in_left   = False
 was_in_right  = False
 
@@ -166,10 +162,10 @@ try:
         big   = max(cnts, key=cv2.contourArea) if cnts else None
         found = big is not None and cv2.contourArea(big) > MIN_AREA
 
-        # 화면에 모니터링 가이드라인 그리기
+        # 가이드라인
         cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
-        cv2.line(frame, (LEFT_20PCT, 0), (LEFT_20PCT, H), (255, 0, 0), 1)   # 좌측 20% 라인
-        cv2.line(frame, (RIGHT_20PCT, 0), (RIGHT_20PCT, H), (255, 0, 0), 1) # 우측 20% 라인
+        cv2.line(frame, (LEFT_20PCT, 0), (LEFT_20PCT, H), (255, 0, 0), 1)   
+        cv2.line(frame, (RIGHT_20PCT, 0), (RIGHT_20PCT, H), (255, 0, 0), 1) 
 
         if found:
             bx, by_top, bw, bh = cv2.boundingRect(big)
@@ -179,7 +175,6 @@ try:
             last_seen_x   = ox
             last_bottom_y = by_bot
             
-            # 구역 조건 실시간 체크 업데이트
             was_in_bottom = (by_bot >= BOTTOM_10PCT)
             was_in_left   = (ox <= LEFT_20PCT)
             was_in_right  = (ox >= RIGHT_20PCT)
@@ -187,7 +182,7 @@ try:
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
 
-        # ══ START_SEARCH 모드 (시작 시 제자리 회전 탐색 기능) ══════════════
+        # ══ START_SEARCH 모드 (시작 시 제자리 회전 탐색) ══════════════
         if mode == "START_SEARCH":
             if found:
                 detect_count += 1
@@ -197,37 +192,41 @@ try:
                     park_state = "TRACK"
                     print(f" 정면 즉시 포착 완료! 회전 없이 [{target}] 미션 바로 진입.")
                     continue
-                v, w = 0.0, 0.0 # 포착 확인하는 동안은 정지 대기
+                v, w = 0.0, 0.0 
             else:
                 detect_count = 0
-                v, w = 0.0, 1.3 # 🚨 시작 시 카메라 내에 객체가 없으므로 제자리에서 1.3 속도로 회전 탐색!
+                v, w = 0.0, 1.3 
 
             send_cmd(v, w)
             cv2.putText(frame, "MODE: START_SEARCH", (10, 25), 0, 0.5, (0, 255, 255), 1)
 
-        # ══ LIDAR 모드 ═══════════════════════════════════════════
+        # ══ LIDAR 모드 (장애물 회피 최우선 제어) ═════════════════════════
         elif mode == "LIDAR":
-            if found:
-                detect_count += 1
-            else:
-                detect_count = 0
-
-            if detect_count >= DETECT_CONFIRM:
-                detect_count = 0
+            # 🚨 회피 완료 판정: 전방에 THRESH_SLOW(55cm) 이내에 장애물이 완전히 사라졌을 때
+            if fm >= THRESH_SLOW:
+                print(" 장애물 회피 성공 -> 다시 객체 탐색 시퀀스 전환")
                 mode = "PARK"
-                park_state = "TRACK"
-                print(f"[{target}] 발견 → 추적 시작")
+                park_state = "SEARCH" # 다시 제자리 회전 스캔을 돌리도록 유도
+                was_in_bottom = was_in_left = was_in_right = False
                 continue
 
+            # 라이다 회피 주행 (카메라 데이터는 완전히 배제하고 안전 주행에만 올인)
             if fm < THRESH_STOP: v, w = 0.09, adir * 0.9
             elif fm < THRESH_TURN: v, w = 0.13, adir * 0.7
-            elif fm < THRESH_SLOW: v, w = 0.18, adir * 0.4
-            else: v, w = 0.28, 0.0
+            else: v, w = 0.18, adir * 0.4
+            
             send_cmd(v, w)
-            cv2.putText(frame, "MODE: LIDAR", (10, 25), 0, 0.5, (255, 255, 255), 1)
+            cv2.putText(frame, "MODE: LIDAR (EMERGENCY AVOID)", (10, 25), 0, 0.5, (0, 0, 255), 1)
 
         # ══ PARK 모드 (추적 / 정차 / 탐색) ══════════════════════════
         elif mode == "PARK":
+            # 🚨 예외 처리 및 우선순위 강등 규칙: 
+            # 주행(TRACK) 중에 갑자기 장애물이 슬로우 영역(55cm) 안으로 들어오면 즉시 LIDAR 모드로 제어권 강등
+            if park_state == "TRACK" and fm < THRESH_SLOW:
+                print("⚠️ 주행 중 장애물 감지! 회피 모드(LIDAR)로 즉시 제어권 이관합니다.")
+                mode = "LIDAR"
+                continue
+
             # 1. 정차 중 (PARKING)
             if park_state == "PARKING":
                 stop_robot()
@@ -237,7 +236,6 @@ try:
                     if mission_idx < len(MISSION):
                         park_state = "SEARCH"
                         last_seen_x = cx_mid + 40 
-                        # 플래그 초기화
                         was_in_bottom = was_in_left = was_in_right = False
                         print(f"다음 미션 [{MISSION[mission_idx]}] 탐색 회전 시작")
                     continue
@@ -246,14 +244,10 @@ try:
             # 2. 객체 추적 중 (TRACK)
             elif found:
                 park_state = "TRACK"
+                # 완벽하게 안전한 구역(fm >= THRESH_SLOW)이므로 순수하게 카메라 조향만 사용하여 조준 직진
                 w_cam = -KP_ROT * err_x
-                if fm >= THRESH_SLOW:
-                    v, w = APPROACH_V, w_cam
-                else:
-                    w_lid = adir * 0.7
-                    if fm < THRESH_STOP: v, w = 0.09, w_lid
-                    elif fm < THRESH_TURN: v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
-                    else: v, w = 0.18, 0.3 * w_lid + 0.7 * w_cam
+                v, w = APPROACH_V, w_cam
+                
                 send_cmd(v, w)
                 cv2.putText(frame, f"TRACKING: {target}", (10, 25), 0, 0.6, draw, 1)
 
@@ -268,15 +262,13 @@ try:
                     park_state = "SEARCH"
                     v = 0.0
                     
-                    # 🚨 예외 처리: 직전 이탈 방향 보정 (스냅 턴)
                     if was_in_left:
-                        w = 1.6  # 좌측 이탈 시 왼쪽으로 최대 급선회
+                        w = 1.6  
                         cv2.putText(frame, "SNAP TURN: LEFT ESCAPE", (10, 50), 0, 0.5, (0, 0, 255), 2)
                     elif was_in_right:
-                        w = -1.6 # 우측 이탈 시 오른쪽으로 최대 급선회
+                        w = -1.6 
                         cv2.putText(frame, "SNAP TURN: RIGHT ESCAPE", (10, 50), 0, 0.5, (0, 0, 255), 2)
                     else:
-                        # 평시 서칭 속도는 요청하신 대로 제자리 1.3 유지
                         w = -1.3 if last_seen_x > cx_mid else 1.3
                     
                     send_cmd(v, w)
