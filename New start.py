@@ -31,9 +31,9 @@ EMA_ALPHA   = 0.35
 MEDIAN_K    = 2
 FRONT_RANGE = 45
 
-THRESH_SLOW = 55.0
-THRESH_TURN = 35.0
-THRESH_STOP = 18.0
+THRESH_SLOW  = 55.0
+THRESH_TURN  = 35.0
+THRESH_STOP  = 18.0
 THRESH_CLEAR = 60.0
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
@@ -131,16 +131,19 @@ def make_mask(frame, hsv, name):
 MIN_AREA       = 400
 KP_ROT         = 0.003
 APPROACH_V     = 0.22
-PARK_SEC       = 1.2
+PARK_SEC       = 1.0
 DETECT_CONFIRM = 6
-BOTTOM_10PCT   = int(240 * 0.90)
+BOTTOM_10PCT   = int(240 * 0.96)
 
 MEM_TIMEOUT    = 8.0
 RELOCATE_ANGLE = 40
 RELOCATE_SEC   = 3.0
 
+SPIN_SEC       = 2.2
+SPIN_W         = 0.35
+
 # ── STATE ─────────────────────────────────────────────────────────────
-mode = "SEARCH"   # SEARCH, TRACK, AVOID, RELOCATE, PARKING
+mode = "SEARCH"   # SEARCH, TRACK, AVOID, RELOCATE, PARKING, SPIN_SEARCH
 mission_idx = 0
 detect_count = 0
 
@@ -150,7 +153,7 @@ mem_y = 0
 mem_t = 0
 
 park_t = None
-avoid_dir_last = 1
+spin_t = None
 
 print(f"START | MISSION: {MISSION}")
 
@@ -177,7 +180,6 @@ try:
         scan = get_scan()
         fm = front_min(scan)
         adir = avoid_dir(scan)
-        avoid_dir_last = adir
 
         if mission_idx >= len(MISSION):
             stop_robot()
@@ -206,8 +208,7 @@ try:
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
             cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
 
-        # ── 장애물 우선 ───────────────────────────────────────────────
-        if fm < THRESH_STOP:
+        if fm < THRESH_STOP and mode not in ["PARKING", "SPIN_SEARCH"]:
             mode = "AVOID"
 
         if mode == "AVOID":
@@ -217,12 +218,8 @@ try:
             cv2.putText(frame, "MODE: AVOID", (10, 25), 0, 0.6, (0, 0, 255), 2)
 
             if fm >= THRESH_CLEAR:
-                if memory_alive():
-                    mode = "RELOCATE"
-                else:
-                    mode = "SEARCH"
+                mode = "RELOCATE" if memory_alive() else "SEARCH"
 
-        # ── SEARCH ───────────────────────────────────────────────────
         elif mode == "SEARCH":
             if found:
                 remember_target(ox, by_bot)
@@ -240,7 +237,6 @@ try:
 
             cv2.putText(frame, "MODE: SEARCH", (10, 25), 0, 0.6, (255, 255, 0), 1)
 
-        # ── TRACK ────────────────────────────────────────────────────
         elif mode == "TRACK":
             if found:
                 remember_target(ox, by_bot)
@@ -268,7 +264,6 @@ try:
 
             cv2.putText(frame, f"MODE: TRACK {target}", (10, 25), 0, 0.6, draw, 1)
 
-        # ── RELOCATE ────────────────────────────────────────────────
         elif mode == "RELOCATE":
             if not memory_alive():
                 mode = "SEARCH"
@@ -279,8 +274,7 @@ try:
                         mode = "TRACK"
                         detect_count = 0
                     else:
-                        v, w = 0.14, 0.0
-                        send_cmd(v, w)
+                        send_cmd(0.12, 0.0)
                 else:
                     v = 0.12
                     w = -KP_ROT * err_mem
@@ -291,14 +285,26 @@ try:
 
             cv2.putText(frame, f"MODE: RELOCATE {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
 
-        # ── PARKING ────────────────────────────────────────────────
         elif mode == "PARKING":
             stop_robot()
             cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
             if time.time() - park_t >= PARK_SEC:
+                mode = "SPIN_SEARCH"
+                spin_t = time.time()
+
+        elif mode == "SPIN_SEARCH":
+            stop_robot() if spin_t is None else None
+            if spin_t is None:
+                spin_t = time.time()
+
+            if time.time() - spin_t < SPIN_SEC:
+                send_cmd(0.0, SPIN_W)
+                cv2.putText(frame, "MODE: SPIN SEARCH", (10, 25), 0, 0.6, (0, 255, 255), 2)
+            else:
                 mission_idx += 1
                 mem_valid = False
                 detect_count = 0
+                spin_t = None
                 mode = "SEARCH"
 
         cv2.imshow("f", frame)
