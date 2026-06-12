@@ -210,7 +210,7 @@ try:
                 park_state = "TRACK"
 
                 # 가까우면서 중앙이면 도착
-                if by_bot >= BOTTOM_10PCT and abs(err_x) < 30:
+                if by_bot >= BOTTOM_10PCT and abs(err_x) < 50:
                     stop_robot()
 
                     park_state = "PARKING"
