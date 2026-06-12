@@ -217,7 +217,7 @@ try:
                             park_state = "POST_FORWARD"
                             post_t = time.time()
                             post_forward_done = False
-                        continue
+                            continue
                         elif park_state == "POST_FORWARD":
 
                             # 2초 동안만 직진
