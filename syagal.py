@@ -28,10 +28,10 @@ print("LIDAR OK")
 # ── LIDAR ─────────────────────────────────────────────────────────────
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
-FRONT_RANGE  = 50  # 🚨 모서리 충돌 방지를 위해 감지 범위를 45 -> 50으로 약간 상향
+FRONT_RANGE  = 50  
 THRESH_SLOW  = 55.0  
 THRESH_TURN  = 35.0  
-THRESH_STOP  = 18.0  
+THRESH_STOP  = 8.0   # 🚨 최저 정지/비상 거리를 8cm로 하향 조정
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -200,30 +200,28 @@ try:
             send_cmd(v, w)
             cv2.putText(frame, "MODE: START_SEARCH", (10, 25), 0, 0.5, (0, 255, 255), 1)
 
-        # ══ LIDAR 모드 (장애물 회피 최우선 제어) ═════════════════════════
+        # ══ LIDAR 모드 (장애물 제자리 조향 회피 제어) ══════════════════════
         elif mode == "LIDAR":
-            # 🚨 회피 완료 판정: 전방에 THRESH_SLOW(55cm) 이내에 장애물이 완전히 사라졌을 때
+            # 회피 완료 판정: 전방 55cm 이내에 장애물이 완전히 사라졌을 때
             if fm >= THRESH_SLOW:
-                print(" 장애물 회피 성공 -> 다시 객체 탐색 시퀀스 전환")
+                print(" 장애물 회피 완료 -> 다시 객체 탐색 시퀀스 전환")
                 mode = "PARK"
-                park_state = "SEARCH" # 다시 제자리 회전 스캔을 돌리도록 유도
+                park_state = "SEARCH" 
                 was_in_bottom = was_in_left = was_in_right = False
                 continue
 
-            # 라이다 회피 주행 (카메라 데이터는 완전히 배제하고 안전 주행에만 올인)
-            if fm < THRESH_STOP: v, w = 0.09, adir * 0.9
-            elif fm < THRESH_TURN: v, w = 0.13, adir * 0.7
-            else: v, w = 0.18, adir * 0.4
+            # 🚨 전진하지 않고 멈춰서(v=0.0) 제자리 조향(w=1.3)으로만 안전 방향 회전
+            v = 0.0
+            w = adir * 1.3
             
             send_cmd(v, w)
-            cv2.putText(frame, "MODE: LIDAR (EMERGENCY AVOID)", (10, 25), 0, 0.5, (0, 0, 255), 1)
+            cv2.putText(frame, "MODE: LIDAR (PIVOT AVOID)", (10, 25), 0, 0.5, (0, 0, 255), 1)
 
         # ══ PARK 모드 (추적 / 정차 / 탐색) ══════════════════════════
         elif mode == "PARK":
-            # 🚨 예외 처리 및 우선순위 강등 규칙: 
-            # 주행(TRACK) 중에 갑자기 장애물이 슬로우 영역(55cm) 안으로 들어오면 즉시 LIDAR 모드로 제어권 강등
+            # 주행(TRACK) 중에 장애물이 슬로우 영역(55cm) 안으로 들어오면 즉시 LIDAR 모드로 제어권 강등
             if park_state == "TRACK" and fm < THRESH_SLOW:
-                print("⚠️ 주행 중 장애물 감지! 회피 모드(LIDAR)로 즉시 제어권 이관합니다.")
+                print("⚠️ 주행 중 장애물 감지! 제자리 회피(LIDAR) 모드로 전환합니다.")
                 mode = "LIDAR"
                 continue
 
@@ -244,7 +242,6 @@ try:
             # 2. 객체 추적 중 (TRACK)
             elif found:
                 park_state = "TRACK"
-                # 완벽하게 안전한 구역(fm >= THRESH_SLOW)이므로 순수하게 카메라 조향만 사용하여 조준 직진
                 w_cam = -KP_ROT * err_x
                 v, w = APPROACH_V, w_cam
                 
