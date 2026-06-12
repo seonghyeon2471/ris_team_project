@@ -25,12 +25,12 @@ lidar_ser.reset_input_buffer()
 lidar_ser.write(bytes([0xA5, 0x20])); lidar_ser.read(7)
 print("LIDAR OK")
 
-# ── LIDAR (장애물 회피 거리 살짝 상향) ──────────────────────────────────
+# ── LIDAR ─────────────────────────────────────────────────────────────
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
 FRONT_RANGE  = 45
-THRESH_SLOW  = 65.0  # [상향] 기존 55.0 -> 65.0cm (더 일찍 감속 및 회피 준비)
-THRESH_TURN  = 42.0  # [상향] 기존 35.0 -> 42.0cm (더 여유롭게 회전 회피 시작)
+THRESH_SLOW  = 65.0  
+THRESH_TURN  = 42.0  
 THRESH_STOP  = 18.0  
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
@@ -75,12 +75,11 @@ def front_min(scan):
 def avoid_dir(scan):
     return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
 
-# ── MOTOR (w 부호 반전 해결 및 각속도 미세 상향) ─────────────────────────
+# ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
     v = np.clip(v, -0.4, 0.4)
-    w = np.clip(w, -2.2, 2.2)  # [상향] 기존 2.0 -> 2.2로 최대치 살짝 확대
-    # [버그 수정] 기존 -w 전달 방식이 조향을 반대로 가르키고 있었다면, w로 정상화합니다.
-    arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
+    w = np.clip(w, -2.2, 2.2)  
+    arduino_ser.write(f"{v:.3f},{w:.3f}\n".encode())
 
 def stop_robot(): send_cmd(0.0, 0.0)
 
@@ -115,13 +114,13 @@ APPROACH_V     = 0.22
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 
-# [바운더리] 좌우 민감도 20% 유지
+# [바운더리] 좌우 민감도 20%
 BOTTOM_10PCT   = int(240 * 0.90)  # 216px
 LEFT_20PCT     = int(320 * 0.20)  # 64px
 RIGHT_20PCT    = int(320 * 0.80)  # 256px
 
 # ── STATE ─────────────────────────────────────────────────────────────
-mode          = "LIDAR"
+mode          = "START_SEARCH"
 mission_idx   = 0
 detect_count  = 0
 
@@ -137,7 +136,7 @@ was_in_right  = False
 
 park_t        = None
 
-print(f"START | MISSION: {MISSION}")
+print(f"START | MISSION: {MISSION} | 초기 모드: {mode}")
 
 # ── MAIN LOOP ─────────────────────────────────────────────────────────
 try:
@@ -167,7 +166,7 @@ try:
         big   = max(cnts, key=cv2.contourArea) if cnts else None
         found = big is not None and cv2.contourArea(big) > MIN_AREA
 
-        # 디버깅 가이드라인
+        # 가이드라인
         cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
         cv2.line(frame, (LEFT_20PCT, 0), (LEFT_20PCT, H), (255, 0, 0), 1)
         cv2.line(frame, (RIGHT_20PCT, 0), (RIGHT_20PCT, H), (255, 0, 0), 1)
@@ -188,8 +187,26 @@ try:
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
 
-        # ══ LIDAR 모드 ═══════════════════════════════════════════
-        if mode == "LIDAR":
+        # ══ START_SEARCH 모드 ═════════════════════════════════════════
+        if mode == "START_SEARCH":
+            if found:
+                detect_count += 1
+            else:
+                detect_count = 0
+
+            if detect_count >= DETECT_CONFIRM:
+                detect_count = 0
+                mode = "PARK"
+                park_state = "TRACK"
+                print(f" 초기 타겟 [{target}] 포착 성공! 추적 주행 시작.")
+                continue
+
+            v, w = 0.0, 1.1
+            send_cmd(v, w)
+            cv2.putText(frame, "MODE: START_SEARCH", (10, 25), 0, 0.5, (0, 255, 255), 1)
+
+        # ══ LIDAR 모드 ════════════════════════════════════════════════
+        elif mode == "LIDAR":
             if found:
                 detect_count += 1
             else:
@@ -202,9 +219,10 @@ try:
                 print(f"[{target}] 발견 → 추적 시작")
                 continue
 
-            if fm < THRESH_STOP: v, w = 0.09, adir * 0.9
-            elif fm < THRESH_TURN: v, w = 0.13, adir * 0.7
-            elif fm < THRESH_SLOW: v, w = 0.18, adir * 0.4
+            # [수정] THRESH_STOP 미만 초근접 상황 조향을 adir * 1.5로 대폭 강화
+            if fm < THRESH_STOP: v, w = 0.09, adir * 1.5    # 기존 1.2 -> 1.5로 상향
+            elif fm < THRESH_TURN: v, w = 0.13, adir * 1.0  
+            elif fm < THRESH_SLOW: v, w = 0.18, adir * 0.7  
             else: v, w = 0.28, 0.0
             send_cmd(v, w)
             cv2.putText(frame, "MODE: LIDAR", (10, 25), 0, 0.5, (255, 255, 255), 1)
@@ -231,10 +249,11 @@ try:
                 if fm >= THRESH_SLOW:
                     v, w = APPROACH_V, -KP_ROT * err_x
                 else:
-                    w_cam, w_lid = -KP_ROT * err_x, adir * 0.7
-                    if fm < THRESH_STOP: v, w = 0.09, w_lid
-                    elif fm < THRESH_TURN: v, w = 0.13, 0.7*w_lid + 0.3*w_cam
-                    else: v, w = 0.18, 0.3*w_lid + 0.7*w_cam
+                    w_cam = -KP_ROT * err_x
+                    # [수정] 추적 도중 라이다가 개입하는 초근접 좁은 길 회피력도 1.5 연동 반영
+                    if fm < THRESH_STOP: v, w = 0.09, adir * 1.5  # 기존 1.2 -> 1.5로 상향
+                    elif fm < THRESH_TURN: v, w = 0.13, 0.7 * (adir * 1.0) + 0.3 * w_cam
+                    else: v, w = 0.18, 0.3 * (adir * 0.7) + 0.7 * w_cam
                 send_cmd(v, w)
                 cv2.putText(frame, f"TRACKING: {target}", (10, 25), 0, 0.6, draw, 1)
 
@@ -250,15 +269,14 @@ try:
                     park_state = "SEARCH"
                     v = 0.0
                     
-                    # [부호 방향 정상화 검증 및 속도 미세 증가 적용]
                     if was_in_left:
-                        w = 2.00  # [조정] 기존 1.80 -> 2.00으로 미세 상향 (더 기민하게 탈출 대응)
+                        w = 2.00  
                         cv2.putText(frame, "ESCAPE: LEFT SIDE! SNAP TURN", (10, 50), 0, 0.5, (0, 0, 255), 2)
                     elif was_in_right:
-                        w = -2.00 # [조정] 기존 -1.80 -> -2.00으로 미세 상향
+                        w = -2.00 
                         cv2.putText(frame, "ESCAPE: RIGHT SIDE! SNAP TURN", (10, 50), 0, 0.5, (0, 0, 255), 2)
                     else:
-                        w = -1.5 if last_seen_x > cx_mid else 1.5  # [조정] 기존 1.4 -> 1.5
+                        w = -1.1 if last_seen_x > cx_mid else 1.1  
                     
                     send_cmd(v, w)
                     cv2.putText(frame, f"SEARCHING: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
