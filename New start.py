@@ -2,27 +2,28 @@ import cv2
 import serial
 import numpy as np
 import time
-import math
 import threading
 
 # ── SERIAL ────────────────────────────────────────────────────────────
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
-lidar_ser   = serial.Serial("/dev/ttyUSB0",  460800, timeout=0.1)
+lidar_ser   = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)
 
 # ── CAMERA ────────────────────────────────────────────────────────────
 cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH,  320)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
+cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 time.sleep(1.0)
 cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
 cap.set(cv2.CAP_PROP_AUTO_WB, 0)
 
 # ── LIDAR BOOT ────────────────────────────────────────────────────────
-lidar_ser.write(bytes([0xA5, 0x40])); time.sleep(2)
+lidar_ser.write(bytes([0xA5, 0x40]))
+time.sleep(2)
 lidar_ser.reset_input_buffer()
-lidar_ser.write(bytes([0xA5, 0x20])); lidar_ser.read(7)
+lidar_ser.write(bytes([0xA5, 0x20]))
+lidar_ser.read(7)
 print("LIDAR OK")
 
 # ── LIDAR ─────────────────────────────────────────────────────────────
@@ -32,6 +33,9 @@ FRONT_RANGE = 45
 THRESH_SLOW = 55.0
 THRESH_TURN = 35.0
 THRESH_STOP = 18.0
+
+MAX_SAFE_DIST = 100.0   # 1m 제한
+MIN_SAFE_DIST  = 12.0   # 너무 가까우면 정지/강회피
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -59,7 +63,7 @@ def lidar_loop():
             continue
         angle   = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0) % 360
         dist_cm = (raw[3] | (raw[4] << 8)) / 40.0
-        if 3 < dist_cm < 150:
+        if 3 < dist_cm < 1200:
             _ema(angle, dist_cm)
         if sf == 1:
             _median()
@@ -76,8 +80,16 @@ def front_min(scan):
     idx = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     return float(np.min(scan[idx]))
 
+def front_sector(scan, half_width=15):
+    idx = np.arange(-half_width, half_width + 1) % 360
+    return scan[idx]
+
 def avoid_dir(scan):
     return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
+
+def sector_min(scan, center_deg, half_width):
+    idx = np.arange(center_deg - half_width, center_deg + half_width + 1) % 360
+    return float(np.min(scan[idx]))
 
 # ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
@@ -115,22 +127,41 @@ def make_mask(frame, hsv_img, name):
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, kernel)
     return m
 
+def centroid_of_contour(cnt):
+    m = cv2.moments(cnt)
+    if m["m00"] == 0:
+        return None, None
+    cx = int(m["m10"] / m["m00"])
+    cy = int(m["m01"] / m["m00"])
+    return cx, cy
+
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
 KP_ROT         = 0.003
-KP_FWD         = 0.0025
-APPROACH_V     = 0.22
+APPROACH_V     = 0.20
+
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 BOTTOM_10PCT   = int(240 * 0.90)
 
-CX_OK_PX       = 18
-CY_OK_PX       = 18
-ON_COLOR_AREA  = 1200
-ALIGN_FWD_SEC  = 0.25
-ALIGN_FWD_V    = 0.08
+CX_OK_PX       = 14
+CY_OK_PX       = 14
+ON_COLOR_AREA  = 1300
+ALIGN_FWD_SEC  = 0.22
+ALIGN_FWD_V    = 0.07
 STAY_ON_SEC    = 1.0
-SEARCH_SPIN_W  = 1.30
+
+PARK_ENTRY_GRACE = 8
+park_entry_count  = 0
+
+# 안전/회피 우선순위
+OBS_STOP_DIST   = 18.0
+OBS_TURN_DIST   = 35.0
+OBS_SLOW_DIST   = 55.0
+OBS_LIMIT_DIST  = 100.0   # 1m 이내로 유지
+OBS_EMERGENCY   = 12.0
+
+SEARCH_SPIN_W   = 1.30
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode           = "LIDAR"
@@ -146,18 +177,7 @@ park_t         = None
 forward_t      = None
 on_t           = None
 
-PARK_ENTRY_GRACE = 8
-park_entry_count = 0
-
 print(f"START | 하단 10% 기준: y > {BOTTOM_10PCT}px")
-
-def centroid_of_contour(cnt):
-    m = cv2.moments(cnt)
-    if m["m00"] == 0:
-        return None, None
-    cx = int(m["m10"] / m["m00"])
-    cy = int(m["m01"] / m["m00"])
-    return cx, cy
 
 try:
     while True:
@@ -196,7 +216,6 @@ try:
             area = cv2.contourArea(big)
             bx, by, bw, bh = cv2.boundingRect(big)
             centroid_x, centroid_y = centroid_of_contour(big)
-
             if centroid_x is None:
                 centroid_x = bx + bw // 2
                 centroid_y = by + bh // 2
@@ -218,6 +237,7 @@ try:
 
         cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
 
+        # ── 미션 완료 ────────────────────────────────────────────────
         if mode == "LIDAR":
             if found:
                 detect_count += 1
@@ -240,23 +260,27 @@ try:
                 cv2.waitKey(1)
                 continue
 
-            if fm < THRESH_STOP:
-                v, w = 0.09, adir * 0.9
-            elif fm < THRESH_TURN:
-                v, w = 0.13, adir * 0.7
-            elif fm < THRESH_SLOW:
-                v, w = 0.18, adir * 0.4
+            if fm < OBS_STOP_DIST:
+                v, w = 0.0, adir * 1.0
+            elif fm < OBS_TURN_DIST:
+                v, w = 0.08, adir * 0.9
+            elif fm < OBS_SLOW_DIST:
+                v, w = 0.14, adir * 0.6
             else:
-                v, w = 0.28, 0.0
+                if fm > OBS_LIMIT_DIST:
+                    v, w = 0.20, 0.0
+                else:
+                    v, w = 0.24, 0.0
 
             send_cmd(v, w)
-            cv2.putText(frame, f"LIDAR front={fm:.0f}cm",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 255, 200), 1)
+            cv2.putText(frame, f"LIDAR front={fm:.0f}cm", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 255, 200), 1)
             cv2.imshow("f", frame)
             if cv2.waitKey(1) & 0xFF == 27:
                 break
             continue
 
+        # ── PARK 모드 ────────────────────────────────────────────────
         if park_state == "PARKING":
             stop_robot()
             elapsed = time.time() - park_t
@@ -285,40 +309,57 @@ try:
             cv2.waitKey(1)
             continue
 
+        # ── TRACK: 센트로이드 기준 주차 ─────────────────────────────
         if found:
             park_state = "TRACK"
 
             x_ok = abs(err_x) <= CX_OK_PX
             y_ok = abs(err_y) <= CY_OK_PX
 
+            # 센트로이드가 가운데 오면, 조금 더 들어가서 중앙 주차 보정
             if x_ok and y_ok and area >= ON_COLOR_AREA:
-                park_state = "PARKING"
-                park_t = time.time()
+                if park_t is None:
+                    park_t = time.time()
+                    forward_t = time.time()
+                    park_state = "ALIGN_FWD"
+                    print(f"[{target}] centroid align -> final forward")
+                    cv2.imshow("f", frame)
+                    cv2.waitKey(1)
+                    continue
+
+            # 장애물 우선: 앞에 있으면 색보다 라이다 회피
+            if fm < OBS_EMERGENCY:
                 stop_robot()
-                print(f"[{target}] centroid align + area OK -> PARKING")
+                cv2.putText(frame, f"EMERGENCY STOP front={fm:.0f}cm",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
                 cv2.imshow("f", frame)
                 cv2.waitKey(1)
                 continue
 
-            if fm >= THRESH_SLOW:
-                v = APPROACH_V
-                w = -KP_ROT * err_x
-                label = "LIDAR_OFF"
-            else:
+            if fm < OBS_STOP_DIST:
+                v, w = 0.0, adir * 1.0
+                label = "OBS_STOP"
+            elif fm < OBS_TURN_DIST:
+                v, w = 0.08, adir * 0.9
+                label = "OBS_TURN"
+            elif fm < OBS_SLOW_DIST:
                 w_cam = -KP_ROT * err_x
                 w_lidar = adir * 0.7
-                if fm < THRESH_STOP:
-                    v, w = 0.09, w_lidar
-                elif fm < THRESH_TURN:
-                    v = 0.13
-                    w = 0.7 * w_lidar + 0.3 * w_cam
-                else:
-                    v = 0.18
-                    w = 0.3 * w_lidar + 0.7 * w_cam
-                label = "LIDAR_ON"
+                v = 0.14
+                w = 0.6 * w_lidar + 0.4 * w_cam
+                label = "OBS_SLOW"
+            else:
+                v = APPROACH_V if area < ON_COLOR_AREA else 0.12
+                w = -KP_ROT * err_x
+                label = "CAMERA"
 
+            # 1m 이상 벗어나려 하면 속도 제한
+            if fm > OBS_LIMIT_DIST:
+                v = min(v, 0.18)
+
+            # 센트로이드가 안 맞으면 회전 우선
             if not (x_ok and y_ok):
-                v = 0.18 if area < ON_COLOR_AREA else APPROACH_V
+                v = min(v, 0.14)
                 w = -KP_ROT * err_x
 
             send_cmd(v, w)
@@ -330,7 +371,7 @@ try:
                 park_state = "PARKING"
                 park_t = time.time()
                 stop_robot()
-                print(f"[{target}] 하단 소실 (last_y={last_bottom_y}px) -> {PARK_SEC}s 정차")
+                print(f"[{target}] 하단 소실 -> {PARK_SEC}s 정차")
             else:
                 park_state = "SEARCH"
                 v = 0.0
@@ -338,6 +379,27 @@ try:
                 send_cmd(v, w)
                 cv2.putText(frame, f"SEARCH [{target}] last_x={last_seen_x}",
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 0), 1)
+
+        # ── ALIGN_FWD ────────────────────────────────────────────────
+        if park_state == "ALIGN_FWD":
+            elapsed = time.time() - forward_t
+            if elapsed < ALIGN_FWD_SEC:
+                send_cmd(ALIGN_FWD_V, 0.0)
+                cv2.putText(frame, f"ALIGN_FWD {elapsed:.2f}s",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, draw, 2)
+            else:
+                stop_robot()
+                if found and area >= ON_COLOR_AREA:
+                    park_state = "PARKING"
+                    park_t = time.time()
+                    on_t = time.time()
+                    print(f"[{target}] final align -> PARKING")
+                else:
+                    park_state = "TRACK"
+            cv2.imshow("f", frame)
+            if cv2.waitKey(1) & 0xFF == 27:
+                break
+            continue
 
         cv2.imshow("f", frame)
         if cv2.waitKey(1) & 0xFF == 27:
