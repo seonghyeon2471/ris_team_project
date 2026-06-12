@@ -114,6 +114,8 @@ APPROACH_V     = 0.22
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 BOTTOM_10PCT   = int(240 * 0.90)  
+CENTER_TOL = 25
+ALIGN_W = 0.012
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
@@ -208,17 +210,64 @@ try:
 
             # 2. 객체 추적 중 (TRACK)
             elif found:
-                park_state = "TRACK"
-                if fm >= THRESH_SLOW:
-                    v, w = APPROACH_V, -KP_ROT * err_x
-                else:
-                    w_cam, w_lid = -KP_ROT * err_x, adir * 0.7
-                    if fm < THRESH_STOP: v, w = 0.09, w_lid
-                    elif fm < THRESH_TURN: v, w = 0.13, 0.7*w_lid + 0.3*w_cam
-                    else: v, w = 0.18, 0.3*w_lid + 0.7*w_cam
-                send_cmd(v, w)
-                cv2.putText(frame, f"TRACKING: {target}", (10, 25), 0, 0.6, draw, 1)
 
+                park_state = "TRACK"
+
+                # 색지가 화면 아래까지 왔으면
+                if by_bot >= BOTTOM_10PCT:
+
+                    # 아직 중앙 정렬 안됨
+                    if abs(err_x) > CENTER_TOL:
+
+                        v = 0.0
+                        w = -ALIGN_W * err_x
+
+                        send_cmd(v, w)
+
+                    # 중앙 정렬 완료 → 도착
+                    else:
+
+                        stop_robot()
+
+                        park_state = "PARKING"
+                        park_t = time.time()
+
+                        print(f"[{target}] 도착 판정")
+
+                        continue
+
+                else:
+
+                    if fm >= THRESH_SLOW:
+
+                        v = APPROACH_V
+                        w = -KP_ROT * err_x
+
+                    else:
+
+                        w_cam = -KP_ROT * err_x
+                        w_lid = adir * 0.7
+
+                        if fm < THRESH_STOP:
+                            v, w = 0.09, w_lid
+
+                        elif fm < THRESH_TURN:
+                            v, w = 0.13, 0.7*w_lid + 0.3*w_cam
+
+                        else:
+                            v, w = 0.18, 0.3*w_lid + 0.7*w_cam
+
+                    send_cmd(v, w)
+
+                cv2.putText(
+                    frame,
+                    f"TRACKING: {target}",
+                    (10, 25),
+                    0,
+                    0.6,
+                    draw,
+                    1
+                )
             # 3. 객체 놓침 또는 다음 객체 탐색 (SEARCH)
             else:
                 if was_in_bottom:
