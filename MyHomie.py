@@ -29,9 +29,9 @@ print("LIDAR OK")
 EMA_ALPHA   = 0.35
 MEDIAN_K    = 2
 FRONT_RANGE = 45
-THRESH_SLOW = 55.0   # cm: 감속
-THRESH_TURN = 35.0   # cm: 회피 조향 개입
-THRESH_STOP = 18.0   # cm: 강한 회피
+THRESH_SLOW = 55.0
+THRESH_TURN = 35.0
+THRESH_STOP = 18.0
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -83,36 +83,40 @@ def send_cmd(v, w):
 
 def stop_robot(): send_cmd(0.0, 0.0)
 
-# ── COLOR CONFIG ──────────────────────────────────────────────────────
+# ── COLOR CONFIG (수정된 HSV 범위) ────────────────────────────────────
 COLOR_CFG = {
-    "red":    {"hsv1": ([0,  60, 120], [12,  255, 255]),
-               "hsv2": ([160, 60, 120], [179, 255, 255]),
-               "bgr":  ([20, 20, 80],  [255, 255, 255]), "draw": (0, 0, 255)},
-    "yellow": {"hsv1": ([18, 15, 180], [45,  255, 255]),
-               "hsv2": None,
-               "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
-    "blue":   {"hsv1": ([95, 50,  50], [130, 255, 255]),
-               "hsv2": None,
-               "bgr":  ([40,  0,   0], [255, 220, 220]), "draw": (255, 80, 0)},
+    "red": {
+        "hsv": [(np.array([169, 168, 96]),  np.array([179, 222, 157]))],
+        "draw": (0, 0, 255),
+    },
+    "yellow": {
+        "hsv": [(np.array([16, 137, 142]),  np.array([30, 214, 195]))],
+        "draw": (0, 200, 255),
+    },
+    "blue": {
+        "hsv": [(np.array([106, 168, 54]),  np.array([131, 210, 82]))],
+        "draw": (255, 80, 0),
+    },
 }
 MISSION = ["red", "yellow", "blue"]
 
-def make_mask(frame, hsv, name):
+def make_mask(frame, hsv_img, name):
     cfg = COLOR_CFG[name]
-    lo1, hi1 = np.array(cfg["hsv1"][0]), np.array(cfg["hsv1"][1])
-    m = cv2.inRange(hsv, lo1, hi1)
-    if cfg["hsv2"]:
-        lo2, hi2 = np.array(cfg["hsv2"][0]), np.array(cfg["hsv2"][1])
-        m = cv2.bitwise_or(m, cv2.inRange(hsv, lo2, hi2))
-    bm = cv2.inRange(frame, np.array(cfg["bgr"][0]), np.array(cfg["bgr"][1]))
-    return cv2.bitwise_and(m, bm)
+    m = np.zeros(hsv_img.shape[:2], dtype=np.uint8)
+    for lo, hi in cfg["hsv"]:
+        m = cv2.bitwise_or(m, cv2.inRange(hsv_img, lo, hi))
+    # 노이즈 제거
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN,  kernel)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, kernel)
+    return m
 
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
 KP_ROT         = 0.003
 APPROACH_V     = 0.22
 PARK_SEC       = 1.2
-DETECT_CONFIRM = 6
+DETECT_CONFIRM = 6          # LIDAR→PARK 전환 연속 인식 수
 BOTTOM_10PCT   = int(240 * 0.90)   # 216px
 
 # ── STATE ─────────────────────────────────────────────────────────────
@@ -120,12 +124,15 @@ mode          = "LIDAR"
 mission_idx   = 0
 detect_count  = 0
 
-# PARK 상태
-park_state    = "SEARCH"
+park_state    = "TRACK"
 last_seen_x   = 160
 last_bottom_y = 0
 was_in_bottom = False
 park_t        = None
+
+# PARK 진입 직후 몇 프레임은 유실 무시 (버퍼 안정화)
+PARK_ENTRY_GRACE = 8        # 프레임 수
+park_entry_count = 0
 
 print(f"START | 하단 10% 기준: y > {BOTTOM_10PCT}px")
 
@@ -140,7 +147,7 @@ try:
         cx_mid = W // 2
         hsv    = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         scan   = get_scan()
-        fm     = front_min(scan)
+        fm     = front_min(scan)   # 매 프레임 라이다 전방 거리 갱신
         adir   = avoid_dir(scan)
 
         # ── 미션 완료 ─────────────────────────────────────────────────
@@ -153,20 +160,17 @@ try:
         target = MISSION[mission_idx]
         draw   = COLOR_CFG[target]["draw"]
 
-        # ── 공통: 마스크 & 컨투어 ─────────────────────────────────────
+        # ── 마스크 & 컨투어 (매 프레임 공통) ─────────────────────────
         mask = make_mask(frame, hsv, target)
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         big   = max(cnts, key=cv2.contourArea) if cnts else None
         found = big is not None and cv2.contourArea(big) > MIN_AREA
 
-        # 색지 정보 추출
         if found:
             bx, by_top, bw, bh = cv2.boundingRect(big)
-            ox     = bx + bw // 2                   # x축 가로 중심
-            by_bot = min(by_top + bh, 239)           # 색지 하단 y
+            ox     = bx + bw // 2
+            by_bot = min(by_top + bh, 239)
             err_x  = ox - cx_mid
-
-            # 마지막 위치 갱신
             last_seen_x   = ox
             last_bottom_y = by_bot
             was_in_bottom = (by_bot >= BOTTOM_10PCT)
@@ -175,27 +179,26 @@ try:
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
             cv2.line(frame, (cx_mid, 0), (cx_mid, H), (100, 100, 100), 1)
-            cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
-            cv2.putText(frame, f"x_err={err_x}  y={by_bot}",
-                        (bx, by_top - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, draw, 1)
+
+        cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
 
         # ══ LIDAR 주행 모드 ═══════════════════════════════════════════
         if mode == "LIDAR":
             if found:
                 detect_count += 1
                 cv2.putText(frame, f"DETECT [{detect_count}/{DETECT_CONFIRM}]",
-                            (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, draw, 1)
+                            (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, draw, 2)
             else:
                 detect_count = 0
 
             if detect_count >= DETECT_CONFIRM:
-                # PARK 모드 전환
-                detect_count  = 0
-                mode          = "PARK"
-                park_state    = "TRACK"
-                last_bottom_y = 0
-                was_in_bottom = False
-                park_t        = None
+                detect_count    = 0
+                mode            = "PARK"
+                park_state      = "TRACK"
+                last_bottom_y   = 0
+                was_in_bottom   = False
+                park_t          = None
+                park_entry_count = 0
                 stop_robot()
                 print(f"[{target}] 인식 확정 → PARK")
                 cv2.imshow("f", frame); cv2.waitKey(1); continue
@@ -211,8 +214,8 @@ try:
                 v, w = 0.28, 0.0
 
             send_cmd(v, w)
-            cv2.putText(frame, f"LIDAR  front={fm:.0f}cm", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 255, 200), 1)
+            cv2.putText(frame, f"LIDAR  front={fm:.0f}cm",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 255, 200), 1)
             cv2.imshow("f", frame)
             if cv2.waitKey(1) & 0xFF == 27: break
             continue
@@ -224,31 +227,41 @@ try:
             stop_robot()
             elapsed = time.time() - park_t
             remain  = max(0.0, PARK_SEC - elapsed)
-            cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
             cv2.putText(frame, f"PARKING [{target}]  {remain:.1f}s",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, draw, 2)
             cv2.imshow("f", frame)
             if elapsed >= PARK_SEC:
-                mission_idx   += 1
-                mode           = "LIDAR"
-                park_state     = "TRACK"
-                last_bottom_y  = 0
-                was_in_bottom  = False
-                detect_count   = 0
+                mission_idx      += 1
+                mode              = "LIDAR"
+                park_state        = "TRACK"
+                last_bottom_y     = 0
+                was_in_bottom     = False
+                detect_count      = 0
+                park_entry_count  = 0
                 print(f"[{target}] 완료 → LIDAR 복귀")
+            cv2.waitKey(1); continue
+
+        # ─ PARK 진입 직후 grace 기간: 유실 무시하고 직진 ──────────────
+        if park_entry_count < PARK_ENTRY_GRACE:
+            park_entry_count += 1
+            send_cmd(APPROACH_V, 0.0)
+            cv2.putText(frame, f"PARK ENTRY stabilize ({park_entry_count}/{PARK_ENTRY_GRACE})",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, draw, 1)
+            cv2.imshow("f", frame)
             cv2.waitKey(1); continue
 
         # ─ TRACK: 색지 보임 ───────────────────────────────────────────
         if found:
             park_state = "TRACK"
 
-            # 전방 장애물 없으면 라이다 회피 끔 → 카메라만으로 조향
+            # 매 프레임 라이다 전방 체크 → 장애물 없으면 카메라만, 있으면 블렌딩
             if fm >= THRESH_SLOW:
-                # 라이다 꺼짐: 색지 x중심으로만 조향
-                w = -KP_ROT * err_x
+                # 라이다 회피 끔 → 색지 x중심으로만 조향
                 v = APPROACH_V
+                w = -KP_ROT * err_x
+                lidar_label = "LIDAR_OFF"
             else:
-                # 장애물 있음: 라이다-카메라 블렌딩
+                # 장애물 감지 → 블렌딩
                 w_cam   = -KP_ROT * err_x
                 w_lidar = adir * 0.7
                 if fm < THRESH_STOP:
@@ -259,9 +272,10 @@ try:
                 else:
                     v = 0.18
                     w = 0.3 * w_lidar + 0.7 * w_cam
+                lidar_label = "LIDAR_ON"
 
             send_cmd(v, w)
-            cv2.putText(frame, f"TRACK [{target}]  front={fm:.0f}cm  {'LIDAR_OFF' if fm >= THRESH_SLOW else 'LIDAR_ON'}",
+            cv2.putText(frame, f"TRACK [{target}] {lidar_label} front={fm:.0f}cm",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.48, draw, 1)
 
         # ─ 색지 사라짐 ────────────────────────────────────────────────
@@ -273,14 +287,13 @@ try:
                 stop_robot()
                 print(f"[{target}] 하단 소실 (last_y={last_bottom_y}px) → {PARK_SEC}s 정차")
             else:
-                # 하단 아님 → 마지막으로 본 방향으로 제자리 회전 탐색
+                # 하단 아님 → 마지막으로 본 방향으로 제자리 회전 재탐색
                 park_state = "SEARCH"
                 v = 0.0
                 w = -1.30 if last_seen_x > cx_mid else 1.30
                 send_cmd(v, w)
-                cv2.putText(frame, f"SEARCH [{target}]  last_x={last_seen_x}",
-                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 0), 1)
-            cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
+                cv2.putText(frame, f"SEARCH [{target}] last_x={last_seen_x}",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 0), 1)
 
         cv2.imshow("f", frame)
         if cv2.waitKey(1) & 0xFF == 27: break
