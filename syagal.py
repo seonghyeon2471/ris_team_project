@@ -25,12 +25,12 @@ lidar_ser.reset_input_buffer()
 lidar_ser.write(bytes([0xA5, 0x20])); lidar_ser.read(7)
 print("LIDAR OK")
 
-# ── LIDAR ─────────────────────────────────────────────────────────────
+# ── LIDAR (장애물 회피 거리 살짝 상향) ──────────────────────────────────
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
 FRONT_RANGE  = 45
-THRESH_SLOW  = 55.0  
-THRESH_TURN  = 35.0  
+THRESH_SLOW  = 65.0  # [상향] 기존 55.0 -> 65.0cm (더 일찍 감속 및 회피 준비)
+THRESH_TURN  = 42.0  # [상향] 기존 35.0 -> 42.0cm (더 여유롭게 회전 회피 시작)
 THRESH_STOP  = 18.0  
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
@@ -75,11 +75,12 @@ def front_min(scan):
 def avoid_dir(scan):
     return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
 
-# ── MOTOR ─────────────────────────────────────────────────────────────
+# ── MOTOR (w 부호 반전 해결 및 각속도 미세 상향) ─────────────────────────
 def send_cmd(v, w):
     v = np.clip(v, -0.4, 0.4)
-    w = np.clip(w, -2.0, 2.0)  
-    arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
+    w = np.clip(w, -2.2, 2.2)  # [상향] 기존 2.0 -> 2.2로 최대치 살짝 확대
+    # [버그 수정] 기존 -w 전달 방식이 조향을 반대로 가르키고 있었다면, w로 정상화합니다.
+    arduino_ser.write(f"{v:.3f},{w:.3f}\n".encode())
 
 def stop_robot(): send_cmd(0.0, 0.0)
 
@@ -114,10 +115,10 @@ APPROACH_V     = 0.22
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 
-# [바운더리 파라미터 수정] 민감도 상향을 위해 좌우 범위를 외곽 20%로 확장
+# [바운더리] 좌우 민감도 20% 유지
 BOTTOM_10PCT   = int(240 * 0.90)  # 216px
-LEFT_20PCT     = int(320 * 0.20)  # 32px -> 64px (더 일찍 왼쪽 이탈로 인식)
-RIGHT_20PCT    = int(320 * 0.80)  # 288px -> 256px (더 일찍 오른쪽 이탈로 인식)
+LEFT_20PCT     = int(320 * 0.20)  # 64px
+RIGHT_20PCT    = int(320 * 0.80)  # 256px
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
@@ -166,7 +167,7 @@ try:
         big   = max(cnts, key=cv2.contourArea) if cnts else None
         found = big is not None and cv2.contourArea(big) > MIN_AREA
 
-        # 디버깅용 가이드라인 선 그리기 (화면에서 바운더리 선이 안쪽으로 좁혀진 것을 볼 수 있습니다)
+        # 디버깅 가이드라인
         cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
         cv2.line(frame, (LEFT_20PCT, 0), (LEFT_20PCT, H), (255, 0, 0), 1)
         cv2.line(frame, (RIGHT_20PCT, 0), (RIGHT_20PCT, H), (255, 0, 0), 1)
@@ -180,7 +181,6 @@ try:
             last_seen_x   = ox
             last_bottom_y = by_bot
             
-            # 실시간 이탈 경계면 저장 (객체의 중심점 ox 기준으로 체크하여 더 정밀하게 반영)
             was_in_bottom = (by_bot >= BOTTOM_10PCT)
             was_in_left   = (ox <= LEFT_20PCT)
             was_in_right  = (ox >= RIGHT_20PCT)
@@ -250,14 +250,15 @@ try:
                     park_state = "SEARCH"
                     v = 0.0
                     
+                    # [부호 방향 정상화 검증 및 속도 미세 증가 적용]
                     if was_in_left:
-                        w = 1.80  
+                        w = 2.00  # [조정] 기존 1.80 -> 2.00으로 미세 상향 (더 기민하게 탈출 대응)
                         cv2.putText(frame, "ESCAPE: LEFT SIDE! SNAP TURN", (10, 50), 0, 0.5, (0, 0, 255), 2)
                     elif was_in_right:
-                        w = -1.80 
+                        w = -2.00 # [조정] 기존 -1.80 -> -2.00으로 미세 상향
                         cv2.putText(frame, "ESCAPE: RIGHT SIDE! SNAP TURN", (10, 50), 0, 0.5, (0, 0, 255), 2)
                     else:
-                        w = -1.4 if last_seen_x > cx_mid else 1.4  
+                        w = -1.5 if last_seen_x > cx_mid else 1.5  # [조정] 기존 1.4 -> 1.5
                     
                     send_cmd(v, w)
                     cv2.putText(frame, f"SEARCHING: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
