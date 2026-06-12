@@ -112,7 +112,7 @@ MIN_AREA       = 400
 KP_ROT         = 0.003
 APPROACH_V     = 0.22
 PARK_SEC       = 1.2
-DETECT_CONFIRM = 3  # [조정] 시작 즉시 반응을 위해 프레임 대기 카운트를 6 -> 3으로 단축
+DETECT_CONFIRM = 3  
 
 # [바운더리] 좌우 민감도 20%
 BOTTOM_10PCT   = int(240 * 0.90)  # 216px
@@ -187,22 +187,21 @@ try:
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
 
-        # ══ START_SEARCH 모드 (시작 시 즉시 포착 기능 강화) ══════════════
+        # ══ START_SEARCH 모드 (시작 시 탐색) ═════════════════════════════
         if mode == "START_SEARCH":
             if found:
                 detect_count += 1
-                # [개선] 시작하자마자 정면에 객체가 보이면 제자리 회전 명령을 주지 않고 즉시 출발
                 if detect_count >= DETECT_CONFIRM:
                     detect_count = 0
                     mode = "PARK"
                     park_state = "TRACK"
                     print(f" 즉시 포착 성공! 회전 없이 [{target}] 미션 바로 진입.")
                     continue
-                v, w = 0.0, 0.0  # 탐색 카운트 채우는 짧은 순간에는 정지
+                v, w = 0.0, 0.0  
             else:
                 detect_count = 0
-                # [개선] 객체가 안 보일 때만 매우 조심스럽고 느린 속도(0.4)로 제자리 회전 탐색
-                v, w = 0.0, 0.4  # 기존 0.8 -> 0.4로 하향
+                # [수정] 초기 제자리 회전 탐색 속도를 0.4 -> 0.8로 상향
+                v, w = 0.0, 0.8  
 
             send_cmd(v, w)
             cv2.putText(frame, "MODE: START_SEARCH", (10, 25), 0, 0.5, (0, 255, 255), 1)
@@ -244,22 +243,21 @@ try:
                     continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
 
-            # 2. 객체 추적 중 (TRACK - 버그 전면 수정)
+            # 2. 객체 추적 중 (TRACK)
             elif found:
                 park_state = "TRACK"
-                w_cam = -KP_ROT * err_x  # 카메라 정렬 조향 성분 (기본값)
+                w_cam = -KP_ROT * err_x  
 
-                # [버그 수정 복구] 장애물 거리에 무관하게 항상 카메라 정렬 성분(w_cam)을 합성하도록 제어식 복원
                 if fm >= THRESH_SLOW:
                     v, w = APPROACH_V, w_cam
                 else:
                     w_lid = adir * 1.0
                     if fm < THRESH_STOP: 
-                        v, w = 0.09, adir * 1.5  # 최우선 초근접 회피 상황
+                        v, w = 0.09, adir * 1.5  
                     elif fm < THRESH_TURN: 
-                        v, w = 0.13, 0.6 * w_lid + 0.4 * w_cam  # 라이다 회피 가중치 + 카메라 정렬 결합
+                        v, w = 0.13, 0.6 * w_lid + 0.4 * w_cam  
                     else: 
-                        v, w = 0.18, 0.3 * (adir * 0.7) + 0.7 * w_cam  # 카메라 정렬 가중치 우세
+                        v, w = 0.18, 0.3 * (adir * 0.7) + 0.7 * w_cam  
                 
                 send_cmd(v, w)
                 cv2.putText(frame, f"TRACKING: {target}", (10, 25), 0, 0.6, draw, 1)
@@ -283,8 +281,8 @@ try:
                         w = -2.00 
                         cv2.putText(frame, "ESCAPE: RIGHT SIDE! SNAP TURN", (10, 50), 0, 0.5, (0, 0, 255), 2)
                     else:
-                        # 평시 서칭 속도 역시 부드럽게 0.4로 통일하여 매끄럽게 회전하도록 매칭
-                        w = -0.4 if last_seen_x > cx_mid else 0.4  
+                        # [수정] 평시 미션 전환/유실 서칭 각속도 역시 0.4 -> 0.8로 상향 동기화
+                        w = -0.8 if last_seen_x > cx_mid else 0.8  
                     
                     send_cmd(v, w)
                     cv2.putText(frame, f"SEARCHING: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
