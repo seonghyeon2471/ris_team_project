@@ -80,7 +80,7 @@ def send_cmd(v, w):
     v = np.clip(v, -0.4, 0.4)
     w = np.clip(w, -2.2, 2.2)  # [상향] 기존 2.0 -> 2.2로 최대치 살짝 확대
     # [버그 수정] 기존 -w 전달 방식이 조향을 반대로 가르키고 있었다면, w로 정상화합니다.
-    arduino_ser.write(f"{v:.3f},{w:.3f}\n".encode())
+    arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
 def stop_robot(): send_cmd(0.0, 0.0)
 
