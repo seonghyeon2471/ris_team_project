@@ -16,7 +16,7 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 time.sleep(1.0)
-cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
 cap.set(cv2.CAP_PROP_AUTO_WB, 0)
 
 # ── LIDAR BOOT ────────────────────────────────────────────────────────
@@ -85,13 +85,13 @@ def stop_robot(): send_cmd(0.0, 0.0)
 
 # ── COLOR CONFIG (새로운 HSV 값 반영) ──────────────────────────────────
 COLOR_CFG = {
-    "red":    {"hsv1": ([169, 136, 175], [179, 207, 255]),
+    "red":    {"hsv1": ([169, 168, 96], [179, 222, 157]),
                "hsv2": None,
                "bgr":  ([20, 20, 80],  [255, 255, 255]), "draw": (0, 0, 255)},
-    "yellow": {"hsv1": ([24, 19, 214], [41, 124, 255]),
+    "yellow": {"hsv1": ([16, 137, 142], [30, 214, 195]),
                "hsv2": None,
                "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
-    "blue":   {"hsv1": ([[98, 96, 175], [138, 168, 214]]),
+    "blue":   {"hsv1": ([[106, 168, 54], [131, 210, 82]]),
                "hsv2": None,
                "bgr":  ([40,  0,   0], [255, 220, 220]), "draw": (255, 80, 0)},
 }
@@ -125,7 +125,6 @@ park_state    = "TRACK"
 last_seen_x   = 160
 last_bottom_y = 0
 park_t        = None
-LOST_BOTTOM_COUNT = 0
 
 print(f"START | MISSION: {MISSION}")
 
@@ -160,20 +159,14 @@ try:
         if found:
             bx, by_top, bw, bh = cv2.boundingRect(big)
             ox     = bx + bw // 2
-            by_bot = by_top + bh
-            err_x = ox - cx_mid
-
+            by_bot = min(by_top + bh, 239)
+            err_x  = ox - cx_mid
+            last_seen_x   = ox
             last_bottom_y = by_bot
 
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
             cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
-        else:
-            # 객체가 안 보임
-            if last_bottom_y >= BOTTOM_10PCT:
-                LOST_BOTTOM_COUNT += 1
-            else:
-                LOST_BOTTOM_COUNT = 0
 
         # ══ LIDAR 모드 ═══════════════════════════════════════════
         if mode == "LIDAR":
@@ -197,13 +190,6 @@ try:
             cv2.putText(frame, "MODE: LIDAR", (10, 25), 0, 0.5, (255, 255, 255), 1)
 
         # ══ PARK 모드 (추적 / 정차 / 탐색) ══════════════════════════
-        LOST_BOTTOM_COUNT = 0
-
-        if LOST_BOTTOM_COUNT > 5:
-            stop_robot()
-            print("OBJECT LEFT BOTTOM → STOP")
-            break   # 또는 mode 변경
-        
         elif mode == "PARK":
             # 1. 정차 중 (PARKING)
             if park_state == "PARKING":
@@ -211,25 +197,11 @@ try:
                 elapsed = time.time() - park_t
                 if elapsed >= PARK_SEC:
                     mission_idx += 1
-                    if elapsed >= PARK_SEC:
-                        mission_idx += 1
-                        if mission_idx < len(MISSION):
-                            park_state = "POST_FORWARD"
-                            post_t = time.time()
-                            post_forward_done = False
-                            continue
-                        elif park_state == "POST_FORWARD":
-
-                            # 2초 동안만 직진
-                            if time.time() - post_t < 2.0:
-                                send_cmd(0.18, 0.0)   # 직진
-                                cv2.putText(frame, "POST FORWARD", (10, 25), 0, 0.6, draw, 2)
-
-                            else:
-                                # 2초 끝 → 완전 정지
-                                stop_robot()
-                                park_state = "SEARCH"
-                                print("POST FORWARD 완료 → STOP 후 SEARCH")
+                    if mission_idx < len(MISSION):
+                        park_state = "SEARCH"
+                        last_seen_x = cx_mid + 40 # 주차 후 약간 우회전하며 탐색 유도
+                        print(f"다음 미션 [{MISSION[mission_idx]}] 탐색 회전 시작")
+                    continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
 
             # 2. 객체 추적 중 (TRACK)
