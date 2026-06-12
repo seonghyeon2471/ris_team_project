@@ -5,11 +5,9 @@ import time
 import math
 import threading
 
-# ── SERIAL ────────────────────────────────────────────────────────────
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
 lidar_ser   = serial.Serial("/dev/ttyUSB0",  460800, timeout=0.1)
 
-# ── CAMERA ────────────────────────────────────────────────────────────
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH,  320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
@@ -19,7 +17,6 @@ time.sleep(1.0)
 cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
 cap.set(cv2.CAP_PROP_AUTO_WB, 0)
 
-# ── LIDAR BOOT ────────────────────────────────────────────────────────
 lidar_ser.write(bytes([0xA5, 0x40]))
 time.sleep(2)
 lidar_ser.reset_input_buffer()
@@ -27,7 +24,6 @@ lidar_ser.write(bytes([0xA5, 0x20]))
 lidar_ser.read(7)
 print("LIDAR OK")
 
-# ── LIDAR ─────────────────────────────────────────────────────────────
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
 FRONT_RANGE  = 45
@@ -81,7 +77,6 @@ def front_min(scan):
 def avoid_dir(scan):
     return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
 
-# ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
     v = np.clip(v, -0.4, 0.4)
     w = np.clip(w, -1.6, 1.6)
@@ -90,26 +85,10 @@ def send_cmd(v, w):
 def stop_robot():
     send_cmd(0.0, 0.0)
 
-# ── COLOR CONFIG ──────────────────────────────────────────────────────
 COLOR_CFG = {
-    "red": {
-        "hsv1": ([169, 168, 96], [179, 222, 157]),
-        "hsv2": None,
-        "bgr": ([20, 20, 80], [255, 255, 255]),
-        "draw": (0, 0, 255)
-    },
-    "yellow": {
-        "hsv1": ([16, 137, 142], [30, 214, 195]),
-        "hsv2": None,
-        "bgr": ([0, 80, 80], [255, 255, 255]),
-        "draw": (0, 200, 255)
-    },
-    "blue": {
-        "hsv1": ([106, 168, 54], [131, 210, 82]),
-        "hsv2": None,
-        "bgr": ([40, 0, 0], [255, 220, 220]),
-        "draw": (255, 80, 0)
-    },
+    "red": {"hsv1": ([169, 168, 96], [179, 222, 157]), "hsv2": None, "bgr": ([20, 20, 80], [255, 255, 255]), "draw": (0, 0, 255)},
+    "yellow": {"hsv1": ([16, 137, 142], [30, 214, 195]), "hsv2": None, "bgr": ([0, 80, 80], [255, 255, 255]), "draw": (0, 200, 255)},
+    "blue": {"hsv1": ([106, 168, 54], [131, 210, 82]), "hsv2": None, "bgr": ([40, 0, 0], [255, 220, 220]), "draw": (255, 80, 0)},
 }
 MISSION = ["red", "yellow", "blue"]
 
@@ -123,16 +102,14 @@ def make_mask(frame, hsv, name):
     bm = cv2.inRange(frame, np.array(cfg["bgr"][0]), np.array(cfg["bgr"][1]))
     return cv2.bitwise_and(m, bm)
 
-# ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA = 400
 KP_ROT = 0.003
 APPROACH_V = 0.22
 PARK_SEC = 1.2
 DETECT_CONFIRM = 6
-BOTTOM_10PCT = int(240 * 0.94)  # [수정] 216px → 225px (더 가까이서 주차)
-PARK_X_TOLERANCE = 20  # [새로 추가] 중앙 정렬 오차: 30 → 20px
+BOTTOM_10PCT = int(240 * 0.94)
+PARK_X_TOLERANCE = 20
 
-# ── STATE ─────────────────────────────────────────────────────────────
 mode = "LIDAR"
 mission_idx = 0
 detect_count = 0
@@ -141,9 +118,12 @@ last_seen_x = 160
 last_bottom_y = 0
 park_t = None
 
+# [핵심 수정] 라이다 회피 상태 + 색상 우선 탐색
+last_found_target = None  # 최근 발견된 색상 저장
+color_detected = False    # 현재 프레임에서 색상 발견 플래그
+
 print(f"START | MISSION: {MISSION}")
 
-# ── MAIN LOOP ─────────────────────────────────────────────────────────
 try:
     while True:
         ret, frame = cap.read()
@@ -186,20 +166,27 @@ try:
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
 
-        # ══ LIDAR 모드 ═══════════════════════════════════════════
+        # [핵심 수정] 라이다 회피 기반 + 색상 발견 시 즉시 주차
         if mode == "LIDAR":
+            # [수정] 색상 발견 시 즉시 PARK 로 전환 (빙글빙글 방지)
             if found:
+                color_detected = True
+                last_found_target = target
                 detect_count += 1
+
+                if detect_count >= DETECT_CONFIRM:
+                    detect_count = 0
+                    mode = "PARK"
+                    park_state = "TRACK"
+                    color_detected = False
+                    print(f"[{target}] 발견 {detect_count}회 → 즉시 주차 시작")
+                    continue
             else:
+                # 색상이 아예 안 보일 때만 리셋
                 detect_count = 0
+                color_detected = False
 
-            if detect_count >= DETECT_CONFIRM:
-                detect_count = 0
-                mode = "PARK"
-                park_state = "TRACK"
-                print(f"[{target}] 발견 → 추적 시작")
-                continue
-
+            # 라이다 회피 주행 (기존 유지)
             if fm < THRESH_STOP:
                 v, w = 0.09, adir * 0.9
             elif fm < THRESH_TURN:
@@ -208,12 +195,13 @@ try:
                 v, w = 0.18, adir * 0.4
             else:
                 v, w = 0.28, 0.0
-            send_cmd(v, w)
-            cv2.putText(frame, "MODE: LIDAR", (10, 25), 0, 0.5, (255, 255, 255), 1)
 
-        # ══ PARK 모드 (추적 / 정차 / 탐색) ══════════════════════════
+            send_cmd(v, w)
+            cv2.putText(frame, "MODE: LIDAR (walking)", (10, 25), 0, 0.5, (255, 255, 255), 1)
+            if found:
+                cv2.putText(frame, f"COLOR DETECTED: {target}", (10, 50), 0, 0.5, (0, 255, 0), 2)
+
         elif mode == "PARK":
-            # 1. 정차 중 (PARKING)
             if park_state == "PARKING":
                 stop_robot()
                 elapsed = time.time() - park_t
@@ -222,15 +210,22 @@ try:
                     if mission_idx < len(MISSION):
                         park_state = "SEARCH"
                         last_seen_x = cx_mid + 40
-                        print(f"다음 미션 [{MISSION[mission_idx]}] 탐색 회전 시작")
-                    continue
+                        mode = "LIDAR"  # [수정] 다음 미션은 다시 LIDAR 회피 주행
+                        detect_count = 0
+                        color_detected = False
+                        print(f"다음 미션 [{MISSION[mission_idx]}] 라이다 회피 주행 시작")
+                        continue
+                    else:
+                        stop_robot()
+                        cv2.putText(frame, "ALL MISSIONS DONE", (30, H // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                        cv2.imshow("f", frame)
+                        cv2.waitKey(1)
+                        continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
 
-            # 2. 객체 추적 중 (TRACK)
             elif found:
                 park_state = "TRACK"
 
-                # [수정] 더 가까이서 + 중앙 정렬 강화
                 if by_bot >= BOTTOM_10PCT and abs(err_x) < PARK_X_TOLERANCE:
                     stop_robot()
                     park_state = "PARKING"
@@ -253,10 +248,8 @@ try:
                         v, w = 0.18, 0.3 * w_lid + 0.7 * w_cam
 
                 send_cmd(v, w)
-
                 cv2.putText(frame, f"TRACKING: {target}", (10, 25), 0, 0.6, draw, 1)
 
-            # 3. 객체 놓침 또는 다음 객체 탐색 (SEARCH)
             else:
                 park_state = "SEARCH"
                 v = 0.0
