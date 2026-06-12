@@ -211,11 +211,25 @@ try:
                 elapsed = time.time() - park_t
                 if elapsed >= PARK_SEC:
                     mission_idx += 1
-                    if mission_idx < len(MISSION):
-                        park_state = "SEARCH"
-                        last_seen_x = cx_mid + 40 # 주차 후 약간 우회전하며 탐색 유도
-                        print(f"다음 미션 [{MISSION[mission_idx]}] 탐색 회전 시작")
-                    continue
+                    if elapsed >= PARK_SEC:
+                        mission_idx += 1
+                        if mission_idx < len(MISSION):
+                            park_state = "POST_FORWARD"
+                            post_t = time.time()
+                            post_forward_done = False
+                        continue
+                        elif park_state == "POST_FORWARD":
+
+                            # 2초 동안만 직진
+                        if time.time() - post_t < 2.0:
+                            send_cmd(0.18, 0.0)   # 직진
+                            cv2.putText(frame, "POST FORWARD", (10, 25), 0, 0.6, draw, 2)
+
+                        else:
+                            # 2초 끝 → 완전 정지
+                            stop_robot()
+                            park_state = "SEARCH"
+                            print("POST FORWARD 완료 → STOP 후 SEARCH")
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
 
             # 2. 객체 추적 중 (TRACK)
