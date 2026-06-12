@@ -8,18 +8,19 @@ import math
 CAMERA_HEIGHT = 0.75   # 75cm = 0.75m
 CAMERA_TILT = np.deg2rad(30)  # 30도 아래로 기울어짐
 
-FRAME_W = 640
-FRAME_H = 480
+H, W = frame.shape[:2]
+cx_mid = W // 2
+BOTTOM_10PCT = int(H * 0.90)
 
 # USB 카메라 가정 FOV
-HFOV = np.deg2rad(60)   # horizontal FOV 60도 가정
+HFOV = np.deg2rad(60)
 VFOV = np.deg2rad(45)
 
-fx = FRAME_W / (2 * np.tan(HFOV / 2))
-fy = FRAME_H / (2 * np.tan(VFOV / 2))
+fx = W / (2 * np.tan(HFOV / 2))
+fy = H / (2 * np.tan(VFOV / 2))
 
-cx = FRAME_W / 2
-cy = FRAME_H / 2
+cx = W / 2
+cy = H / 2
 
 
 # =========================
@@ -53,12 +54,7 @@ def get_center(mask):
 # =========================
 # PIXEL → WORLD DISTANCE
 # =========================
-def pixel_to_distance(u, v):
-    """
-    카메라 픽셀 -> 바닥 평면까지 거리 (m)
-    """
-
-    # 카메라 좌표계 ray
+def pixel_to_distance(u, v, frame_h):
     x = (u - cx) / fx
     y = (v - cy) / fy
     z = 1.0
@@ -66,7 +62,6 @@ def pixel_to_distance(u, v):
     ray = np.array([x, y, z])
     ray = ray / np.linalg.norm(ray)
 
-    # 카메라 pitch rotation (x축 기준)
     pitch = CAMERA_TILT
     R = np.array([
         [1, 0, 0],
@@ -76,17 +71,16 @@ def pixel_to_distance(u, v):
 
     ray_world = R @ ray
 
-    # 바닥과 교차 (y 대신 z축 기준 사용)
-    # 여기서 world: z up 기준
+    # 바닥 교차 (y가 forward 기준이면 그대로 OK)
+    if ray_world[1] >= 0:
+        return None  # 뒤쪽 방향이면 무시
+
     t = CAMERA_HEIGHT / (-ray_world[1])
 
     X = ray_world[0] * t
     Z = ray_world[2] * t
 
-    distance = math.sqrt(X**2 + Z**2)
-
-    return distance
-
+    return math.sqrt(X**2 + Z**2)
 
 # =========================
 # MAIN LOOP
@@ -100,9 +94,20 @@ target_color = "red"
 while True:
     ret, frame = cap.read()
     if not ret:
-        break
+        continue
+
+    frame = cv2.flip(frame, 1)
+
+    H, W = frame.shape[:2]
+    cx_mid = W // 2
+    BOTTOM_10PCT = int(H * 0.90)
 
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+    fx = W / (2 * np.tan(HFOV / 2))
+    fy = H / (2 * np.tan(VFOV / 2))
+    cx = W / 2
+    cy = H / 2
 
     mask_total = None
 
