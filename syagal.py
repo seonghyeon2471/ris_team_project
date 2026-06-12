@@ -75,10 +75,10 @@ def front_min(scan):
 def avoid_dir(scan):
     return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
 
-# ── MOTOR (각속도 제한 대폭 해제) ───────────────────────────────────────
+# ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
     v = np.clip(v, -0.4, 0.4)
-    w = np.clip(w, -2.8, 2.8)  # [수정] 기존 1.6에서 2.8로 상한선 크게 확장
+    w = np.clip(w, -2.0, 2.0)  
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
 def stop_robot(): send_cmd(0.0, 0.0)
@@ -114,10 +114,10 @@ APPROACH_V     = 0.22
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 
-# [바운더리 파라미터] 좌우 외곽 10% 정의
+# [바운더리 파라미터 수정] 민감도 상향을 위해 좌우 범위를 외곽 20%로 확장
 BOTTOM_10PCT   = int(240 * 0.90)  # 216px
-LEFT_10PCT     = int(320 * 0.10)  # 32px
-RIGHT_10PCT    = int(320 * 0.90)  # 288px
+LEFT_20PCT     = int(320 * 0.20)  # 32px -> 64px (더 일찍 왼쪽 이탈로 인식)
+RIGHT_20PCT    = int(320 * 0.80)  # 288px -> 256px (더 일찍 오른쪽 이탈로 인식)
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
@@ -166,10 +166,10 @@ try:
         big   = max(cnts, key=cv2.contourArea) if cnts else None
         found = big is not None and cv2.contourArea(big) > MIN_AREA
 
-        # 디버깅용 가이드라인 선 그리기
+        # 디버깅용 가이드라인 선 그리기 (화면에서 바운더리 선이 안쪽으로 좁혀진 것을 볼 수 있습니다)
         cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
-        cv2.line(frame, (LEFT_10PCT, 0), (LEFT_10PCT, H), (255, 0, 0), 1)
-        cv2.line(frame, (RIGHT_10PCT, 0), (RIGHT_10PCT, H), (255, 0, 0), 1)
+        cv2.line(frame, (LEFT_20PCT, 0), (LEFT_20PCT, H), (255, 0, 0), 1)
+        cv2.line(frame, (RIGHT_20PCT, 0), (RIGHT_20PCT, H), (255, 0, 0), 1)
 
         if found:
             bx, by_top, bw, bh = cv2.boundingRect(big)
@@ -180,10 +180,10 @@ try:
             last_seen_x   = ox
             last_bottom_y = by_bot
             
-            # 실시간 이탈 경계면 저장
+            # 실시간 이탈 경계면 저장 (객체의 중심점 ox 기준으로 체크하여 더 정밀하게 반영)
             was_in_bottom = (by_bot >= BOTTOM_10PCT)
-            was_in_left   = (bx <= LEFT_10PCT)
-            was_in_right  = ((bx + bw) >= RIGHT_10PCT)
+            was_in_left   = (ox <= LEFT_20PCT)
+            was_in_right  = (ox >= RIGHT_20PCT)
 
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
@@ -219,7 +219,6 @@ try:
                     mission_idx += 1
                     if mission_idx < len(MISSION):
                         park_state = "SEARCH"
-                        # 주차 후 우회전 탐색 속도도 더 빠르게 기동 시퀀스로 연결되도록 유도
                         last_seen_x = cx_mid + 40 
                         was_in_bottom = was_in_left = was_in_right = False 
                         print(f"다음 미션 [{MISSION[mission_idx]}] 탐색 회전 시작")
@@ -251,16 +250,14 @@ try:
                     park_state = "SEARCH"
                     v = 0.0
                     
-                    # [강화된 초고속 바운더리 복귀 조향]
                     if was_in_left:
-                        w = 2.50  # [수정] 기존 1.60 -> 2.50으로 제자리 좌회전 대폭 강화
-                        cv2.putText(frame, "ESCAPE: LEFT SIDE! FAST SNAP TURN", (10, 50), 0, 0.5, (0, 0, 255), 2)
+                        w = 1.80  
+                        cv2.putText(frame, "ESCAPE: LEFT SIDE! SNAP TURN", (10, 50), 0, 0.5, (0, 0, 255), 2)
                     elif was_in_right:
-                        w = -2.50 # [수정] 기존 -1.60 -> -2.50으로 제자리 우회전 대폭 강화
-                        cv2.putText(frame, "ESCAPE: RIGHT SIDE! FAST SNAP TURN", (10, 50), 0, 0.5, (0, 0, 255), 2)
+                        w = -1.80 
+                        cv2.putText(frame, "ESCAPE: RIGHT SIDE! SNAP TURN", (10, 50), 0, 0.5, (0, 0, 255), 2)
                     else:
-                        # 주차 직후 다음 타겟 탐색 등 일반 SEARCH 상태 회전 속도도 상향
-                        w = -1.8 if last_seen_x > cx_mid else 1.8  # [수정] 기존 1.3 -> 1.8
+                        w = -1.4 if last_seen_x > cx_mid else 1.4  
                     
                     send_cmd(v, w)
                     cv2.putText(frame, f"SEARCHING: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
