@@ -125,6 +125,7 @@ park_state    = "TRACK"
 last_seen_x   = 160
 last_bottom_y = 0
 park_t        = None
+LOST_BOTTOM_COUNT = 0
 
 print(f"START | MISSION: {MISSION}")
 
@@ -160,9 +161,9 @@ try:
             bx, by_top, bw, bh = cv2.boundingRect(big)
             ox     = bx + bw // 2
             by_bot = by_top + bh
+            err_x = ox - cx_mid
 
             last_bottom_y = by_bot
-            LOST_BOTTOM_COUNT = 0
 
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
