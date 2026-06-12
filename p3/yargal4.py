@@ -109,7 +109,7 @@ def make_mask(frame, hsv, name):
 
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
-KP_ROT         = 0.010   # 픽셀당 회전속도 (기존 0.003 → 강화)
+KP_ROT         = 0.020   # 픽셀당 회전속도 (기존 0.003 → 강화)
 W_MIN          = 0.25    # 최소 회전 속도 (너무 약한 회전 방지)
 APPROACH_V     = 0.22
 PARK_SEC       = 1.2
@@ -278,13 +278,8 @@ try:
                             return -W_MIN if ex > 0 else W_MIN
                         return raw
 
-                    # 오차가 클수록 전진속도 줄이고 회전 위주로
-                    # err_x=0 → v=APPROACH_V, err_x=±160(화면 끝) → v=0
-                    err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
-                    reduced_v = APPROACH_V * (1.0 - err_ratio)
-
                     if fm >= THRESH_SLOW:
-                        v = reduced_v
+                        v = APPROACH_V
                         w = cam_w(err_x)
                     else:
                         w_cam = cam_w(err_x)
@@ -294,7 +289,7 @@ try:
                         elif fm < THRESH_TURN:
                             v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
                         else:
-                            v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
+                            v, w = 0.18, 0.3 * w_lid + 0.7 * w_cam
 
                     last_cmd = (v, w)
                     send_cmd(v, w)
