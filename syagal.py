@@ -29,8 +29,8 @@ print("LIDAR OK")
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
 FRONT_RANGE  = 50  
-THRESH_SLOW  = 55.0  
-THRESH_TURN  = 35.0  
+THRESH_SLOW  = 12.0  
+THRESH_TURN  = 8.0  
 THRESH_STOP  = 8.0   # 🚨 최저 정지/비상 거리를 8cm로 하향 조정
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
