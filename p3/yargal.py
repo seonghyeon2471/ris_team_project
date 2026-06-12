@@ -211,6 +211,17 @@ try:
 
                 park_state = "TRACK"
 
+                # 가까우면서 중앙이면 도착
+                if by_bot >= BOTTOM_10PCT and abs(err_x) < 20:
+
+                    stop_robot()
+
+                    park_state = "PARKING"
+                    park_t = time.time()
+
+                    print(f"[{target}] 도착 판정")
+
+                    continue
                 # 색지가 화면 아래까지 왔으면
                 if by_bot >= BOTTOM_10PCT:
 
