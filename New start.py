@@ -114,41 +114,34 @@ APPROACH_V     = 0.22
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 
-# [추적 거리 임계값 - 주차 시작 거리]
-PARK_START_DIST = 28.0   # [수정] 22 → 28cm (더 멀리서 주차 시작)
-PARK_TOLERANCE  = 5.0    # [수정] 3 → 5cm (주차 허용 오차 확대)
+PARK_START_DIST = 28.0
+PARK_TOLERANCE  = 5.0
 
-# [바운더리 파라미터]
-BOTTOM_10PCT   = int(240 * 0.90)  # 216px
-LEFT_10PCT     = int(320 * 0.10)  # 32px
-RIGHT_10PCT    = int(320 * 0.90)  # 288px
+BOTTOM_10PCT   = int(240 * 0.90)
+LEFT_10PCT     = int(320 * 0.10)
+RIGHT_10PCT    = int(320 * 0.90)
 
-# [파란색 전용 중앙 정렬 보정]
-BLUE_CENTER_OFFSET = 0   # [새로 추가] 파란색 x-편차 보정 (0: 중앙 정렬)
+BLUE_CENTER_OFFSET = 0
 
-# ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
 mission_idx   = 0
 detect_count  = 0
 
-# PARK 세부 상태
 park_state    = "TRACK"
 last_seen_x   = 160
 last_bottom_y = 0
-last_target_x = 160   # [새로 추가] 마지막 목표 객체 x-위치 저장
+last_target_x = 160
 
-# 경계 상태 플래그
 was_in_bottom = False
 was_in_left   = False
 was_in_right  = False
 
 park_t        = None
-avoid_started = False   # [새로 추가] 장애물 회피 시작 플래그
-avoid_pos     = None    # [새로 추가] 회피 시작 당시 목표 객체 위치
+avoid_started = False
+avoid_pos     = None
 
 print(f"START | MISSION: {MISSION}")
 
-# ── MAIN LOOP ─────────────────────────────────────────────────────────
 try:
     while True:
         ret, frame = cap.read()
@@ -173,12 +166,9 @@ try:
 
         mask = make_mask(frame, hsv, target)
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-
-big   = max(cnts, key=cv2.contourArea) if cnts else None
+        big = max(cnts, key=cv2.contourArea) if cnts else None
         found = big is not None and cv2.contourArea(big) > MIN_AREA
 
-        # 디버깅용 가이드라인 선 그리기
         cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
         cv2.line(frame, (LEFT_10PCT, 0), (LEFT_10PCT, H), (255, 0, 0), 1)
         cv2.line(frame, (RIGHT_10PCT, 0), (RIGHT_10PCT, H), (255, 0, 0), 1)
@@ -188,7 +178,6 @@ big   = max(cnts, key=cv2.contourArea) if cnts else None
             ox     = bx + bw // 2
             by_bot = min(by_top + bh, 239)
             
-            # [수정] 파란색 전용 중앙 보정 적용
             if target == "blue":
                 ox += BLUE_CENTER_OFFSET
             
@@ -196,9 +185,8 @@ big   = max(cnts, key=cv2.contourArea) if cnts else None
             
             last_seen_x   = ox
             last_bottom_y = by_bot
-            last_target_x = ox   # [새로 추가] 마지막 목표 x-위치 저장
+            last_target_x = ox
             
-            # 실시간 이탈 경계면 저장
             was_in_bottom = (by_bot >= BOTTOM_10PCT)
             was_in_left   = (bx <= LEFT_10PCT)
             was_in_right  = ((bx + bw) >= RIGHT_10PCT)
@@ -206,7 +194,6 @@ big   = max(cnts, key=cv2.contourArea) if cnts else None
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
 
-        # ══ LIDAR 모드 ═══════════════════════════════════════════
         if mode == "LIDAR":
             if found:
                 detect_count += 1
@@ -217,15 +204,13 @@ big   = max(cnts, key=cv2.contourArea) if cnts else None
                 detect_count = 0
                 mode = "PARK"
                 park_state = "TRACK"
-                avoid_started = False   # [새로 추가] 회피 플래그 초기화
+                avoid_started = False
                 avoid_pos     = None
                 print(f"[{target}] 발견 → 추적 시작")
                 continue
 
-            # [수정] 장애물 회피 시 주차 안 하고 원래 목표 계속 추적
             if fm < THRESH_STOP:
                 v, w = 0.09, adir * 0.9
-                # [새로 추가] 회피 시작 시 목표 위치 저장
                 if found and not avoid_started:
                     avoid_started = True
                     avoid_pos = last_target_x
@@ -242,9 +227,7 @@ big   = max(cnts, key=cv2.contourArea) if cnts else None
             if avoid_started:
                 cv2.putText(frame, "AVOIDING OBSTACLE...", (10, 50), 0, 0.5, (255, 0, 0), 2)
 
-        # ══ PARK 모드 (추적 / 정차 / 탐색) ══════════════════════════
         elif mode == "PARK":
-            # 1. 정차 중 (PARKING)
             if park_state == "PARKING":
                 stop_robot()
                 elapsed = time.time() - park_t if park_t else 0
@@ -253,16 +236,14 @@ big   = max(cnts, key=cv2.contourArea) if cnts else None
                     print(f"[PARKING 완료] mission_idx 증가: {mission_idx-1} → {mission_idx}")
                     
                     if mission_idx < len(MISSION):
-                        # [수정] park_state 를 SEARCH 로 변경 + park_t 재설정 방지
                         park_state = "SEARCH"
-                        park_t = None  # [새로 추가] 다음 PARKING 에서 시간 계산 오류 방지
+                        park_t = None
                         last_seen_x = cx_mid + 40 
                         was_in_bottom = was_in_left = was_in_right = False 
-                        avoid_started = False   # [새로 추가] 다음 미션 회피 플래그 초기화
+                        avoid_started = False
                         avoid_pos     = None
                         print(f"다음 미션 [{MISSION[mission_idx]}] 탐색 회전 시작")
                     else:
-                        # 모든 미션 완료
                         stop_robot()
                         cv2.putText(frame, "ALL MISSIONS DONE", (30, H // 2),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
@@ -271,17 +252,14 @@ big   = max(cnts, key=cv2.contourArea) if cnts else None
                         continue
                 cv2.putText(frame, f"PARKING: {target} ({elapsed:.1f}s)", (10, 25), 0, 0.6, draw, 2)
 
-            # 2. 객체 추적 중 (TRACK)
             elif found:
                 park_state = "TRACK"
                 
-                # [수정] 거리 기반으로 주차 시작 (라이다 장애물 회피 후 원래 목표 계속 추적)
                 if fm < PARK_START_DIST:
-                    # 주차 시작 조건: 거리 + 중앙 정렬
-                    if abs(err_x) < PARK_TOLERANCE * 2:  # 픽셀 오차로 변환 가정
+                    if abs(err_x) < PARK_TOLERANCE * 2:
                         park_state = "PARKING"
                         park_t = time.time()
-                        avoid_started = False   # [새로 추가] 주차 완료 시 회피 플래그 해제
+                        avoid_started = False
                         avoid_pos     = None
                         print(f"[{target}] 주차 시작 (거리={fm:.1f}cm, err_x={err_x:.1f})")
                         continue
@@ -298,11 +276,8 @@ big   = max(cnts, key=cv2.contourArea) if cnts else None
                 if avoid_started:
                     cv2.putText(frame, f"AVOID→RETURN (target x={avoid_pos})", (10, 50), 0, 0.4, (255, 0, 0), 1)
 
-            # 3. 객체 놓침 또는 다음 객체 탐색 (SEARCH)
             else:
-                # [수정] 회피 후 원래 목표 위치로 복귀 시도
                 if avoid_started and avoid_pos is not None:
-                    # 회피 시작 시 저장된 위치로 복귀 방향 결정
                     err_to_target = avoid_pos - cx_mid
                     if abs(err_to_target) > 10:
                         w = -2.0 if err_to_target > 0 else 2.0
@@ -310,7 +285,6 @@ big   = max(cnts, key=cv2.contourArea) if cnts else None
                         send_cmd(v, w)
                         cv2.putText(frame, f"RETURNING TO target x={avoid_pos}", (10, 50), 0, 0.5, (0, 255, 0), 2)
                     else:
-                        # 복귀 완료 → 일반 SEARCH
                         avoid_started = False
                         avoid_pos     = None
                         park_state = "SEARCH"
