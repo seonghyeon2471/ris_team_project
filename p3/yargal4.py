@@ -117,8 +117,8 @@ DETECT_CONFIRM = 6
 
 # ── 도착 판정 영역: centroid가 이 영역 안에 들어오면 도착으로 판정 ──────
 # 화면 하단 중앙 구역 (y: 하단 20%, x: 좌우 40% 이내)
-ARRIVE_Y_TOP   = int(240 * 0.80)   # 세로 기준선 (이 값보다 아래면 OK)
-ARRIVE_X_MARGIN = 60               # 화면 중앙에서 ±60px 이내
+ARRIVE_Y_TOP   = int(240 * 0.85)   # 세로 기준선 (이 값보다 아래면 OK)
+ARRIVE_X_MARGIN = 40               # 화면 중앙에서 ±60px 이내
 
 # 도착 후 전진 시간 (초)
 ARRIVE_FORWARD_SEC = 1.0
