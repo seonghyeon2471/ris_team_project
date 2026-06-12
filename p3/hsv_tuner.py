@@ -1,10 +1,27 @@
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+PROJECT HSV + BGR TUNER
+
+1 : RED
+2 : YELLOW
+3 : BLUE
+
+p : 현재 설정 출력
+q : 종료
+
+네 color_tracking 코드의 COLOR_CFG를 직접 튜닝하기 위한 툴
+"""
+
 import cv2
 import numpy as np
 import time
 
-# =========================
+# =========================================
 # CAMERA
-# =========================
+# =========================================
 cap = cv2.VideoCapture(0)
 
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
@@ -17,162 +34,278 @@ time.sleep(1)
 cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
 cap.set(cv2.CAP_PROP_AUTO_WB, 0)
 
-kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5,5))
+# =========================================
+# DEFAULT COLOR CONFIG
+# =========================================
+COLOR_PRESET = {
+    "red": {
+        "hsv": [0, 60, 120, 12, 255, 255],
+        "bgr": [20, 20, 80, 255, 255, 255],
+        "draw": (0, 0, 255),
+    },
 
-# =========================
-# TRACKBAR
-# =========================
-cv2.namedWindow("HSV_Tuner")
+    "yellow": {
+        "hsv": [18, 15, 180, 45, 255, 255],
+        "bgr": [0, 80, 80, 255, 255, 255],
+        "draw": (0, 220, 255),
+    },
 
-for name, maxv in [
-    ("H_MIN",179),
-    ("H_MAX",179),
-    ("S_MIN",255),
-    ("S_MAX",255),
-    ("V_MIN",255),
-    ("V_MAX",255),
-]:
-    cv2.createTrackbar(name,"HSV_Tuner",0,maxv,lambda x:None)
+    "blue": {
+        "hsv": [95, 50, 50, 130, 255, 255],
+        "bgr": [40, 0, 0, 255, 220, 220],
+        "draw": (255, 100, 0),
+    }
+}
 
-# 초기값
-cv2.setTrackbarPos("H_MAX","HSV_Tuner",179)
-cv2.setTrackbarPos("S_MAX","HSV_Tuner",255)
-cv2.setTrackbarPos("V_MAX","HSV_Tuner",255)
+current_color = "red"
 
-color_name = "RED"
+# =========================================
+# WINDOW
+# =========================================
+cv2.namedWindow("TUNER", cv2.WINDOW_NORMAL)
 
+# HSV
+cv2.createTrackbar("H_LO", "TUNER", 0, 179, lambda x: None)
+cv2.createTrackbar("S_LO", "TUNER", 0, 255, lambda x: None)
+cv2.createTrackbar("V_LO", "TUNER", 0, 255, lambda x: None)
+
+cv2.createTrackbar("H_HI", "TUNER", 179, 179, lambda x: None)
+cv2.createTrackbar("S_HI", "TUNER", 255, 255, lambda x: None)
+cv2.createTrackbar("V_HI", "TUNER", 255, 255, lambda x: None)
+
+# BGR
+cv2.createTrackbar("B_LO", "TUNER", 0, 255, lambda x: None)
+cv2.createTrackbar("G_LO", "TUNER", 0, 255, lambda x: None)
+cv2.createTrackbar("R_LO", "TUNER", 0, 255, lambda x: None)
+
+cv2.createTrackbar("B_HI", "TUNER", 255, 255, lambda x: None)
+cv2.createTrackbar("G_HI", "TUNER", 255, 255, lambda x: None)
+cv2.createTrackbar("R_HI", "TUNER", 255, 255, lambda x: None)
+
+kernel = cv2.getStructuringElement(
+    cv2.MORPH_RECT,
+    (5, 5)
+)
+
+# =========================================
+# LOAD PRESET
+# =========================================
+def load_color(name):
+
+    hsv = COLOR_PRESET[name]["hsv"]
+    bgr = COLOR_PRESET[name]["bgr"]
+
+    cv2.setTrackbarPos("H_LO", "TUNER", hsv[0])
+    cv2.setTrackbarPos("S_LO", "TUNER", hsv[1])
+    cv2.setTrackbarPos("V_LO", "TUNER", hsv[2])
+
+    cv2.setTrackbarPos("H_HI", "TUNER", hsv[3])
+    cv2.setTrackbarPos("S_HI", "TUNER", hsv[4])
+    cv2.setTrackbarPos("V_HI", "TUNER", hsv[5])
+
+    cv2.setTrackbarPos("B_LO", "TUNER", bgr[0])
+    cv2.setTrackbarPos("G_LO", "TUNER", bgr[1])
+    cv2.setTrackbarPos("R_LO", "TUNER", bgr[2])
+
+    cv2.setTrackbarPos("B_HI", "TUNER", bgr[3])
+    cv2.setTrackbarPos("G_HI", "TUNER", bgr[4])
+    cv2.setTrackbarPos("R_HI", "TUNER", bgr[5])
+
+load_color("red")
+
+print("=" * 60)
 print("1 : RED")
 print("2 : YELLOW")
 print("3 : BLUE")
-print("s : 현재 HSV 출력")
-print("ESC : 종료")
+print("p : PRINT CONFIG")
+print("q : QUIT")
+print("=" * 60)
 
+# =========================================
+# MAIN LOOP
+# =========================================
 while True:
 
     ret, frame = cap.read()
+
     if not ret:
         continue
 
-    frame = cv2.flip(frame,1)
+    frame = cv2.flip(frame, 1)
 
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    hsv = cv2.cvtColor(
+        frame,
+        cv2.COLOR_BGR2HSV
+    )
 
-    h_min = cv2.getTrackbarPos("H_MIN","HSV_Tuner")
-    h_max = cv2.getTrackbarPos("H_MAX","HSV_Tuner")
+    # -----------------------------
+    # TRACKBAR READ
+    # -----------------------------
+    H_LO = cv2.getTrackbarPos("H_LO", "TUNER")
+    S_LO = cv2.getTrackbarPos("S_LO", "TUNER")
+    V_LO = cv2.getTrackbarPos("V_LO", "TUNER")
 
-    s_min = cv2.getTrackbarPos("S_MIN","HSV_Tuner")
-    s_max = cv2.getTrackbarPos("S_MAX","HSV_Tuner")
+    H_HI = cv2.getTrackbarPos("H_HI", "TUNER")
+    S_HI = cv2.getTrackbarPos("S_HI", "TUNER")
+    V_HI = cv2.getTrackbarPos("V_HI", "TUNER")
 
-    v_min = cv2.getTrackbarPos("V_MIN","HSV_Tuner")
-    v_max = cv2.getTrackbarPos("V_MAX","HSV_Tuner")
+    B_LO = cv2.getTrackbarPos("B_LO", "TUNER")
+    G_LO = cv2.getTrackbarPos("G_LO", "TUNER")
+    R_LO = cv2.getTrackbarPos("R_LO", "TUNER")
 
-    lower = np.array([h_min,s_min,v_min])
-    upper = np.array([h_max,s_max,v_max])
+    B_HI = cv2.getTrackbarPos("B_HI", "TUNER")
+    G_HI = cv2.getTrackbarPos("G_HI", "TUNER")
+    R_HI = cv2.getTrackbarPos("R_HI", "TUNER")
 
-    mask = cv2.inRange(hsv, lower, upper)
+    hsv_mask = cv2.inRange(
+        hsv,
+        np.array([H_LO, S_LO, V_LO]),
+        np.array([H_HI, S_HI, V_HI])
+    )
 
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    bgr_mask = cv2.inRange(
+        frame,
+        np.array([B_LO, G_LO, R_LO]),
+        np.array([B_HI, G_HI, R_HI])
+    )
 
-    contours,_ = cv2.findContours(
-        mask,
+    final_mask = cv2.bitwise_and(
+        hsv_mask,
+        bgr_mask
+    )
+
+    final_mask = cv2.morphologyEx(
+        final_mask,
+        cv2.MORPH_OPEN,
+        kernel
+    )
+
+    final_mask = cv2.morphologyEx(
+        final_mask,
+        cv2.MORPH_CLOSE,
+        kernel
+    )
+
+    result = cv2.bitwise_and(
+        frame,
+        frame,
+        mask=final_mask
+    )
+
+    # -----------------------------
+    # DETECTION
+    # -----------------------------
+    contours, _ = cv2.findContours(
+        final_mask,
         cv2.RETR_EXTERNAL,
         cv2.CHAIN_APPROX_SIMPLE
     )
 
-    detect_frame = frame.copy()
+    if contours:
 
-    largest_area = 0
-
-    for c in contours:
-
-        area = cv2.contourArea(c)
-
-        if area < 300:
-            continue
-
-        if area > largest_area:
-            largest_area = area
-
-        rect = cv2.minAreaRect(c)
-        box = cv2.boxPoints(rect)
-        box = np.int32(box)
-
-        cv2.drawContours(
-            detect_frame,
-            [box],
-            0,
-            (0,255,0),
-            2
+        largest = max(
+            contours,
+            key=cv2.contourArea
         )
 
+        area = cv2.contourArea(largest)
+
+        if area > 300:
+
+            rect = cv2.minAreaRect(largest)
+            box = cv2.boxPoints(rect)
+            box = np.int32(box)
+
+            cx = int(rect[0][0])
+            cy = int(rect[0][1])
+
+            cv2.drawContours(
+                frame,
+                [box],
+                0,
+                COLOR_PRESET[current_color]["draw"],
+                2
+            )
+
+            cv2.circle(
+                frame,
+                (cx, cy),
+                5,
+                (0, 255, 0),
+                -1
+            )
+
+            cv2.putText(
+                frame,
+                f"AREA:{int(area)}",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0,255,0),
+                2
+            )
+
     cv2.putText(
-        detect_frame,
-        f"COLOR : {color_name}",
-        (10,25),
+        frame,
+        f"COLOR : {current_color}",
+        (10, 60),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.7,
-        (0,255,0),
+        (255,255,255),
         2
     )
 
-    cv2.putText(
-        detect_frame,
-        f"AREA : {int(largest_area)}",
-        (10,55),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (0,255,0),
-        2
-    )
+    top = np.hstack([
+        frame,
+        cv2.cvtColor(hsv_mask, cv2.COLOR_GRAY2BGR)
+    ])
 
-    cv2.imshow("Camera", detect_frame)
-    cv2.imshow("Mask", mask)
+    bottom = np.hstack([
+        cv2.cvtColor(bgr_mask, cv2.COLOR_GRAY2BGR),
+        cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR)
+    ])
+
+    display = np.vstack([top, bottom])
+
+    cv2.imshow(
+        "TUNER",
+        display
+    )
 
     key = cv2.waitKey(1) & 0xFF
 
-    if key == 27:
+    if key == ord('q'):
         break
 
     elif key == ord('1'):
-        color_name = "RED"
-
-        cv2.setTrackbarPos("H_MIN","HSV_Tuner",0)
-        cv2.setTrackbarPos("H_MAX","HSV_Tuner",12)
-        cv2.setTrackbarPos("S_MIN","HSV_Tuner",60)
-        cv2.setTrackbarPos("S_MAX","HSV_Tuner",255)
-        cv2.setTrackbarPos("V_MIN","HSV_Tuner",120)
-        cv2.setTrackbarPos("V_MAX","HSV_Tuner",255)
+        current_color = "red"
+        load_color(current_color)
 
     elif key == ord('2'):
-        color_name = "YELLOW"
-
-        cv2.setTrackbarPos("H_MIN","HSV_Tuner",18)
-        cv2.setTrackbarPos("H_MAX","HSV_Tuner",45)
-        cv2.setTrackbarPos("S_MIN","HSV_Tuner",15)
-        cv2.setTrackbarPos("S_MAX","HSV_Tuner",255)
-        cv2.setTrackbarPos("V_MIN","HSV_Tuner",180)
-        cv2.setTrackbarPos("V_MAX","HSV_Tuner",255)
+        current_color = "yellow"
+        load_color(current_color)
 
     elif key == ord('3'):
-        color_name = "BLUE"
+        current_color = "blue"
+        load_color(current_color)
 
-        cv2.setTrackbarPos("H_MIN","HSV_Tuner",95)
-        cv2.setTrackbarPos("H_MAX","HSV_Tuner",130)
-        cv2.setTrackbarPos("S_MIN","HSV_Tuner",50)
-        cv2.setTrackbarPos("S_MAX","HSV_Tuner",255)
-        cv2.setTrackbarPos("V_MIN","HSV_Tuner",50)
-        cv2.setTrackbarPos("V_MAX","HSV_Tuner",255)
+    elif key == ord('p'):
 
-    elif key == ord('s'):
+        print("\n" + "=" * 50)
 
-        print()
-        print(f"{color_name}")
+        print(f'"{current_color}": {{')
         print(
-            f'"hsv1": ([{h_min}, {s_min}, {v_min}], '
-            f'[{h_max}, {s_max}, {v_max}]),'
+            f'    "hsv1": ([{H_LO}, {S_LO}, {V_LO}], '
+            f'[{H_HI}, {S_HI}, {V_HI}]),'
         )
-        print()
+        print(
+            f'    "bgr": ([{B_LO}, {G_LO}, {R_LO}], '
+            f'[{B_HI}, {G_HI}, {R_HI}]),'
+        )
+        print("},")
+
+        print("=" * 50)
 
 cap.release()
 cv2.destroyAllWindows()
+```
