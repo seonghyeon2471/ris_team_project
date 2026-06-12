@@ -173,7 +173,9 @@ try:
 
         mask = make_mask(frame, hsv, target)
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        big   = max(cnts, key=cv2.contourArea) if cnts else None
+        
+
+big   = max(cnts, key=cv2.contourArea) if cnts else None
         found = big is not None and cv2.contourArea(big) > MIN_AREA
 
         # 디버깅용 가이드라인 선 그리기
@@ -245,18 +247,29 @@ try:
             # 1. 정차 중 (PARKING)
             if park_state == "PARKING":
                 stop_robot()
-                elapsed = time.time() - park_t
+                elapsed = time.time() - park_t if park_t else 0
                 if elapsed >= PARK_SEC:
                     mission_idx += 1
+                    print(f"[PARKING 완료] mission_idx 증가: {mission_idx-1} → {mission_idx}")
+                    
                     if mission_idx < len(MISSION):
+                        # [수정] park_state 를 SEARCH 로 변경 + park_t 재설정 방지
                         park_state = "SEARCH"
+                        park_t = None  # [새로 추가] 다음 PARKING 에서 시간 계산 오류 방지
                         last_seen_x = cx_mid + 40 
                         was_in_bottom = was_in_left = was_in_right = False 
                         avoid_started = False   # [새로 추가] 다음 미션 회피 플래그 초기화
                         avoid_pos     = None
                         print(f"다음 미션 [{MISSION[mission_idx]}] 탐색 회전 시작")
-                    continue
-                cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
+                    else:
+                        # 모든 미션 완료
+                        stop_robot()
+                        cv2.putText(frame, "ALL MISSIONS DONE", (30, H // 2),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                        cv2.imshow("f", frame)
+                        cv2.waitKey(1)
+                        continue
+                cv2.putText(frame, f"PARKING: {target} ({elapsed:.1f}s)", (10, 25), 0, 0.6, draw, 2)
 
             # 2. 객체 추적 중 (TRACK)
             elif found:
