@@ -211,7 +211,6 @@ try:
 
                 # 가까우면서 중앙이면 도착
                 if by_bot >= BOTTOM_10PCT and abs(err_x) < 30:
-                    time.sleep(1)
                     stop_robot()
 
                     park_state = "PARKING"
