@@ -16,7 +16,7 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 time.sleep(1.0)
-cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+cap.set(cv2.CAP_PROP_EXPOSURE, -6)
 cap.set(cv2.CAP_PROP_AUTO_WB, 0)
 
 # ── LIDAR BOOT ────────────────────────────────────────────────────────
