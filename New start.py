@@ -127,8 +127,9 @@ MIN_AREA = 400
 KP_ROT = 0.003
 APPROACH_V = 0.22
 PARK_SEC = 1.2
-BOTTOM_10PCT = int(240 * 0.80)  # [수정] 225px → 192px (색상이 조금만 가까이 가면 주차)
-PARK_X_TOLERANCE = 30  # [수정] 20 → 30px (중앙 오차 완화)
+# [수정] 라이다 거리로 주차 판단 (3cm 전 안 멈추게)
+PARK_DIST = 8.0  # 8cm 이내에서 주차 (3cm 전 → 바로 앞에)
+PARK_X_TOLERANCE = 30
 
 mission_idx = 0
 parking = False
@@ -164,15 +165,11 @@ try:
         big = max(cnts, key=cv2.contourArea) if cnts else None
         found = big is not None and cv2.contourArea(big) > MIN_AREA
 
-        cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
-
         err_x = 0
-        by_bot = 0
 
         if found:
             bx, by_top, bw, bh = cv2.boundingRect(big)
             ox = bx + bw // 2
-            by_bot = min(by_top + bh, 239)
             err_x = ox - cx_mid
             last_seen_x = ox
 
@@ -198,17 +195,17 @@ try:
                     continue
             continue
 
-        scan = get_scan()
         front_min = get_front_min()
         avoid_dir = choose_avoid_direction()
 
         if found:
-            print(f"[DEBUG] by_bot={by_bot}, BOTTOM_10PCT={BOTTOM_10PCT}, err_x={err_x}")
-            if by_bot >= BOTTOM_10PCT and abs(err_x) < PARK_X_TOLERANCE:
+            print(f"[DEBUG] front_min={front_min:.1f}cm, PARK_DIST={PARK_DIST}cm, err_x={err_x}")
+            # [핵심 수정] 라이다 거리로 주차 판단 (3cm 전 안 멈춤)
+            if front_min < PARK_DIST and abs(err_x) < PARK_X_TOLERANCE:
                 parking = True
                 park_t = time.time()
                 cv2.putText(frame, f"PARKING NOW: {target}", (10, 50), 0, 0.7, draw, 2)
-                print(f"[{target}] 즉시 주차 ✅")
+                print(f"[{target}] 즉시 주차 ✅ (거리={front_min:.1f}cm)")
                 continue
             else:
                 if front_min >= THRESH_30:
