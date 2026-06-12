@@ -16,7 +16,7 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 time.sleep(1.0)
-cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
 cap.set(cv2.CAP_PROP_AUTO_WB, 0)
 
 # ── LIDAR BOOT ────────────────────────────────────────────────────────
@@ -85,13 +85,13 @@ def stop_robot(): send_cmd(0.0, 0.0)
 
 # ── COLOR CONFIG (새로운 HSV 값 반영) ──────────────────────────────────
 COLOR_CFG = {
-    "red":    {"hsv1": ([169, 168, 96], [179, 222, 157]),
+    "red":    {"hsv1": ([169, 136, 175], [179, 207, 255]),
                "hsv2": None,
                "bgr":  ([20, 20, 80],  [255, 255, 255]), "draw": (0, 0, 255)},
-    "yellow": {"hsv1": ([16, 137, 142], [30, 214, 195]),
+    "yellow": {"hsv1": ([24, 19, 214], [41, 124, 255]),
                "hsv2": None,
                "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
-    "blue":   {"hsv1": ([[106, 168, 54], [131, 210, 82]]),
+    "blue":   {"hsv1": ([98, 96, 175], [138, 168, 214]),
                "hsv2": None,
                "bgr":  ([40,  0,   0], [255, 220, 220]), "draw": (255, 80, 0)},
 }
