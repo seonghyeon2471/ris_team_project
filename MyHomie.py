@@ -83,18 +83,18 @@ def send_cmd(v, w):
 
 def stop_robot(): send_cmd(0.0, 0.0)
 
-# ── COLOR CONFIG (수정된 HSV 범위) ────────────────────────────────────
+# ── COLOR CONFIG ──────────────────────────────────────────────────────
 COLOR_CFG = {
     "red": {
-        "hsv": [(np.array([169, 168, 96]),  np.array([179, 222, 157]))],
+        "hsv": [(np.array([169, 168,  96]), np.array([179, 222, 157]))],
         "draw": (0, 0, 255),
     },
     "yellow": {
-        "hsv": [(np.array([16, 137, 142]),  np.array([30, 214, 195]))],
+        "hsv": [(np.array([16,  137, 142]), np.array([30,  214, 195]))],
         "draw": (0, 200, 255),
     },
     "blue": {
-        "hsv": [(np.array([106, 168, 54]),  np.array([131, 210, 82]))],
+        "hsv": [(np.array([106, 168,  54]), np.array([131, 210,  82]))],
         "draw": (255, 80, 0),
     },
 }
@@ -105,33 +105,29 @@ def make_mask(frame, hsv_img, name):
     m = np.zeros(hsv_img.shape[:2], dtype=np.uint8)
     for lo, hi in cfg["hsv"]:
         m = cv2.bitwise_or(m, cv2.inRange(hsv_img, lo, hi))
-    # 노이즈 제거
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN,  kernel)
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, kernel)
     return m
 
 # ── PARAMS ────────────────────────────────────────────────────────────
-MIN_AREA       = 400
-KP_ROT         = 0.003
-APPROACH_V     = 0.22
-PARK_SEC       = 1.2
-DETECT_CONFIRM = 6          # LIDAR→PARK 전환 연속 인식 수
-BOTTOM_10PCT   = int(240 * 0.90)   # 216px
+MIN_AREA         = 400
+KP_ROT           = 0.006    # 각속도 상향 (기존 0.003 → 0.006)
+APPROACH_V       = 0.22
+PARK_SEC         = 1.2
+DETECT_CONFIRM   = 6
+BOTTOM_10PCT     = int(240 * 0.90)  # 216px
+PARK_ENTRY_GRACE = 8                # PARK 진입 직후 안정화 프레임
 
 # ── STATE ─────────────────────────────────────────────────────────────
-mode          = "LIDAR"
-mission_idx   = 0
-detect_count  = 0
-
-park_state    = "TRACK"
-last_seen_x   = 160
-last_bottom_y = 0
-was_in_bottom = False
-park_t        = None
-
-# PARK 진입 직후 몇 프레임은 유실 무시 (버퍼 안정화)
-PARK_ENTRY_GRACE = 8        # 프레임 수
+mode             = "LIDAR"
+mission_idx      = 0
+detect_count     = 0
+park_state       = "TRACK"
+last_seen_x      = 160
+last_bottom_y    = 0
+was_in_bottom    = False
+park_t           = None
 park_entry_count = 0
 
 print(f"START | 하단 10% 기준: y > {BOTTOM_10PCT}px")
@@ -147,7 +143,7 @@ try:
         cx_mid = W // 2
         hsv    = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         scan   = get_scan()
-        fm     = front_min(scan)   # 매 프레임 라이다 전방 거리 갱신
+        fm     = front_min(scan)
         adir   = avoid_dir(scan)
 
         # ── 미션 완료 ─────────────────────────────────────────────────
@@ -160,7 +156,7 @@ try:
         target = MISSION[mission_idx]
         draw   = COLOR_CFG[target]["draw"]
 
-        # ── 마스크 & 컨투어 (매 프레임 공통) ─────────────────────────
+        # ── 마스크 & 컨투어 (공통) ────────────────────────────────────
         mask = make_mask(frame, hsv, target)
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         big   = max(cnts, key=cv2.contourArea) if cnts else None
@@ -175,7 +171,6 @@ try:
             last_bottom_y = by_bot
             was_in_bottom = (by_bot >= BOTTOM_10PCT)
 
-            # 시각화
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
             cv2.line(frame, (cx_mid, 0), (cx_mid, H), (100, 100, 100), 1)
@@ -184,6 +179,7 @@ try:
 
         # ══ LIDAR 주행 모드 ═══════════════════════════════════════════
         if mode == "LIDAR":
+            # 색지 인식 카운트
             if found:
                 detect_count += 1
                 cv2.putText(frame, f"DETECT [{detect_count}/{DETECT_CONFIRM}]",
@@ -191,17 +187,24 @@ try:
             else:
                 detect_count = 0
 
-            if detect_count >= DETECT_CONFIRM:
-                detect_count    = 0
-                mode            = "PARK"
-                park_state      = "TRACK"
-                last_bottom_y   = 0
-                was_in_bottom   = False
-                park_t          = None
+            # PARK 진입 조건1: 색지 N프레임 연속 인식
+            # PARK 진입 조건2: 전방 장애물 없음 (fm >= THRESH_SLOW)
+            if detect_count >= DETECT_CONFIRM and fm >= THRESH_SLOW:
+                detect_count     = 0
+                mode             = "PARK"
+                park_state       = "TRACK"
+                last_bottom_y    = 0
+                was_in_bottom    = False
+                park_t           = None
                 park_entry_count = 0
                 stop_robot()
-                print(f"[{target}] 인식 확정 → PARK")
+                print(f"[{target}] 인식확정 + 전방여유({fm:.0f}cm) → PARK")
                 cv2.imshow("f", frame); cv2.waitKey(1); continue
+
+            if detect_count >= DETECT_CONFIRM and fm < THRESH_SLOW:
+                # 색지는 보이지만 전방 장애물 있음 → LIDAR 주행 유지
+                cv2.putText(frame, f"WAIT obstacle {fm:.0f}cm",
+                            (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 100, 255), 1)
 
             # 라이다 장애물 회피
             if fm < THRESH_STOP:
@@ -241,22 +244,21 @@ try:
                 print(f"[{target}] 완료 → LIDAR 복귀")
             cv2.waitKey(1); continue
 
-        # ─ PARK 진입 직후 grace 기간: 유실 무시하고 직진 ──────────────
+        # ─ PARK 진입 직후 안정화 (카메라 버퍼 flush) ─────────────────
         if park_entry_count < PARK_ENTRY_GRACE:
             park_entry_count += 1
             send_cmd(APPROACH_V, 0.0)
-            cv2.putText(frame, f"PARK ENTRY stabilize ({park_entry_count}/{PARK_ENTRY_GRACE})",
+            cv2.putText(frame, f"STABILIZE ({park_entry_count}/{PARK_ENTRY_GRACE})",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, draw, 1)
-            cv2.imshow("f", frame)
-            cv2.waitKey(1); continue
+            cv2.imshow("f", frame); cv2.waitKey(1); continue
 
         # ─ TRACK: 색지 보임 ───────────────────────────────────────────
         if found:
             park_state = "TRACK"
 
-            # 매 프레임 라이다 전방 체크 → 장애물 없으면 카메라만, 있으면 블렌딩
+            # 매 프레임 라이다 전방 체크
             if fm >= THRESH_SLOW:
-                # 라이다 회피 끔 → 색지 x중심으로만 조향
+                # 장애물 없음 → 카메라만으로 조향
                 v = APPROACH_V
                 w = -KP_ROT * err_x
                 lidar_label = "LIDAR_OFF"
@@ -287,7 +289,7 @@ try:
                 stop_robot()
                 print(f"[{target}] 하단 소실 (last_y={last_bottom_y}px) → {PARK_SEC}s 정차")
             else:
-                # 하단 아님 → 마지막으로 본 방향으로 제자리 회전 재탐색
+                # 하단 아님 → 마지막 방향으로 제자리 회전 재탐색
                 park_state = "SEARCH"
                 v = 0.0
                 w = -1.30 if last_seen_x > cx_mid else 1.30
