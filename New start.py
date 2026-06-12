@@ -2,7 +2,6 @@ import cv2
 import serial
 import numpy as np
 import time
-import math
 import threading
 
 # ── SERIAL ────────────────────────────────────────────────────────────
@@ -29,9 +28,9 @@ print("LIDAR OK")
 EMA_ALPHA   = 0.35
 MEDIAN_K    = 2
 FRONT_RANGE = 45
-THRESH_SLOW = 55.0   # cm: 감속
-THRESH_TURN = 35.0   # cm: 회피 조향 개입
-THRESH_STOP = 18.0   # cm: 강한 회피
+THRESH_SLOW = 55.0
+THRESH_TURN = 35.0
+THRESH_STOP = 18.0
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -85,15 +84,15 @@ def stop_robot(): send_cmd(0.0, 0.0)
 
 # ── COLOR CONFIG ──────────────────────────────────────────────────────
 COLOR_CFG = {
-    "red":    {"hsv1": ([169,  168, 96], [179,  222, 157]),
-               "hsv2": ([160, 60, 120], [179, 255, 255]),
-               "bgr":  ([20, 20, 80],  [255, 255, 255]), "draw": (0, 0, 255)},
-    "yellow": {"hsv1": ([16, 137, 142], [30,  214, 195]),
+    "red":    {"hsv1": ([169, 168,  96], [179, 222, 157]),
+               "hsv2": ([160,  60, 120], [179, 255, 255]),
+               "bgr":  ([20,  20,  80], [255, 255, 255]), "draw": (0, 0, 255)},
+    "yellow": {"hsv1": ([16,  137, 142], [30,  214, 195]),
                "hsv2": None,
-               "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
+               "bgr":  ([0,   80,  80], [255, 255, 255]), "draw": (0, 200, 255)},
     "blue":   {"hsv1": ([106, 168,  54], [131, 210, 195]),
                "hsv2": None,
-               "bgr":  ([40,  0,   0], [255, 220, 220]), "draw": (255, 80, 0)},
+               "bgr":  ([40,    0,   0], [255, 220, 220]), "draw": (255, 80, 0)},
 }
 MISSION = ["red", "yellow", "blue"]
 
@@ -108,37 +107,57 @@ def make_mask(frame, hsv, name):
     return cv2.bitwise_and(m, bm)
 
 # ── PARAMS ────────────────────────────────────────────────────────────
-MIN_AREA       = 400
-KP_ROT         = 0.003
-APPROACH_V     = 0.22
-PARK_SEC       = 1.2       # 정차 대기 시간
-CREEP_V        = 0.12      # ★ 주차 전 0.5cm 전진 속도
-CREEP_SEC      = 0.15      # ★ 0.5cm 추가 전진 시간 (속도×시간 ≈ 0.018m = 1.8cm → 조정 가능)
-DETECT_CONFIRM = 6
-BOTTOM_10PCT   = int(240 * 0.90)   # 216px
+MIN_AREA        = 400
+DETECT_CONFIRM  = 6
 
-# ★ 주차 완료 후 제자리 회전 파라미터
-SPIN_W         = 0.55      # 제자리 회전 각속도 (작을수록 천천히, 범위: 0~1.6)
-SPIN_SEC       = 2.5       # 제자리 회전 지속 시간 (초)
+# ── APPROACH: x축 + y축 동시 제어 ─────────────────────────────────────
+KP_X            = 0.003    # x 오차 → 회전 (좌우 조향)
+KP_Y            = 0.004    # y 오차 → 전진/후진
+APPROACH_W_MAX  = 0.9      # 최대 조향 각속도
+APPROACH_V_MAX  = 0.22     # 최대 접근 속도
+APPROACH_V_MIN  = 0.07     # 최소 전진 속도 (너무 느리면 정지 판정 오류 방지)
+
+# 카메라 목표 위치: 화면 중앙 x, y축은 화면 하단 30% 지점 (색지가 발 아래 오는 시점)
+TARGET_X_RATIO  = 0.5      # 화면 가로 중심 (0.5 = 정중앙)
+TARGET_Y_RATIO  = 0.72     # 화면 세로 목표 (0.72 = 상단72% 위치, 즉 하단28% 근방)
+
+# 정지 판정: x, y 오차가 모두 이 범위 안에 들어오면 도착
+ARRIVE_X_PX     = 35       # x 허용 오차 (픽셀)
+ARRIVE_Y_PX     = 30       # y 허용 오차 (픽셀)
+ARRIVE_CONFIRM  = 8        # 연속 N프레임 이상 조건 충족 시 정차
+
+# ── SPIN: 정차 후 제자리 한 바퀴 회전 ────────────────────────────────
+PARK_SEC        = 1.2      # 정차 유지 시간 (초)
+SPIN_W          = 0.50     # 제자리 회전 각속도 (작을수록 천천히)
+# 한 바퀴(2π) 도는 데 걸리는 시간 = 2π / SPIN_W (rad/s 기준)
+# SPIN_W=0.5 → 약 12.6초. 실제 로봇은 rad/s ≠ 물리값이므로 아래 SPIN_SEC로 조정
+SPIN_SEC        = 6.0      # 제자리 회전 지속 시간 (실험으로 한 바퀴에 맞게 조정)
 
 # ── STATE ─────────────────────────────────────────────────────────────
-mode          = "LIDAR"
-mission_idx   = 0
-detect_count  = 0
+#
+# mode: "LIDAR" | "PARK"
+#
+# LIDAR 서브상태 (park_state):
+#   "DRIVE"   → 일반 장애물 회피 주행
+#   "SPIN"    → 주차 완료 후 제자리 회전
+#
+# PARK 서브상태 (park_state):
+#   "TRACK"   → x+y 축 제어로 색지 중심 접근
+#   "SEARCH"  → 색지 소실, 마지막 위치 기준 제자리 탐색
+#   "PARKING" → 정차 대기
+#
+mode           = "LIDAR"
+park_state     = "DRIVE"
+mission_idx    = 0
+detect_count   = 0
+arrive_count   = 0          # 도착 조건 연속 카운트
 
-# PARK 상태
-park_state    = "SEARCH"
-last_seen_x   = 160
-last_bottom_y = 0
-was_in_bottom = False
-park_t        = None
+last_seen_x    = 160
+park_t         = None
+spin_t         = None
+spin_dir       = 1
 
-# ★ CREEP / SPIN 타이머
-creep_t       = None
-spin_t        = None
-spin_dir      = 1           # 제자리 회전 방향 (+1 or -1)
-
-print(f"START | 하단 10% 기준: y > {BOTTOM_10PCT}px")
+print("START")
 
 # ── MAIN LOOP ─────────────────────────────────────────────────────────
 try:
@@ -148,11 +167,16 @@ try:
 
         frame  = cv2.flip(frame, 1)
         H, W   = frame.shape[:2]
-        cx_mid = W // 2
+        cx_mid = int(W * TARGET_X_RATIO)   # 목표 x (픽셀)
+        cy_tgt = int(H * TARGET_Y_RATIO)   # 목표 y (픽셀)
         hsv    = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         scan   = get_scan()
         fm     = front_min(scan)
         adir   = avoid_dir(scan)
+
+        # ── 목표 위치 시각화 (항상 표시) ─────────────────────────────
+        cv2.line(frame, (cx_mid - 15, cy_tgt), (cx_mid + 15, cy_tgt), (180, 180, 180), 1)
+        cv2.line(frame, (cx_mid, cy_tgt - 15), (cx_mid, cy_tgt + 15), (180, 180, 180), 1)
 
         # ── 미션 완료 ─────────────────────────────────────────────────
         if mission_idx >= len(MISSION):
@@ -171,40 +195,46 @@ try:
         found = big is not None and cv2.contourArea(big) > MIN_AREA
 
         # 색지 정보 추출
+        obj_cx = obj_cy = err_x = err_y = 0
         if found:
             bx, by_top, bw, bh = cv2.boundingRect(big)
-            ox     = bx + bw // 2
-            by_bot = min(by_top + bh, 239)
-            err_x  = ox - cx_mid
+            obj_cx = bx + bw // 2          # 색지 x 중심
+            obj_cy = by_top + bh // 2      # 색지 y 중심
+            err_x  = obj_cx - cx_mid       # +: 오른쪽, -: 왼쪽
+            err_y  = obj_cy - cy_tgt       # +: 멀다(더 전진), -: 너무 가까움
 
-            last_seen_x   = ox
-            last_bottom_y = by_bot
-            was_in_bottom = (by_bot >= BOTTOM_10PCT)
+            last_seen_x = obj_cx
 
+            # 시각화
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
-            cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
-            cv2.line(frame, (cx_mid, 0), (cx_mid, H), (100, 100, 100), 1)
-            cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
-            cv2.putText(frame, f"x_err={err_x}  y={by_bot}",
+            cv2.circle(frame, (obj_cx, obj_cy), 5, (0, 255, 255), -1)   # 색지 중심
+            cv2.circle(frame, (cx_mid, cy_tgt), 5, (255, 255, 255), -1) # 목표점
+            cv2.line(frame, (obj_cx, obj_cy), (cx_mid, cy_tgt), (100, 100, 255), 1)
+            cv2.putText(frame, f"ex={err_x:+d} ey={err_y:+d}",
                         (bx, by_top - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, draw, 1)
 
-        # ══ LIDAR 주행 모드 ═══════════════════════════════════════════
+        # ══════════════════════════════════════════════════════════════
+        # LIDAR 모드
+        # ══════════════════════════════════════════════════════════════
         if mode == "LIDAR":
 
-            # ★ SPIN 상태: 주차 완료 후 제자리 회전
+            # ── SPIN: 주차 완료 후 제자리 한 바퀴 ────────────────────
             if park_state == "SPIN":
                 elapsed = time.time() - spin_t
                 remain  = max(0.0, SPIN_SEC - elapsed)
                 send_cmd(0.0, spin_dir * SPIN_W)
-                cv2.putText(frame, f"SPIN  {remain:.1f}s",
+                cv2.putText(frame, f"SPIN {remain:.1f}s  (1 round)",
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 200), 2)
-                cv2.imshow("f", frame)
+                cv2.imshow("f", frame); cv2.waitKey(1)
                 if elapsed >= SPIN_SEC:
-                    park_state = "SEARCH"
                     stop_robot()
-                    print(f"[{target}] 제자리 회전 완료 → LIDAR 탐색")
-                cv2.waitKey(1); continue
+                    park_state   = "DRIVE"
+                    arrive_count = 0
+                    detect_count = 0
+                    print(f"[prev] SPIN 완료 → LIDAR 탐색 재개 | 다음 목표: {MISSION[mission_idx] if mission_idx < len(MISSION) else 'DONE'}")
+                continue
 
+            # ── DRIVE: 색지 감지 카운트 + 장애물 회피 ────────────────
             if found:
                 detect_count += 1
                 cv2.putText(frame, f"DETECT [{detect_count}/{DETECT_CONFIRM}]",
@@ -213,18 +243,15 @@ try:
                 detect_count = 0
 
             if detect_count >= DETECT_CONFIRM:
-                detect_count  = 0
-                mode          = "PARK"
-                park_state    = "TRACK"
-                last_bottom_y = 0
-                was_in_bottom = False
-                park_t        = None
-                creep_t       = None
+                detect_count = 0
+                arrive_count = 0
+                mode         = "PARK"
+                park_state   = "TRACK"
                 stop_robot()
-                print(f"[{target}] 인식 확정 → PARK")
+                print(f"[{target}] 인식 확정 → PARK/TRACK")
                 cv2.imshow("f", frame); cv2.waitKey(1); continue
 
-            # 라이다 장애물 회피
+            # 장애물 회피 주행
             if fm < THRESH_STOP:
                 v, w = 0.09, adir * 0.9
             elif fm < THRESH_TURN:
@@ -241,84 +268,97 @@ try:
             if cv2.waitKey(1) & 0xFF == 27: break
             continue
 
-        # ══ PARK 모드 ══════════════════════════════════════════════════
+        # ══════════════════════════════════════════════════════════════
+        # PARK 모드
+        # ══════════════════════════════════════════════════════════════
 
-        # ─ CREEP: 0.5cm 추가 전진 ★ ──────────────────────────────────
-        if park_state == "CREEP":
-            elapsed = time.time() - creep_t
-            if elapsed < CREEP_SEC:
-                send_cmd(CREEP_V, 0.0)
-                cv2.putText(frame, f"CREEP +{CREEP_V*elapsed*100:.1f}cm",
-                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, draw, 2)
-            else:
-                # CREEP 완료 → 실제 정차
-                stop_robot()
-                park_state = "PARKING"
-                park_t     = time.time()
-                print(f"[{target}] CREEP 완료 → PARKING 정차")
-            cv2.imshow("f", frame); cv2.waitKey(1); continue
-
-        # ─ PARKING 정차 ───────────────────────────────────────────────
+        # ── PARKING: 정차 대기 ────────────────────────────────────────
         if park_state == "PARKING":
             stop_robot()
             elapsed = time.time() - park_t
             remain  = max(0.0, PARK_SEC - elapsed)
-            cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
             cv2.putText(frame, f"PARKING [{target}]  {remain:.1f}s",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, draw, 2)
-            cv2.imshow("f", frame)
+            cv2.imshow("f", frame); cv2.waitKey(1)
             if elapsed >= PARK_SEC:
-                # ★ 완료 후 LIDAR 모드 + SPIN 상태로 전환
-                mission_idx  += 1
-                mode          = "LIDAR"
-                park_state    = "SPIN"          # ← 제자리 회전
-                spin_t        = time.time()
-                spin_dir      = 1               # 필요 시 -1로 변경
-                last_bottom_y = 0
-                was_in_bottom = False
-                detect_count  = 0
+                mission_idx += 1
+                mode         = "LIDAR"
+                park_state   = "SPIN"
+                spin_t       = time.time()
+                spin_dir     = 1            # 반시계 원하면 -1
+                detect_count = 0
+                arrive_count = 0
                 stop_robot()
-                print(f"[{target}] 완료 → SPIN 제자리 회전 시작")
-            cv2.waitKey(1); continue
+                print(f"[{target}] 정차 완료 → SPIN 시작 ({SPIN_SEC}초 한 바퀴)")
+            continue
 
-        # ─ TRACK: 색지 보임 ───────────────────────────────────────────
+        # ── TRACK: x + y 축 동시 제어 ────────────────────────────────
         if found:
             park_state = "TRACK"
 
-            if fm >= THRESH_SLOW:
-                w = -KP_ROT * err_x
-                v = APPROACH_V
+            # ── 도착 판정 ─────────────────────────────────────────────
+            x_ok = abs(err_x) <= ARRIVE_X_PX
+            y_ok = abs(err_y) <= ARRIVE_Y_PX
+
+            if x_ok and y_ok:
+                arrive_count += 1
+                cv2.putText(frame, f"ARRIVE [{arrive_count}/{ARRIVE_CONFIRM}]",
+                            (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             else:
-                w_cam   = -KP_ROT * err_x
-                w_lidar = adir * 0.7
-                if fm < THRESH_STOP:
-                    v, w = 0.09, w_lidar
-                elif fm < THRESH_TURN:
-                    v = 0.13
-                    w = 0.7 * w_lidar + 0.3 * w_cam
-                else:
-                    v = 0.18
-                    w = 0.3 * w_lidar + 0.7 * w_cam
+                arrive_count = 0
+
+            if arrive_count >= ARRIVE_CONFIRM:
+                # 중심 일치 확정 → 정차
+                stop_robot()
+                park_state   = "PARKING"
+                park_t       = time.time()
+                arrive_count = 0
+                print(f"[{target}] 중심 일치 확정 (ex={err_x}, ey={err_y}) → PARKING")
+                cv2.imshow("f", frame); cv2.waitKey(1); continue
+
+            # ── x + y 동시 제어 ───────────────────────────────────────
+            # x 오차 → 회전 (w)
+            w_cam = -KP_X * err_x
+            w_cam = float(np.clip(w_cam, -APPROACH_W_MAX, APPROACH_W_MAX))
+
+            # y 오차 → 전진 속도 (v)
+            #   err_y > 0: 색지가 목표보다 위 = 아직 멀다 → 전진
+            #   err_y < 0: 색지가 목표보다 아래 = 너무 가깝다 → 후진 or 정지
+            v_cam = KP_Y * err_y
+            v_cam = float(np.clip(v_cam, -0.10, APPROACH_V_MAX))
+            if v_cam > 0 and v_cam < APPROACH_V_MIN:
+                v_cam = APPROACH_V_MIN   # 전진 시 최소 속도 보장
+
+            # 장애물이 가까우면 라이다 블렌딩
+            if fm < THRESH_STOP:
+                v = 0.07
+                w = float(adir) * 0.9
+            elif fm < THRESH_TURN:
+                v = max(0.07, v_cam * 0.5)
+                w = 0.7 * float(adir) * 0.7 + 0.3 * w_cam
+            elif fm < THRESH_SLOW:
+                v = max(0.07, v_cam * 0.8)
+                w = 0.3 * float(adir) * 0.4 + 0.7 * w_cam
+            else:
+                v = v_cam
+                w = w_cam
 
             send_cmd(v, w)
-            cv2.putText(frame, f"TRACK [{target}]  front={fm:.0f}cm  {'LIDAR_OFF' if fm >= THRESH_SLOW else 'LIDAR_ON'}",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.48, draw, 1)
 
-        # ─ 색지 사라짐 ────────────────────────────────────────────────
+            status = "LIDAR_ON" if fm < THRESH_SLOW else "LIDAR_OFF"
+            cv2.putText(frame,
+                        f"TRACK [{target}] ex={err_x:+d} ey={err_y:+d} v={v:.2f} w={w:.2f} {status}",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.38, draw, 1)
+
+        # ── SEARCH: 색지 소실 ─────────────────────────────────────────
         else:
-            if was_in_bottom:
-                # ★ 하단 소실 → 0.5cm 전진 후 정차 (CREEP 먼저)
-                park_state = "CREEP"
-                creep_t    = time.time()
-                print(f"[{target}] 하단 소실 → CREEP 전진 후 PARKING")
-            else:
-                park_state = "SEARCH"
-                v = 0.0
-                w = -1.30 if last_seen_x > cx_mid else 1.30
-                send_cmd(v, w)
-                cv2.putText(frame, f"SEARCH [{target}]  last_x={last_seen_x}",
-                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 0), 1)
-            cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
+            arrive_count = 0
+            park_state   = "SEARCH"
+            v = 0.0
+            w = -1.30 if last_seen_x > W // 2 else 1.30
+            send_cmd(v, w)
+            cv2.putText(frame, f"SEARCH [{target}]  last_x={last_seen_x}",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 0), 1)
 
         cv2.imshow("f", frame)
         if cv2.waitKey(1) & 0xFF == 27: break
