@@ -5,18 +5,19 @@ import time
 import math
 import threading
 
+# SERIAL
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
 lidar_ser   = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)
 
+# CAMERA
 cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH,  320)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
+cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 time.sleep(1.0)
-cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
-cap.set(cv2.CAP_PROP_AUTO_WB, 0)
 
+# LIDAR BOOT
 lidar_ser.write(bytes([0xA5, 0x40]))
 time.sleep(2)
 lidar_ser.reset_input_buffer()
@@ -24,6 +25,7 @@ lidar_ser.write(bytes([0xA5, 0x20]))
 lidar_ser.read(7)
 print("LIDAR START")
 
+# PARAMETERS
 MAX_SPEED = 0.22
 MIN_SPEED = 0.09
 MAX_W = 0.9
@@ -35,6 +37,7 @@ WALL_SEARCH_V = 0.15
 WALL_SEARCH_W = 0.45
 WALL_SEARCH_DIST = 80.0
 
+# LIDAR FILTER
 EMA_ALPHA = 0.35
 MEDIAN_K = 2
 scan_data = np.full(360, 150.0, dtype=np.float32)
@@ -78,6 +81,7 @@ def nearest_obstacle_angle(scan):
 def nearest_obstacle_dist(scan):
     return float(np.min(scan))
 
+# LIDAR LOOP
 def lidar_loop():
     while True:
         raw = lidar_ser.read(5)
@@ -102,6 +106,7 @@ def get_scan():
     with scan_lock:
         return scan_data.copy()
 
+# MOTOR
 def send_cmd(v, w):
     v = np.clip(v, -MAX_SPEED, MAX_SPEED)
     w = np.clip(w, -MAX_W, MAX_W)
@@ -110,12 +115,13 @@ def send_cmd(v, w):
 def stop_robot():
     send_cmd(0.0, 0.0)
 
-WALL_TARGET     = 30.0
-WALL_SCAN_DIST  = 45.0
+# WALL-FOLLOW
+WALL_TARGET = 30.0
+WALL_SCAN_DIST = 45.0
 WALL_APPROACH_V = 0.18
-WALL_KP         = 0.015
-WALL_V          = 0.20
-WALL_LOST_W     = 0.8
+WALL_KP = 0.015
+WALL_V = 0.20
+WALL_LOST_W = 0.8
 
 def wall_follow(scan, fm, adir):
     ld = left_dist(scan)
@@ -128,7 +134,7 @@ def wall_follow(scan, fm, adir):
     if left_close < THRESH_10:
         return (WALL_V * 0.7, -0.9)
     if right_close < THRESH_10:
-        return (WALL_V * 0.7,  0.9)
+        return (WALL_V * 0.7, 0.9)
     if ld > WALL_TARGET * 2.0:
         nearest = nearest_obstacle_angle(scan)
         err_a = nearest if nearest <= 180 else nearest - 360
@@ -145,10 +151,11 @@ def wall_follow(scan, fm, adir):
     w = float(np.clip(w, -1.4, 1.4))
     return (v, w)
 
+# COLOR CONFIG
 COLOR_CFG = {
-    "red":    {"hsv1": ([169, 136, 175], [179, 207, 255]), "hsv2": None, "bgr":  ([20, 20, 80], [255, 255, 255]), "draw": (0, 0, 255)},
-    "yellow": {"hsv1": ([24, 48, 193], [45, 170, 255]), "hsv2": None, "bgr":  ([0, 80, 80], [255, 255, 255]), "draw": (0, 200, 255)},
-    "blue":   {"hsv1": ([98, 100, 123], [138, 207, 246]), "hsv2": None, "bgr":  ([40, 0, 0], [255, 220, 220]), "draw": (255, 80, 0)},
+    "red":    {"hsv1": ([169, 136, 175], [179, 207, 255]), "hsv2": None, "bgr": ([20, 20, 80], [255, 255, 255]), "draw": (0, 0, 255)},
+    "yellow": {"hsv1": ([24, 48, 193], [45, 170, 255]), "hsv2": None, "bgr": ([0, 80, 80], [255, 255, 255]), "draw": (0, 200, 255)},
+    "blue":   {"hsv1": ([98, 100, 123], [138, 207, 246]), "hsv2": None, "bgr": ([40, 0, 0], [255, 220, 220]), "draw": (255, 80, 0)},
 }
 MISSION = ["red", "yellow", "blue"]
 
@@ -162,6 +169,7 @@ def make_mask(frame, hsv, name):
     bm = cv2.inRange(frame, np.array(cfg["bgr"][0]), np.array(cfg["bgr"][1]))
     return cv2.bitwise_and(m, bm)
 
+# PARAMS
 MIN_AREA = 400
 KP_ROT = 0.035
 W_MIN = 0.30
@@ -178,13 +186,13 @@ ESCAPE_RAD = math.pi * 0.6
 ESCAPE_V = 0.13
 ESCAPE_W = 1.70
 
+# STATE
 mode = "LIDAR"
 mission_idx = 0
 detect_count = 0
 arrive_count = 0
 park_state = "TRACK"
 last_seen_x = 160
-last_bottom_y = 0
 park_t = None
 last_cmd = (0.0, 0.0)
 wf_angle_accum = 0.0
@@ -192,7 +200,7 @@ wf_last_t = None
 esc_angle_accum = 0.0
 ws_start_t = None
 
-print(f"START | MISSION: {MISSION}")
+print(f"START | MISSION: {MISSION}")  # ← 241 줄이 여기일 수 있음
 
 try:
     while True:
@@ -206,7 +214,7 @@ try:
         scan = get_scan()
         fm = get_front_min()
         adir = choose_avoid_direction()
-        
+
         if mode == "LIDAR":
             nearest = nearest_obstacle_angle(scan)
             nd = nearest_obstacle_dist(scan)
@@ -238,7 +246,8 @@ try:
                     v, w = 0.15, adir * 0.7
                 send_cmd(v, w)
 
-print("코드 오류 없음 - 실행 가능")
+except KeyboardInterrupt:
+    print("STOP")
 
 finally:
     stop_robot()
