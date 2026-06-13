@@ -25,17 +25,17 @@ lidar_ser.reset_input_buffer()
 lidar_ser.write(bytes([0xA5, 0x20])); lidar_ser.read(7)
 print("LIDAR OK")
 
-# ── LIDAR FILTER & THRESHOLDS (새 코드의 기민한 임계값 유지) ─────────
+# ── LIDAR FILTER & THRESHOLDS ─────────────────────────────────────────
 EMA_ALPHA   = 0.60      
 MEDIAN_K    = 1         
 FRONT_RANGE = 40        
 
-# 바짝 붙는 주행용 임계값 (새 코드 기반)
+# 바짝 붙는 주행용 임계값
 THRESH_SLOW = 30.0      
 THRESH_TURN = 12.0      
 THRESH_STOP = 8.0       
 
-# [이전 코드 추가] LIDAR 모드 전용 장애물 탐색 파라미터 (초반 주행 능력 복구)
+# LIDAR 모드 전용 장애물 탐색 파라미터
 WALL_SEARCH_V = 0.15      # 장애물 탐색 속도 (천천히)
 WALL_SEARCH_W = 0.45      # 장애물 탐색 회전 각속도
 WALL_SEARCH_DIST = 80.0   # 장애물 탐색 거리 (80cm 이내)
@@ -96,7 +96,7 @@ def nearest_obstacle_angle(scan):
 def nearest_obstacle_dist(scan):
     return float(np.min(scan))
 
-# ── WALL-FOLLOW 함수 (새 코드의 타이트한 회피 성능 유지) ───────────────
+# ── WALL-FOLLOW 함수 ──────────────────────────────────────────────────
 def wall_follow(scan, fm, adir):
     ld          = left_dist(scan)
     left_close  = side_min(scan, 60, 120)
@@ -149,7 +149,7 @@ COLOR_CFG = {
                "bgr":  ([0, 80, 80],    [255, 255, 255]), "draw": (0, 200, 255)},
     "blue":   {"hsv1": ([98, 100, 123], [138, 207, 246]),
                "hsv2": None,
-               "bgr":  ([40,  0,   0], [255, 220, 220]), "draw": (255, 80, 0)},
+               "bgr":  ([40,  0,    0], [255, 220, 220]), "draw": (255, 80, 0)},
 }
 MISSION = ["red", "yellow", "blue"]
 
@@ -163,7 +163,7 @@ def make_mask(frame, hsv, name):
     bm = cv2.inRange(frame, np.array(cfg["bgr"][0]), np.array(cfg["bgr"][1]))
     return cv2.bitwise_and(m, bm)
 
-# ── PARAMS (새 코드의 25cm 세팅 완벽 원복) ───────────────────────────────
+# ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA        = 400
 KP_ROT          = 0.035 
 W_MIN           = 0.30  
@@ -231,7 +231,7 @@ try:
             print(f"[EMERGENCY PREVENT] 사방 폐쇄 구간 진입 조기 차단! (정면:{fm:.1f}cm)")
             stop_robot()
             time.sleep(0.15) 
-            send_cmd(0.0, adir * 2.2) 
+            send_cmd(0.0, adir * 2.2) \
             time.sleep(0.80) 
             stop_robot()
             time.sleep(0.1)
@@ -273,7 +273,7 @@ try:
         def centroid_in_arrive_zone():
             return (cx_obj >= arrive_x1 and cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
 
-        # ══ LIDAR 모드 [★ 첫 번째 코드의 능동 장애물 탐색 결합] ════════════════
+        # ══ LIDAR 모드 ════════════════════════════════════════════════════════
         if mode == "LIDAR":
             if found:
                 detect_count += 1
@@ -287,22 +287,19 @@ try:
                 print(f"[{target}] 발견 → 추적 시작")
                 continue
 
-            # 이전 코드의 스마트 탐색 로직 이식
             nearest = nearest_obstacle_angle(scan)
             nd = nearest_obstacle_dist(scan)
             
-            # 80cm 이내에 장애물이 잡히면, 그 방향을 쫓아가며 넓게 회전 탐색
             if nd < WALL_SEARCH_DIST:
                 err_a = nearest if nearest <= 180 else nearest - 360
                 
-                if abs(err_a) > 10:  # 장애물 쪽으로 조향 조절
+                if abs(err_a) > 10:  
                     v_s = WALL_SEARCH_V
                     w_s = float(np.clip(-err_a / 60.0 * WALL_SEARCH_W, -WALL_SEARCH_W, WALL_SEARCH_W))
-                else:  # 정면 일치 시 속도 가속
+                else:  
                     v_s = WALL_SEARCH_V * 1.2
                     w_s = 0.0
                 
-                # 정면 3단계 비상 회피 최우선 적용 (안전 장치)
                 if fm < THRESH_STOP:    v_s, w_s = 0.04, adir * 1.4
                 elif fm < THRESH_TURN:  v_s, w_s = 0.08, adir * 1.0
                 elif fm < THRESH_SLOW:  v_s, w_s = 0.12, adir * 0.6
@@ -310,9 +307,9 @@ try:
                 send_cmd(v_s, w_s)
                 cv2.putText(frame, f"LIDAR: WALL_SEARCH nd={nd:.0f}cm", (10, 25), 0, 0.5, (0, 255, 0), 1)
             
-            else:  # 사방이 트여있을 때: 고정 속도로 원형 궤적을 그리며 맵을 크게 탐색
-                v_s = 0.22  # 탐색 속도 향상
-                w_s = adir * 0.35  # 부드러운 회전 추가로 사방 카메라 스캔
+            else:  
+                v_s = 0.22  
+                w_s = adir * 0.35  
                 
                 if fm < THRESH_STOP:    v_s, w_s = 0.04, adir * 1.4
                 elif fm < THRESH_TURN:  v_s, w_s = 0.08, adir * 1.0
@@ -321,7 +318,7 @@ try:
                 send_cmd(v_s, w_s)
                 cv2.putText(frame, f"LIDAR: GLOBAL_SEARCH fm={fm:.0f}cm", (10, 25), 0, 0.5, (0, 255, 0), 1)
 
-        # ══ PARK 모드 (새 코드의 정밀 알고리즘 전체 유지) ════════════════════
+        # ══ PARK 모드 ═════════════════════════════════════════════════════════
         elif mode == "PARK":
             if park_state in ("WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "WALL_ESCAPE", "SEARCH"):
                 if found:
@@ -368,33 +365,44 @@ try:
                     continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
 
-            # ── 3-A. WALL_SEARCH [★ 이전 코드의 조향 서치 결합] ──
+            # ── 3-A. WALL_SEARCH [★ 주차 후 제자리 회전 돌다 벽 발견 시 추종 진입 수정] ──
             elif park_state == "WALL_SEARCH":
                 if ws_start_t is None:
                     ws_start_t = time.time()
 
+                # 전방 시야(315도 ~ 45도 사이)에 벽이 들어오기 시작하면 APPROACH로 전격 전환
                 front_nearest = side_min(scan, 315, 405)
                 if front_nearest < WALL_SCAN_DIST:
                     park_state = "WALL_APPROACH"
                     ws_start_t = None
-                    print(f"장애물 감지 {front_nearest:.0f}cm → 접근 시작")
+                    print(f"장애물 정면 감지 {front_nearest:.0f}cm → WALL_APPROACH 진입")
                     continue
 
                 nearest = nearest_obstacle_angle(scan)
                 nd      = nearest_obstacle_dist(scan)
                 
-                # 새 코드의 단순 주행 대신, 첫 번째 코드의 타겟 조향 추적을 반영
                 if nd < 80.0:
                     err_a = nearest if nearest <= 180 else nearest - 360
-                    w_s   = float(np.clip(-err_a / 90.0 * 1.2, -1.2, 1.2)) 
-                    send_cmd(0.0, w_s)
+                    
+                    # 각도 차이가 크면 제자리 회전하여 정면 정렬 우선
+                    if abs(err_a) > 45:
+                        v_s = 0.0
+                        w_s = float(np.clip(-err_a / 90.0 * 1.2, -1.2, 1.2))
+                    # 정면 범위(45도 이내)에 벽이 걸리면 미속 전진하며 벽에 접근하도록 유도
+                    else:
+                        v_s = 0.12  
+                        w_s = float(np.clip(-err_a / 45.0 * 0.6, -0.6, 0.6))
+                    
+                    send_cmd(v_s, w_s)
                 else:
-                    send_cmd(0.15, 0.45) 
+                    # 완전 개활지일 경우 부드럽게 대각 주행 탐색
+                    send_cmd(0.16, adir * 0.45) 
 
-                if time.time() - ws_start_t > 6.0:
-                    print("[개활지 예외 처리] 강제 선제 직진 속도 최적화")
-                    send_cmd(0.22, 0.0)
-                    time.sleep(0.6)  
+                # 갇힘 방지 타임아웃 주기를 기민하게 4초로 단축
+                if time.time() - ws_start_t > 4.0:
+                    print("[개활지 예외 처리] 강제 선제 직진 탈출")
+                    send_cmd(0.20, 0.0)
+                    time.sleep(0.5)  
                     ws_start_t = time.time()
 
                 cv2.putText(frame, f"WALL-SEARCH [{target}] nd={nd:.0f}cm", (10, 25), 0, 0.5, (0, 255, 0), 1)
