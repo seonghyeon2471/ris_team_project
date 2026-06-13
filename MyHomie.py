@@ -29,9 +29,17 @@ print("LIDAR OK")
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
 FRONT_RANGE  = 45
-THRESH_SLOW  = 55.0
-THRESH_TURN  = 35.0
-THRESH_STOP  = 18.0
+THRESH_30    = 32.0
+THRESH_20    = 22.0
+THRESH_10    = 12.0
+MAX_SPEED    = 0.30
+MIN_SPEED    = 0.09
+MAX_W        = 0.9
+
+# PARK/카메라 조향용 별칭
+THRESH_SLOW  = THRESH_30
+THRESH_TURN  = THRESH_20
+THRESH_STOP  = THRESH_10
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -88,7 +96,7 @@ COLOR_CFG = {
     "red":    {"hsv1": ([169, 136, 175], [179, 207, 255]),
                "hsv2": None,
                "bgr":  ([20, 20, 80],  [255, 255, 255]), "draw": (0, 0, 255)},
-    "yellow": {"hsv1": ([24, 26, 193], [45, 165, 255]),
+    "yellow": {"hsv1": ([24, 48, 193], [45, 170, 255]),
                "hsv2": None,
                "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
     "blue":   {"hsv1": ([98, 100, 123], [138, 207, 246]),
@@ -113,7 +121,7 @@ KP_ROT         = 0.030
 W_MIN          = 0.25
 APPROACH_V     = 0.17
 PARK_SEC       = 1.2
-DETECT_CONFIRM = 6
+DETECT_CONFIRM = 3
 
 # ── 도착 판정 영역 ─────────────────────────────────────────────────────
 ARRIVE_Y_TOP      = int(240 * 0.85)
@@ -130,7 +138,7 @@ MID_X_LEFT  = CAM_ZONE_W        # 96
 MID_X_RIGHT = 320 - CAM_ZONE_W  # 224
 
 # ── STATE ─────────────────────────────────────────────────────────────
-mode          = "LIDAR"
+mode          = "INIT_SCAN"   # 시작 시 빨간색 탐색 회전
 mission_idx   = 0
 detect_count  = 0
 arrive_count  = 0
@@ -140,6 +148,9 @@ last_seen_x   = 160
 last_bottom_y = 0
 park_t        = None
 last_cmd      = (0.0, 0.0)
+
+# 시작 탐색 회전 속도 (너무 빠르지 않게)
+INIT_SCAN_W   = 0.5
 
 print(f"START | MISSION: {MISSION}")
 
@@ -209,8 +220,24 @@ try:
                 return -W_MIN if ex > 0 else W_MIN
             return raw
 
+        # ══ INIT_SCAN 모드: 시작 시 빨간색 찾을 때까지 제자리 회전 ══
+        if mode == "INIT_SCAN":
+            if found:
+                detect_count += 1
+            else:
+                detect_count = 0
+
+            if detect_count >= DETECT_CONFIRM:
+                detect_count = 0
+                mode = "PARK"
+                park_state = "TRACK"
+                print(f"[{target}] 초기 탐색 발견 → 추적 시작")
+            else:
+                send_cmd(0.0, INIT_SCAN_W)   # 제자리 회전
+                cv2.putText(frame, "INIT SCAN...", (10, 25), 0, 0.6, (0, 0, 255), 2)
+
         # ══ LIDAR 모드 ═══════════════════════════════════════════
-        if mode == "LIDAR":
+        elif mode == "LIDAR":
             if found:
                 detect_count += 1
             else:
@@ -240,15 +267,15 @@ try:
                         v = APPROACH_V
                     steer_label = "CAM"
                 else:
-                    # 중앙 40%: 라이다 회피 조향
-                    if fm < THRESH_STOP:
-                        v, w = 0.09, adir * 0.9
-                    elif fm < THRESH_TURN:
-                        v, w = 0.13, adir * 0.7
-                    elif fm < THRESH_SLOW:
-                        v, w = 0.18, adir * 0.4
+                    # 중앙 40%: 라이다 회피 조향 (새 임계값 기준)
+                    if fm < THRESH_10:
+                        v, w = MIN_SPEED, adir * MAX_W
+                    elif fm < THRESH_20:
+                        v, w = 0.12, adir * 0.8
+                    elif fm < THRESH_30:
+                        v, w = 0.15, adir * 0.7
                     else:
-                        v, w = 0.28, 0.0
+                        v, w = MAX_SPEED, 0.0
                     steer_label = "LIDAR"
 
                 send_cmd(v, w)
@@ -256,11 +283,15 @@ try:
                             0, 0.5, draw, 1)
 
             else:
-                # ── 색상 없음: 기존 라이다만 ──
-                if fm < THRESH_STOP:   v, w = 0.09, adir * 0.9
-                elif fm < THRESH_TURN: v, w = 0.13, adir * 0.7
-                elif fm < THRESH_SLOW: v, w = 0.18, adir * 0.4
-                else:                  v, w = 0.28, 0.0
+                # ── 색상 없음: 라이다만 (새 임계값 기준) ──
+                if fm < THRESH_10:
+                    v, w = MIN_SPEED, adir * MAX_W
+                elif fm < THRESH_20:
+                    v, w = 0.12, adir * 0.8
+                elif fm < THRESH_30:
+                    v, w = 0.15, adir * 0.7
+                else:
+                    v, w = MAX_SPEED, 0.0
                 send_cmd(v, w)
                 cv2.putText(frame, "MODE: LIDAR", (10, 25), 0, 0.5, (255, 255, 255), 1)
 
