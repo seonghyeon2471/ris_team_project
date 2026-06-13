@@ -29,9 +29,9 @@ print("LIDAR OK")
 EMA_ALPHA   = 0.35
 MEDIAN_K    = 2
 FRONT_RANGE = 45
-THRESH_SLOW = 55.0
-THRESH_TURN = 35.0
-THRESH_STOP = 18.0
+THRESH_SLOW = 20.0
+THRESH_TURN = 8.0
+THRESH_STOP = 6.0
 
 # [개활지 대책] 기본 거리 채우기 및 인지 상한선을 150cm -> 250cm로 확장
 _scan     = np.full(360, 250.0, dtype=np.float32)
