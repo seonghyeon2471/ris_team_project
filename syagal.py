@@ -31,9 +31,9 @@ MEDIAN_K    = 1
 FRONT_RANGE = 40        
 
 # 초기 25cm 바짝 붙는 주행용 임계값으로 완전 복구
-THRESH_SLOW = 35.0      
-THRESH_TURN = 18.0      
-THRESH_STOP = 12.0      
+THRESH_SLOW = 30.0      
+THRESH_TURN = 12.0      
+THRESH_STOP = 8.0      
 
 _scan     = np.full(360, 250.0, dtype=np.float32)
 _scan_pub = np.full(360, 250.0, dtype=np.float32)
