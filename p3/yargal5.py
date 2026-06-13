@@ -98,7 +98,7 @@ def wall_follow(scan, fm, adir):
         return (WALL_V * 0.7,  0.7)
 
     # 3. 왼쪽 장애물 없음 -> 좌회전해서 찾기
-    if ld > WALL_TARGET * 2.0:
+    if ld > WALL_TARGET * 3.0:
         return (WALL_V * 0.7, WALL_LOST_W)
 
     # 4. 정상 wall-following: 왼쪽 거리 오차 비례 보정
