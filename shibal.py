@@ -30,7 +30,7 @@ EMA_ALPHA   = 0.60
 MEDIAN_K    = 1         
 FRONT_RANGE = 40        
 
-# 바짝 붙는 주행용 임계값
+# 일반 주행/벽 추종용 임계값
 THRESH_SLOW = 30.0      
 THRESH_TURN = 12.0      
 THRESH_STOP = 8.0       
@@ -79,17 +79,14 @@ def front_min(scan):
     idx = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     return float(np.min(scan[idx]))
 
-# [개선] 양쪽 장애물 진입 시 널뛰는 조향 진동 방지 (데드존 및 고정 탈출 알고리즘 적용)
+# 양쪽 장애물 진입 시 널뛰는 조향 진동 방지 (데드존 및 고정 탈출 알고리즘 적용)
 def avoid_dir(scan):
     left_m = np.mean(scan[1:90])
     right_m = np.mean(scan[271:360])
     
-    # 양쪽 거리가 모두 60cm 미만으로 좁은 곳에 갇혔을 때 (양측 폐쇄 상황)
     if left_m < 60.0 and right_m < 60.0:
-        # 미세 노이즈로 날뛰지 않도록, 조금이라도 더 넓은 쪽으로 완전히 일관되게 조향 유도
         return -1 if left_m > right_m else 1
         
-    # 일반적인 상황에서의 조향 날뜀 방지 데드존 (5cm 이내 차이는 우회전 우선 고정)
     if abs(left_m - right_m) < 5.0: 
         return -1
         
@@ -184,7 +181,8 @@ APPROACH_V      = 0.17
 PARK_SEC        = 1.2
 DETECT_CONFIRM = 6
 
-ARRIVE_Y_TOP       = int(240 * 0.85)
+# [개선] 아슬아슬하게 튕기지 않도록 주차 인정 영역을 살짝 상향 조정 (85% -> 75%)
+ARRIVE_Y_TOP       = int(240 * 0.75)
 ARRIVE_X_MARGIN    = 40
 ARRIVE_FORWARD_SEC = 0.7  
 ARRIVE_FORWARD_V   = 0.15  
@@ -378,7 +376,7 @@ try:
                     continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
 
-            # ── 3-A. WALL_SEARCH [★ 제자리 회전 늪 전면 수정 완료] ──
+            # ── 3-A. WALL_SEARCH ──
             elif park_state == "WALL_SEARCH":
                 if ws_start_t is None:
                     ws_start_t = time.time()
@@ -396,8 +394,6 @@ try:
                 if nd < 80.0:
                     err_a = nearest if nearest <= 180 else nearest - 360
                     
-                    # [개선] 양쪽에 벽이 있어 가장 가까운 곳이 완연한 측면(60도 이상)에 위치할 때
-                    # 제자리 정렬하려다 뱅뱅 도는 현상을 차단하고 곧바로 벽 타기(WALL_FOLLOW)로 강제 이행
                     if abs(err_a) > 60:
                         print("측면 벽 즉시 감지 -> 교착 예방을 위해 바로 WALL_FOLLOW 진입")
                         park_state = "WALL_FOLLOW"
@@ -405,8 +401,6 @@ try:
                         wf_angle_accum = 0.0
                         continue
                     
-                    # [개선] 45도 조건에서도 선속도를 완전 0이 아닌 최소값(0.06)을 주어 
-                    # 한 자리에서 계속 맴돌지 않고 탈출형 나선 궤적을 그리도록 유도
                     if abs(err_a) > 45:
                         v_s = 0.06  
                         w_s = float(np.clip(-err_a / 90.0 * 1.0, -1.0, 1.0))
@@ -429,7 +423,6 @@ try:
                     
                     send_cmd(v_s, w_s)
 
-                # [개선] 타임아웃 발생 시에도 완전 직진보다는 탈출각 조향을 연계하여 좁은 복도 탈출 극대화
                 if time.time() - ws_start_t > 4.0:
                     print("[교착/개활지 예외 처리] 탈출각 연계 미속 직진")
                     send_cmd(0.18, adir * 0.5)
@@ -504,7 +497,7 @@ try:
 
                 cv2.putText(frame, f"WALL-ESCAPE [{target}]", (10, 25), 0, 0.5, (0, 128, 255), 1)
 
-            # ── 4. TRACK ──
+            # ── 4. TRACK [★ 주차 중 튕김 현상 원천 봉쇄 수정] ──
             elif found:
                 park_state     = "TRACK"
                 wf_angle_accum = 0.0
@@ -531,18 +524,28 @@ try:
                             return -W_MIN if ex > 0 else W_MIN
                         return raw
 
-                    if fm >= THRESH_SLOW:
+                    # [핵심 개선] 주차(TRACK) 대상에 접근할 때는 전용 임계값을 사용하여 
+                    # 타겟을 벽이나 장애물로 착각해 튕겨 나가는 것을 막습니다.
+                    TRACK_THRESH_SLOW = 20.0  
+                    TRACK_THRESH_TURN = 10.0  
+                    TRACK_THRESH_STOP = 6.0   
+
+                    if fm >= TRACK_THRESH_SLOW:
                         v = reduced_v
                         w = cam_w(err_x)
                     else:
                         w_cam = cam_w(err_x)
                         w_lid = adir * 1.2 
-                        if fm < THRESH_STOP:
-                            v, w = 0.04, w_lid
-                        elif fm < THRESH_TURN:
-                            v, w = 0.08, 0.7 * w_lid + 0.3 * w_cam
+                        
+                        if fm < TRACK_THRESH_STOP:
+                            # 진짜 충돌 직전(6cm)에는 최소 미속 주행만 유지
+                            v, w = 0.02, w_lid
+                        elif fm < TRACK_THRESH_TURN:
+                            # 주차지 근처이므로 라이다 회피를 30%로 낮추고 카메라 정렬 가중치를 70%로 우세하게 줌
+                            v, w = 0.05, 0.3 * w_lid + 0.7 * w_cam
                         else:
-                            v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
+                            # 10cm ~ 20cm 구간에서는 라이다 개입을 10%로 최소화하여 카메라 뷰를 추종하도록 고정
+                            v, w = reduced_v, 0.1 * w_lid + 0.9 * w_cam
 
                     last_cmd = (v, w)
                     send_cmd(v, w)
