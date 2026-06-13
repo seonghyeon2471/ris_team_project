@@ -121,8 +121,8 @@ ARRIVE_Y_TOP   = int(240 * 0.85)   # 세로 기준선 (이 값보다 아래면 O
 ARRIVE_X_MARGIN = 40               # 화면 중앙에서 ±60px 이내
 
 # 도착 후 전진 시간 (초)
-ARRIVE_FORWARD_SEC = 1.0
-ARRIVE_FORWARD_V   = 0.1          # 도착 후 전진 속도
+ARRIVE_FORWARD_SEC = 0.7
+ARRIVE_FORWARD_V   = 0.15          # 도착 후 전진 속도
 
 # centroid가 이 프레임 수만큼 연속으로 영역 안에 있어야 도착 판정
 ARRIVE_CONFIRM     = 8
