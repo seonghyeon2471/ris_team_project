@@ -363,7 +363,7 @@ try:
                     continue
 
                 v = 0.0
-                w = -1.0 if last_seen_x > cx_mid else 1.0
+                w = -1.6 if last_seen_x > cx_mid else 1.6
                 send_cmd(v, w)
                 remain = SPIN_ONE_ROUND_SEC - elapsed_search
                 cv2.putText(frame, f"SEARCHING({remain:.1f}s): {target}",
