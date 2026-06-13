@@ -178,7 +178,11 @@ mission_idx   = 0
 detect_count  = 0
 arrive_count  = 0
 
-park_state    = "TRACK"   # TRACK | WALL_SEARCH | WALL_APPROACH | FORWARD | PARKING
+# LIDAR 모드에서도 PARK과 동일한 wall 탐색 상태머신을 사용
+# lidar_state: WALL_SEARCH | WALL_APPROACH | WALL_FOLLOW
+lidar_state   = "WALL_SEARCH"
+
+park_state    = "TRACK"   # TRACK | WALL_SEARCH | WALL_APPROACH | WALL_FOLLOW | FORWARD | PARKING
 last_seen_x   = 160
 last_bottom_y = 0
 park_t        = None
@@ -237,7 +241,7 @@ try:
             return (cx_obj >= arrive_x1 and cx_obj <= arrive_x2 and
                     cy_obj >= ARRIVE_Y_TOP)
 
-        # ══ LIDAR 모드 (첫 번째 색지 탐색) ══════════════════════
+        # ══ LIDAR 모드 (첫 번째 색지 탐색, wall-following 포함) ══
         if mode == "LIDAR":
             if found:
                 detect_count += 1
@@ -251,12 +255,43 @@ try:
                 print(f"[{target}] 발견 → 추적 시작")
                 continue
 
-            if fm < THRESH_STOP: v, w = 0.09, adir * 0.9
-            elif fm < THRESH_TURN: v, w = 0.13, adir * 0.7
-            elif fm < THRESH_SLOW: v, w = 0.18, adir * 0.4
-            else: v, w = 0.28, 0.0
-            send_cmd(v, w)
-            cv2.putText(frame, "MODE: LIDAR", (10, 25), 0, 0.5, (255, 255, 255), 1)
+            # ── A. 벽 탐색 중 제자리 회전 (WALL_SEARCH) ──────────
+            if lidar_state == "WALL_SEARCH":
+                if fm < WALL_SCAN_DIST:
+                    lidar_state = "WALL_APPROACH"
+                    print(f"[LIDAR] 회전 중 벽 감지 fm:{fm:.0f}cm → 접근 시작")
+                else:
+                    send_cmd(0.0, 0.5)
+                    cv2.putText(frame, f"LIDAR-WALL-SEARCH fm:{fm:.0f}",
+                                (10, 25), 0, 0.5, (0, 255, 0), 1)
+
+            # ── B. 벽으로 접근 중 (WALL_APPROACH) ─────────────────
+            elif lidar_state == "WALL_APPROACH":
+                ld = left_dist(scan)
+
+                if ld <= WALL_TARGET * 1.3:
+                    lidar_state = "WALL_FOLLOW"
+                    print(f"[LIDAR] 벽 도달 L:{ld:.0f}cm → wall-following 시작")
+                else:
+                    if fm < THRESH_STOP:
+                        v, w = 0.08, adir * 1.0
+                    elif fm < THRESH_TURN:
+                        v, w = WALL_APPROACH_V * 0.6, adir * 0.7
+                    else:
+                        v, w = WALL_APPROACH_V, 0.3
+                    send_cmd(v, w)
+                    cv2.putText(frame, f"LIDAR-WALL-APPROACH L:{ld:.0f}cm",
+                                (10, 25), 0, 0.5, (0, 200, 0), 1)
+
+            # ── C. wall-following으로 탐색 (WALL_FOLLOW) ─────────
+            elif lidar_state == "WALL_FOLLOW":
+                v, w = wall_follow(scan, fm, adir)
+                send_cmd(v, w)
+                ld_disp = left_dist(scan)
+                cv2.putText(frame, f"LIDAR-WALL-FOLLOW L:{ld_disp:.0f}cm",
+                            (10, 25), 0, 0.5, (0, 255, 0), 1)
+
+            cv2.putText(frame, "MODE: LIDAR", (10, 45), 0, 0.5, (255, 255, 255), 1)
 
         # ══ PARK 모드 ════════════════════════════════════════════
         elif mode == "PARK":
