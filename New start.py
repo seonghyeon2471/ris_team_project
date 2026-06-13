@@ -145,7 +145,7 @@ ARRIVE_FORWARD_V   = 0.15
 ARRIVE_CONFIRM     = 8
 
 # ── SCAN SEARCH (제자리 회전 스캔) ────────────────────────────────────
-SPIN_W             = 0.6        # 제자리 회전 각속도 (rad/s)
+SPIN_W             = 1.2        # 제자리 회전 각속도 (rad/s)
 SPIN_FULL_SEC      = 10.5       # 360° 완료 기준 시간 (여유 포함)
 SPIN_DETECT_FRAMES = 4          # 회전 중 색상 연속 인식 프레임 수
 
