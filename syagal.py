@@ -30,10 +30,10 @@ EMA_ALPHA   = 0.60
 MEDIAN_K    = 1         
 FRONT_RANGE = 40        
 
-# 32cm 타겟 주행에 맞춘 전방 감속 및 제동 임계값 최적화
-THRESH_SLOW = 40.0      # 기존 45.0 -> 40.0cm (32cm 유지 주행 중 자연스러운 감속 진입)
-THRESH_TURN = 22.0      # 기존 25.0 -> 22.0cm (코너링 조향 시작점 조율)
-THRESH_STOP = 14.0      # 기존 15.0 -> 14.0cm (물리 제동 마진 확보)
+# 초기 25cm 바짝 붙는 주행용 임계값으로 완전 복구
+THRESH_SLOW = 35.0      
+THRESH_TURN = 18.0      
+THRESH_STOP = 12.0      
 
 _scan     = np.full(360, 250.0, dtype=np.float32)
 _scan_pub = np.full(360, 250.0, dtype=np.float32)
@@ -159,33 +159,33 @@ def make_mask(frame, hsv, name):
     bm = cv2.inRange(frame, np.array(cfg["bgr"][0]), np.array(cfg["bgr"][1]))
     return cv2.bitwise_and(m, bm)
 
-# ── PARAMS (벽 추종 타겟 거리 32cm 세팅) ──────────────────────────────────
+# ── PARAMS (이격 거리 25cm 및 빠른 속도 조합으로 완전 복구) ─────────────────
 MIN_AREA        = 400
 KP_ROT          = 0.035 
 W_MIN           = 0.30  
-APPROACH_V      = 0.12  
+APPROACH_V      = 0.17  
 PARK_SEC        = 1.2
 DETECT_CONFIRM = 6
 
 ARRIVE_Y_TOP       = int(240 * 0.85)
 ARRIVE_X_MARGIN    = 40
-ARRIVE_FORWARD_SEC = 0.9  
-ARRIVE_FORWARD_V   = 0.11  
+ARRIVE_FORWARD_SEC = 0.7  
+ARRIVE_FORWARD_V   = 0.15  
 ARRIVE_CONFIRM     = 8
 
-# wall-following 밸런스 튜닝
-WALL_TARGET     = 32.0  # 요구사항 반영: 38.0 -> 32.0cm 수정 (적정 거리 밸런스 유지)
-WALL_SCAN_DIST  = 50.0  # 기존 55.0 -> 50.0cm 조율 (타겟 축소에 맞춘 매칭)
-WALL_APPROACH_V = 0.11  
-WALL_KP         = 0.012 # 기존 0.014 -> 0.012 조율 (32cm 지점 주행 시 지그재그 감쇠 최적화)
-WALL_V          = 0.13  
-WALL_TURN_V     = 0.05  
+# 완전 원복 완료된 영역
+WALL_TARGET     = 25.0  # 초기 25cm 이격 거리 원복
+WALL_SCAN_DIST  = 45.0  # 스캔 범위 원복
+WALL_APPROACH_V = 0.15  
+WALL_KP         = 0.010 # 초기 0.010 게인 원복
+WALL_V          = 0.18  
+WALL_TURN_V     = 0.07  
 WALL_LOST_W     = 0.8   
 
 # 순환 감지 및 이탈
 FULL_CIRCLE_RAD    = 2 * math.pi * 0.85
 ESCAPE_RAD         = math.pi * 0.6
-ESCAPE_V           = 0.10  
+ESCAPE_V           = 0.13  
 ESCAPE_W           = 1.70  
 
 # ── STATE ─────────────────────────────────────────────────────────────
@@ -294,7 +294,7 @@ try:
             if fm < THRESH_STOP:   v, w = 0.04, adir * 1.4  
             elif fm < THRESH_TURN: v, w = 0.08, adir * 1.0
             elif fm < THRESH_SLOW: v, w = 0.12, adir * 0.6
-            else:                  v, w = 0.18, 0.0
+            else:                  v, w = 0.28, 0.0
             send_cmd(v, w)
             cv2.putText(frame, "MODE: LIDAR", (10, 25), 0, 0.5, (255, 255, 255), 1)
 
@@ -366,12 +366,12 @@ try:
                     w_s   = float(np.clip(-err_a / 90.0 * 1.2, -1.2, 1.2)) 
                     send_cmd(0.0, w_s)
                 else:
-                    send_cmd(0.11, 0.45) 
+                    send_cmd(0.15, 0.45) 
 
                 if time.time() - ws_start_t > 6.0:
                     print("[개활지 예외 처리] 강제 선제 직진 속도 최적화")
-                    send_cmd(0.15, 0.0)
-                    time.sleep(0.8)  
+                    send_cmd(0.22, 0.0)
+                    time.sleep(0.6)  
                     ws_start_t = time.time()
 
                 cv2.putText(frame, f"WALL-SEARCH [{target}] nd={nd:.0f}cm",
