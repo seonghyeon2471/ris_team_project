@@ -48,7 +48,7 @@ MEDIAN_K = 2
 scan_data = np.full(360, 150.0, dtype=np.float32)
 scan_lock = threading.Lock()
 
-# ── LIDAR UTIL ────────────────────────────────────────────────────────
+# ── LIDAR UTIL (중복 함수 제거) ───────────────────────────────────────
 def apply_ema(angle, new_dist_cm):
     if not isinstance(new_dist_cm, (int, float)) or new_dist_cm <= 0:
         return
@@ -73,10 +73,10 @@ def choose_avoid_direction():
     right_avg = float(np.mean(scan_data[271:360]))
     return 1 if left_avg >= right_avg else -1
 
-def nearest_obstacle_angle():
+def nearest_obstacle_angle():  # [수정] scan 매개변수 제거
     return int(np.argmin(scan_data))
 
-def nearest_obstacle_dist():
+def nearest_obstacle_dist():  # [수정] scan 매개변수 제거
     return float(np.min(scan_data))
 
 def left_dist(scan):
@@ -86,12 +86,6 @@ def left_dist(scan):
 def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
-
-def nearest_obstacle_angle(scan):
-    return int(np.argmin(scan))
-
-def nearest_obstacle_dist(scan):
-    return float(np.min(scan))
 
 # ── LIDAR LOOP ────────────────────────────────────────────────────────
 def lidar_loop():
@@ -132,7 +126,7 @@ def send_cmd(v, w):
 def stop_robot():
     send_cmd(0.0, 0.0)
 
-# ── WALL-FOLLOW 파라미터 및 함수 (상위로 이동) ─────────────────────────
+# ── WALL-FOLLOW 파라미터 및 함수 ──────────────────────────────────────
 WALL_TARGET     = 30.0
 WALL_SCAN_DIST  = 45.0
 WALL_APPROACH_V = 0.18
@@ -317,8 +311,8 @@ try:
                 print(f"[{target}] 발견 → 추적 시작")
                 continue
 
-            nearest = nearest_obstacle_angle()
-            nd = nearest_obstacle_dist()
+            nearest = nearest_obstacle_angle()  # [수정] 매개변수 없이 호출
+            nd = nearest_obstacle_dist()  # [수정] 매개변수 없이 호출
             
             if nd < WALL_SEARCH_DIST:
                 err_a = nearest if nearest <= 180 else nearest - 360
@@ -364,7 +358,6 @@ try:
 
         # ══ PARK 모드 ════════════════════════════════════════════════
         elif mode == "PARK":
-            # ... (나머지 코드는 동일)
             if park_state in ("WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW",
                               "WALL_ESCAPE", "SEARCH"):
                 if found:
