@@ -109,7 +109,8 @@ COLOR_CFG = {
     "red":    {"hsv1": ([169, 136, 175], [179, 207, 255]),
                "hsv2": None,
                "bgr":  ([20, 20, 80],  [255, 255, 255]), "draw": (0, 0, 255)},
-    "yellow": {"hsv1": ([24, 19, 193], [45, 165, 255]),
+    # ★ yellow HSV 수정
+    "yellow": {"hsv1": ([24, 48, 193], [45, 170, 255]),
                "hsv2": None,
                "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
     "blue":   {"hsv1": ([98, 100, 123], [138, 207, 246]),
@@ -130,36 +131,29 @@ def make_mask(frame, hsv, name):
 
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
-KP_ROT         = 0.030   # 픽셀당 회전속도 (기존 0.003 → 강화)
-W_MIN          = 0.25    # 최소 회전 속도 (너무 약한 회전 방지)
+KP_ROT         = 0.030
+W_MIN          = 0.25
 APPROACH_V     = 0.17
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 
-# ── 도착 판정 영역: centroid가 이 영역 안에 들어오면 도착으로 판정 ──────
-# 화면 하단 중앙 구역 (y: 하단 20%, x: 좌우 40% 이내)
-ARRIVE_Y_TOP   = int(240 * 0.85)   # 세로 기준선 (이 값보다 아래면 OK)
-ARRIVE_X_MARGIN = 40               # 화면 중앙에서 ±60px 이내
-
-# 도착 후 전진 시간 (초)
+ARRIVE_Y_TOP    = int(240 * 0.85)
+ARRIVE_X_MARGIN = 40
 ARRIVE_FORWARD_SEC = 0.7
-ARRIVE_FORWARD_V   = 0.15          # 도착 후 전진 속도
-
-# centroid가 이 프레임 수만큼 연속으로 영역 안에 있어야 도착 판정
+ARRIVE_FORWARD_V   = 0.15
 ARRIVE_CONFIRM     = 8
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
 mission_idx   = 0
 detect_count  = 0
-arrive_count  = 0              # 연속 도착 판정 카운터
+arrive_count  = 0
 
-# PARK 세부 상태
 park_state    = "TRACK"
 last_seen_x   = 160
 last_bottom_y = 0
 park_t        = None
-last_cmd      = (0.0, 0.0)   # 도착 직전 마지막 v, w
+last_cmd      = (0.0, 0.0)
 
 print(f"START | MISSION: {MISSION}")
 
@@ -191,7 +185,6 @@ try:
         big   = max(cnts, key=cv2.contourArea) if cnts else None
         found = big is not None and cv2.contourArea(big) > MIN_AREA
 
-        # centroid 계산
         cx_obj, cy_obj = -1, -1
         if found:
             M_mom = cv2.moments(big)
@@ -205,11 +198,9 @@ try:
             last_bottom_y = min(by_top + bh, 239)
 
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
-            # centroid 표시
             cv2.circle(frame, (cx_obj, cy_obj), 5, (0, 255, 255), -1)
             cv2.line(frame, (cx_obj, by_top), (cx_obj, by_top + bh), (0, 255, 255), 1)
 
-        # 도착 판정 영역 시각화 (항상 표시)
         arrive_x1 = cx_mid - ARRIVE_X_MARGIN
         arrive_x2 = cx_mid + ARRIVE_X_MARGIN
         cv2.rectangle(frame,
@@ -217,7 +208,6 @@ try:
                       (arrive_x2, H - 1),
                       (0, 0, 255), 1)
 
-        # centroid가 도착 영역 안에 있는지 판정
         def centroid_in_arrive_zone():
             return (cx_obj >= arrive_x1 and cx_obj <= arrive_x2 and
                     cy_obj >= ARRIVE_Y_TOP)
@@ -236,12 +226,12 @@ try:
                 print(f"[{target}] 발견 → 추적 시작")
                 continue
 
-            # ── 경계 체크: 박스(2m x 2m) 벗어나려 하면 강제 회전 ─────
+            # 경계 체크
             boundary_turn = None
             if ROBOT_X >  BOUND_X - MARGIN and math.cos(ROBOT_TH) > 0:
-                boundary_turn = -1   # 오른쪽 벽 → 왼쪽으로
+                boundary_turn = -1
             elif ROBOT_X < -BOUND_X + MARGIN and math.cos(ROBOT_TH) < 0:
-                boundary_turn =  1   # 왼쪽 벽 → 오른쪽으로
+                boundary_turn =  1
             elif ROBOT_Y >  BOUND_Y_MAX - MARGIN:
                 boundary_turn = adir
             elif ROBOT_Y <  BOUND_Y_MIN + MARGIN:
@@ -271,7 +261,7 @@ try:
                     park_t = time.time()
                     print(f"[{target}] 전진 완료 → 정차")
                 else:
-                    send_cmd(*last_cmd)   # 도착 직전 v, w 그대로 유지
+                    send_cmd(*last_cmd)
                 cv2.putText(frame, f"FORWARD: {target}", (10, 25), 0, 0.6, draw, 2)
 
             # ── 2. 정차 중 (PARKING) ───────────────────────────────
@@ -281,9 +271,11 @@ try:
                 if elapsed >= PARK_SEC:
                     mission_idx += 1
                     if mission_idx < len(MISSION):
-                        park_state = "SEARCH"
-                        last_seen_x = cx_mid + 40
-                        print(f"다음 미션 [{MISSION[mission_idx]}] 탐색 회전 시작")
+                        # ★ 제자리 회전(SEARCH) 없이 바로 LIDAR 모드로 복귀
+                        mode = "LIDAR"
+                        detect_count = 0
+                        arrive_count = 0
+                        print(f"다음 미션 [{MISSION[mission_idx]}] → LIDAR 모드로 복귀")
                     continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
 
@@ -291,13 +283,11 @@ try:
             elif found:
                 park_state = "TRACK"
 
-                # centroid가 영역 안에 있으면 카운터 증가, 벗어나면 리셋
                 if centroid_in_arrive_zone():
                     arrive_count += 1
                 else:
                     arrive_count = 0
 
-                # 연속 ARRIVE_CONFIRM 프레임 동안 영역 안에 있어야 도착 판정
                 if arrive_count >= ARRIVE_CONFIRM:
                     arrive_count = 0
                     park_state = "FORWARD"
@@ -308,7 +298,6 @@ try:
 
                 else:
                     err_x = cx_obj - cx_mid
-                    # err_x 비례 회전 + 최솟값 보장 (약한 회전 방지)
                     def cam_w(ex):
                         raw = -KP_ROT * ex
                         if abs(raw) < W_MIN and ex != 0:
@@ -333,7 +322,7 @@ try:
 
                 cv2.putText(frame, f"TRACKING: {target}", (10, 25), 0, 0.6, draw, 1)
 
-            # ── 4. 객체 놓침 / 탐색 (SEARCH) ──────────────────────
+            # ── 4. 객체 놓침 (SEARCH) ─────────────────────────────
             else:
                 park_state = "SEARCH"
                 v = 0.0
