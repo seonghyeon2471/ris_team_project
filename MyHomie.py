@@ -133,6 +133,11 @@ ARRIVE_CONFIRM      = 8
 ARRIVE_FORWARD_SEC  = 0.7
 ARRIVE_FORWARD_V    = 0.15
 
+# ── 색상 미인식 타임아웃 + 한바퀴 회전 탐색 ──────────────────────────────
+NO_DETECT_TIMEOUT  = 2.5        # 색상 못보고 주행한 시간 임계값 (초)
+SPIN_W             = 1.6        # 한바퀴 회전 각속도
+SPIN_ONE_ROUND_SEC = (2 * math.pi) / SPIN_W  # 360도 회전에 걸리는 시간 (~3.93초)
+
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
 mission_idx   = 0
@@ -145,11 +150,17 @@ arrive_count  = 0
 # "FORWARD" : 도착 직전 전진
 # "PARKING" : 정차
 # "SEARCH"  : 객체 놓침 → 회전 탐색
+# "SPIN"    : 한바퀴 회전 탐색 중
 park_state    = "ALIGN"
 align_count   = 0            # 연속 정렬 완료 프레임 카운터
 last_seen_x   = 160
 park_t        = None
 last_cmd      = (0.0, 0.0)
+
+# 색상 미인식 타이머
+no_detect_t   = time.time()     # 마지막으로 색상 인식한 시각
+spin_t        = None            # SPIN 시작 시각
+spin_found    = False           # SPIN 중 색상 발견 여부
 
 print(f"START | MISSION: {MISSION}")
 
@@ -228,6 +239,7 @@ try:
         if mode == "LIDAR":
             if found:
                 detect_count += 1
+                no_detect_t = time.time()   # 색상 보이면 타이머 리셋
             else:
                 detect_count = 0
 
@@ -236,7 +248,17 @@ try:
                 mode = "PARK"
                 park_state = "ALIGN"
                 align_count = 0
+                no_detect_t = time.time()
                 print(f"[{target}] 발견 → PARK 모드 진입")
+                continue
+
+            # ── 색상 못본 지 2.5초 초과 → SPIN 한바퀴 탐색 ──────────────
+            if time.time() - no_detect_t >= NO_DETECT_TIMEOUT:
+                mode = "SPIN"
+                spin_t = time.time()
+                spin_found = False
+                no_detect_t = time.time()   # 스핀 후 재진입 방지용 리셋
+                print(f"[{target}] {NO_DETECT_TIMEOUT}초 미인식 → SPIN 탐색 시작")
                 continue
 
             if fm < THRESH_STOP: v, w = 0.09, adir * 0.9
@@ -245,6 +267,34 @@ try:
             else: v, w = 0.28, 0.0
             send_cmd(v, w)
             cv2.putText(frame, "MODE: LIDAR", (10, 25), 0, 0.5, (255, 255, 255), 1)
+
+        # ══ SPIN 탐색 모드 (한바퀴 회전) ════════════════════════════
+        elif mode == "SPIN":
+            elapsed_spin = time.time() - spin_t
+
+            if found and not spin_found:
+                # 회전 중 색상 발견 → 즉시 PARK 모드로 전환
+                spin_found = True
+                detect_count = DETECT_CONFIRM   # 확정 처리
+                mode = "PARK"
+                park_state = "ALIGN"
+                align_count = 0
+                no_detect_t = time.time()
+                print(f"[{target}] SPIN 중 발견 → PARK 모드 진입")
+                continue
+
+            elif elapsed_spin >= SPIN_ONE_ROUND_SEC:
+                # 한바퀴 다 돌았는데 못찾음 → LIDAR 주행으로 복귀
+                mode = "LIDAR"
+                no_detect_t = time.time()
+                detect_count = 0
+                print(f"[{target}] SPIN 완료, 미발견 → LIDAR 주행 복귀")
+                send_cmd(0.28, 0.0)
+            else:
+                # 회전 중
+                send_cmd(0.0, SPIN_W)
+                remain = SPIN_ONE_ROUND_SEC - elapsed_spin
+                cv2.putText(frame, f"SPIN: {remain:.1f}s", (10, 25), 0, 0.6, (0, 255, 0), 2)
 
         # ══ PARK 모드 ════════════════════════════════════════════════
         elif mode == "PARK":
@@ -287,6 +337,7 @@ try:
 
             # ── 객체 발견 시 메인 로직 ─────────────────────────────────
             else:
+                no_detect_t = time.time()   # 색상 보이는 동안 타이머 리셋
                 err_x = cx_obj - cx_mid
 
                 # [도착 판정] 어떤 상태에서든 도착 영역 진입 시 우선 처리
