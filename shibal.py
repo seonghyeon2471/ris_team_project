@@ -231,7 +231,7 @@ try:
             print(f"[EMERGENCY PREVENT] 사방 폐쇄 구간 진입 조기 차단! (정면:{fm:.1f}cm)")
             stop_robot()
             time.sleep(0.15) 
-            send_cmd(0.0, adir * 2.2) \
+            send_cmd(0.0, adir * 2.2) 
             time.sleep(0.80) 
             stop_robot()
             time.sleep(0.1)
