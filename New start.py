@@ -152,13 +152,13 @@ APPROACH_V     = 0.17
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 
-# ── WALL FOLLOWING ─────────────────────────────────────────────────────
-WALL_TARGET   = 25.0
-WALL_KP       = 0.012
-WALL_RANGE    = 20
-WALL_V        = 0.22
-WALL_TURN_V   = 0.10
-WALL_LOST_W   = 0.4
+# ── WALL FOLLOWING ────────────────────────────────────────────────────
+WALL_TARGET  = 25.0
+WALL_KP      = 0.012
+WALL_RANGE   = 20
+WALL_V       = 0.22
+WALL_TURN_V  = 0.10
+WALL_LOST_W  = 0.4
 
 # ── 도착 판정 영역 ─────────────────────────────────────────────────────
 ARRIVE_Y_TOP       = int(240 * 0.85)
@@ -166,21 +166,20 @@ ARRIVE_X_MARGIN    = 40
 ARRIVE_FORWARD_SEC = 1.0
 ARRIVE_CONFIRM     = 8
 
-# ── SEARCH 파라미터 (★ 신규) ──────────────────────────────────────────
-# 1바퀴당 소요 시간(초) — 실측 후 조정. w=1.3rad/s 기준 약 2π/1.3 ≈ 4.8s
-SPIN_ONE_ROUND_SEC  = 4.8
-SPIN_ROUNDS         = 3          # 제자리 회전 바퀴 수
-SPIN_W              = 1.3        # 제자리 회전 각속도
-# 원형 탐색: 반경 ≈ v/w.  0.18/0.60 ≈ 0.30m = 30cm
-CIRCLE_V            = 0.18
-CIRCLE_W            = 0.60
-CIRCLE_SEC          = 12.0       # 원형 탐색 최대 지속 시간(초)
+# ── SEARCH 파라미터 ───────────────────────────────────────────────────
+SPIN_ONE_ROUND_SEC = 4.8   # 1바퀴 소요 시간(초) — 실측 후 조정
+SPIN_ROUNDS        = 3     # 제자리 회전 바퀴 수
+SPIN_W             = 1.3   # 제자리 회전 각속도
+SEARCH_PAUSE_SEC   = 2.0   # SPIN 후 정지 시간(초)
+CIRCLE_V           = 0.18  # 원형 탐색 전진 속도
+CIRCLE_W           = 0.60  # 원형 탐색 회전 속도 (반경 ≈ V/W ≈ 30cm)
+CIRCLE_SEC         = 12.0  # 원형 탐색 최대 지속 시간(초)
 
 # ── STATE ─────────────────────────────────────────────────────────────
-mode          = "LIDAR"
-mission_idx   = 0
-detect_count  = 0
-arrive_count  = 0
+mode         = "LIDAR"
+mission_idx  = 0
+detect_count = 0
+arrive_count = 0
 
 park_state    = "TRACK"
 last_seen_x   = 160
@@ -188,9 +187,8 @@ last_bottom_y = 0
 park_t        = None
 last_cmd      = (0.0, 0.0)
 
-# ★ SEARCH 세부 상태
-search_sub      = "SPIN"   # "SPIN" | "CIRCLE"
-search_t        = None     # 현재 search_sub 시작 시각
+search_sub = "SPIN"   # "SPIN" | "PAUSE" | "CIRCLE"
+search_t   = None     # 현재 search_sub 시작 시각
 
 print(f"START | MISSION: {MISSION}")
 
@@ -230,7 +228,6 @@ try:
                 cy_obj = int(M_mom["m01"] / M_mom["m00"])
 
             bx, by_top, bw, bh = cv2.boundingRect(big)
-            err_x  = cx_obj - cx_mid
             last_seen_x   = cx_obj
             last_bottom_y = min(by_top + bh, 239)
 
@@ -254,7 +251,7 @@ try:
 
             if detect_count >= DETECT_CONFIRM:
                 detect_count = 0
-                mode = "PARK"
+                mode       = "PARK"
                 park_state = "TRACK"
                 print(f"[{target}] 발견 → 추적 시작")
                 continue
@@ -268,39 +265,37 @@ try:
         # ══ PARK 모드 ════════════════════════════════════════════
         elif mode == "PARK":
 
-            # ── 1. 도착 후 전진 중 (FORWARD) ──────────────────────
+            # ── 1. 도착 후 전진 (FORWARD) ─────────────────────────
             if park_state == "FORWARD":
                 elapsed = time.time() - park_t
                 if elapsed >= ARRIVE_FORWARD_SEC:
                     stop_robot()
                     park_state = "PARKING"
-                    park_t = time.time()
+                    park_t     = time.time()
                     print(f"[{target}] 전진 완료 → 정차")
                 else:
                     send_cmd(*last_cmd)
                 cv2.putText(frame, f"FORWARD: {target}", (10, 25), 0, 0.6, draw, 2)
 
-            # ── 2. 정차 중 (PARKING) ───────────────────────────────
+            # ── 2. 정차 (PARKING) ──────────────────────────────────
             elif park_state == "PARKING":
                 stop_robot()
                 elapsed = time.time() - park_t
                 if elapsed >= PARK_SEC:
                     mission_idx += 1
                     if mission_idx < len(MISSION):
-                        park_state  = "SEARCH"
-                        search_sub  = "SPIN"        # ★ 다음 미션도 SPIN부터
-                        search_t    = None
+                        park_state = "SEARCH"
+                        search_sub = "SPIN"
+                        search_t   = None
                         last_seen_x = cx_mid + 40
                         print(f"다음 미션 [{MISSION[mission_idx]}] 탐색 시작 (SPIN)")
                     continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
 
-            # ── 3. 객체 추적 중 (TRACK) ────────────────────────────
+            # ── 3. 추적 (TRACK) ────────────────────────────────────
             elif park_state == "TRACK" and found:
-                # 찾았으면 search 상태 초기화
                 search_sub = "SPIN"
                 search_t   = None
-                arrive_count = 0 if not centroid_in_arrive_zone() else arrive_count
 
                 if centroid_in_arrive_zone():
                     arrive_count += 1
@@ -309,9 +304,9 @@ try:
 
                 if arrive_count >= ARRIVE_CONFIRM:
                     arrive_count = 0
-                    park_state = "FORWARD"
-                    park_t = time.time()
-                    print(f"[{target}] centroid {ARRIVE_CONFIRM}프레임 확정 → {ARRIVE_FORWARD_SEC}초 전진")
+                    park_state   = "FORWARD"
+                    park_t       = time.time()
+                    print(f"[{target}] {ARRIVE_CONFIRM}프레임 확정 → {ARRIVE_FORWARD_SEC}초 전진")
                     send_cmd(*last_cmd)
                     continue
                 else:
@@ -344,21 +339,13 @@ try:
 
                 cv2.putText(frame, f"TRACKING: {target}", (10, 25), 0, 0.6, draw, 1)
 
-            # ── 4. 탐색 (SEARCH) ★ 수정 핵심 부분 ────────────────
+            # ── 4. 탐색 (SEARCH) ───────────────────────────────────
             else:
                 park_state   = "SEARCH"
                 arrive_count = 0
+                now          = time.time()
 
-                now = time.time()
-
-                # search_sub 진입 시각 기록
-                if search_t is None:
-                    search_t = now
-                    print(f"[{target}] SEARCH 시작 → {search_sub}")
-
-                elapsed_sub = now - search_t
-
-                # 재발견 시 즉시 TRACK으로
+                # 재발견 즉시 TRACK 복귀
                 if found:
                     park_state = "TRACK"
                     search_sub = "SPIN"
@@ -366,7 +353,14 @@ try:
                     print(f"[{target}] 재발견 → TRACK")
                     continue
 
-                # ── SPIN: 제자리 회전 ────────────────────────────
+                # 최초 진입 시 타이머 시작
+                if search_t is None:
+                    search_t = now
+                    print(f"[{target}] SEARCH 시작 → {search_sub}")
+
+                elapsed_sub = now - search_t  # 현재 sub-state 경과 시간
+
+                # ── SPIN: 제자리 회전 ──────────────────────────
                 if search_sub == "SPIN":
                     spin_total = SPIN_ONE_ROUND_SEC * SPIN_ROUNDS
                     if elapsed_sub < spin_total:
@@ -377,15 +371,26 @@ try:
                             f"SPIN {rounds_done:.1f}/{SPIN_ROUNDS} rev",
                             (10, 25), 0, 0.55, (0, 200, 255), 1)
                     else:
-                        # 3바퀴 완료 → CIRCLE로 전환
-                        search_sub = "CIRCLE"
-                        search_t   = now
-                        print(f"[{target}] SPIN 완료 → SEARCH_CIRCLE 시작")
+                        search_sub = "PAUSE"
+                        search_t   = now          # ★ 타이머 리셋
+                        stop_robot()
+                        print(f"[{target}] SPIN 완료 → 2초 정지")
 
-                # ── CIRCLE: 원형 탐색 ────────────────────────────
+                # ── PAUSE: 정지 ────────────────────────────────
+                elif search_sub == "PAUSE":
+                    stop_robot()
+                    if elapsed_sub < SEARCH_PAUSE_SEC:
+                        cv2.putText(frame,
+                            f"PAUSE {SEARCH_PAUSE_SEC - elapsed_sub:.1f}s",
+                            (10, 25), 0, 0.55, (180, 180, 0), 1)
+                    else:
+                        search_sub = "CIRCLE"
+                        search_t   = now          # ★ 타이머 리셋
+                        print(f"[{target}] PAUSE 완료 → CIRCLE 시작")
+
+                # ── CIRCLE: 원형 탐색 ──────────────────────────
                 elif search_sub == "CIRCLE":
                     if elapsed_sub < CIRCLE_SEC:
-                        # 장애물 감지 시 회피 우선
                         if fm < THRESH_TURN:
                             send_cmd(0.05, adir * 1.0)
                         else:
@@ -394,11 +399,10 @@ try:
                             f"CIRCLE {elapsed_sub:.1f}/{CIRCLE_SEC:.0f}s",
                             (10, 25), 0, 0.55, (0, 140, 255), 1)
                     else:
-                        # CIRCLE 시간 초과 → LIDAR 모드로 fallback
-                        mode        = "LIDAR"
-                        park_state  = "TRACK"
-                        search_sub  = "SPIN"
-                        search_t    = None
+                        mode         = "LIDAR"
+                        park_state   = "TRACK"
+                        search_sub   = "SPIN"
+                        search_t     = None       # ★ 타이머 리셋
                         detect_count = 0
                         print(f"[{target}] CIRCLE 시간 초과 → LIDAR 복귀")
 
