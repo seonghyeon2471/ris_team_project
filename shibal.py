@@ -30,15 +30,15 @@ EMA_ALPHA   = 0.60
 MEDIAN_K    = 1         
 FRONT_RANGE = 40        
 
-# 일반 주행/벽 추종용 임계값
+# 오리지널 주행 임계값 복구
 THRESH_SLOW = 30.0      
 THRESH_TURN = 12.0      
 THRESH_STOP = 8.0       
 
 # LIDAR 모드 전용 장애물 탐색 파라미터
-WALL_SEARCH_V = 0.15      # 장애물 탐색 속도 (천천히)
-WALL_SEARCH_W = 0.45      # 장애물 탐색 회전 각속도
-WALL_SEARCH_DIST = 80.0   # 장애물 탐색 거리 (80cm 이내)
+WALL_SEARCH_V = 0.15      
+WALL_SEARCH_W = 0.45      
+WALL_SEARCH_DIST = 80.0   
 
 _scan     = np.full(360, 250.0, dtype=np.float32)
 _scan_pub = np.full(360, 250.0, dtype=np.float32)
@@ -79,7 +79,6 @@ def front_min(scan):
     idx = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     return float(np.min(scan[idx]))
 
-# 양쪽 장애물 진입 시 널뛰는 조향 진동 방지 (데드존 및 고정 탈출 알고리즘 적용)
 def avoid_dir(scan):
     left_m = np.mean(scan[1:90])
     right_m = np.mean(scan[271:360])
@@ -181,14 +180,14 @@ APPROACH_V      = 0.17
 PARK_SEC        = 1.2
 DETECT_CONFIRM = 6
 
-# [개선] 아슬아슬하게 튕기지 않도록 주차 인정 영역을 살짝 상향 조정 (85% -> 75%)
-ARRIVE_Y_TOP       = int(240 * 0.75)
+# 오리지널 주차 도착 영역 롤백 (85%)
+ARRIVE_Y_TOP       = int(240 * 0.85)
 ARRIVE_X_MARGIN    = 40
 ARRIVE_FORWARD_SEC = 0.7  
 ARRIVE_FORWARD_V   = 0.15  
 ARRIVE_CONFIRM     = 8
 
-WALL_TARGET     = 25.0  # 25cm 이격
+WALL_TARGET     = 25.0  
 WALL_SCAN_DIST  = 45.0  
 WALL_APPROACH_V = 0.15  
 WALL_KP         = 0.010 
@@ -497,7 +496,7 @@ try:
 
                 cv2.putText(frame, f"WALL-ESCAPE [{target}]", (10, 25), 0, 0.5, (0, 128, 255), 1)
 
-            # ── 4. TRACK [★ 주차 중 튕김 현상 원천 봉쇄 수정] ──
+            # ── 4. TRACK (오리지널 가중치 및 임계값 완전 복구) ──
             elif found:
                 park_state     = "TRACK"
                 wf_angle_accum = 0.0
@@ -524,28 +523,19 @@ try:
                             return -W_MIN if ex > 0 else W_MIN
                         return raw
 
-                    # [핵심 개선] 주차(TRACK) 대상에 접근할 때는 전용 임계값을 사용하여 
-                    # 타겟을 벽이나 장애물로 착각해 튕겨 나가는 것을 막습니다.
-                    TRACK_THRESH_SLOW = 20.0  
-                    TRACK_THRESH_TURN = 10.0  
-                    TRACK_THRESH_STOP = 6.0   
-
-                    if fm >= TRACK_THRESH_SLOW:
+                    # 원래대로 오리지널 전역 임계값(THRESH_SLOW, TURN, STOP) 적용
+                    if fm >= THRESH_SLOW:
                         v = reduced_v
                         w = cam_w(err_x)
                     else:
                         w_cam = cam_w(err_x)
                         w_lid = adir * 1.2 
-                        
-                        if fm < TRACK_THRESH_STOP:
-                            # 진짜 충돌 직전(6cm)에는 최소 미속 주행만 유지
-                            v, w = 0.02, w_lid
-                        elif fm < TRACK_THRESH_TURN:
-                            # 주차지 근처이므로 라이다 회피를 30%로 낮추고 카메라 정렬 가중치를 70%로 우세하게 줌
-                            v, w = 0.05, 0.3 * w_lid + 0.7 * w_cam
+                        if fm < THRESH_STOP:
+                            v, w = 0.04, w_lid
+                        elif fm < THRESH_TURN:
+                            v, w = 0.08, 0.7 * w_lid + 0.3 * w_cam
                         else:
-                            # 10cm ~ 20cm 구간에서는 라이다 개입을 10%로 최소화하여 카메라 뷰를 추종하도록 고정
-                            v, w = reduced_v, 0.1 * w_lid + 0.9 * w_cam
+                            v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
 
                     last_cmd = (v, w)
                     send_cmd(v, w)
