@@ -98,18 +98,20 @@ def wall_follow(scan, fm, adir):
     right_close = side_min(scan, 240, 300)
 
     if fm < THRESH_STOP:
-        return (0.08, adir * 1.1)
+        return (0.08, adir * 1.3) # 전방 급정거 회전 속도 약간 상향
     if fm < THRESH_TURN:
-        return (WALL_TURN_V, adir * 0.85)
+        return (WALL_TURN_V, adir * 1.0) # 전방 회전 속도 상향
 
     if left_close < THRESH_STOP:
-        return (WALL_V * 0.7, -0.7)
+        return (WALL_V * 0.7, -0.9) # 측면 충돌 회피 각속도 상향
     if right_close < THRESH_STOP:
-        return (WALL_V * 0.7,  0.7)
+        return (WALL_V * 0.7,  0.9) # 측면 충돌 회피 각속도 상향
 
+    # 벽 분실 시 복귀 시도
     if ld > WALL_TARGET * 2.0:
         nearest = nearest_obstacle_angle(scan)
         err_a = nearest if nearest <= 180 else nearest - 360
+        # WALL_LOST_W 상향에 따른 클리핑 범위 조정
         w_recover = float(np.clip(-err_a / 90.0 * WALL_LOST_W, -WALL_LOST_W, WALL_LOST_W))
         return (WALL_V * 0.6, w_recover)
 
@@ -118,17 +120,20 @@ def wall_follow(scan, fm, adir):
     if fm < THRESH_SLOW:
         blend = float(np.clip(
             (THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
-        w = (1 - blend) * w + blend * adir * 0.5
+        w = (1 - blend) * w + blend * adir * 0.7 # 믹싱 시 라이다 회전 비중 증가
         v = WALL_V * (1.0 - 0.4 * blend)
     else:
         v = WALL_V
-    w = float(np.clip(w, -0.9, 0.9))
+    
+    # ── [벽추종 각속도 상향] 최대 제한을 0.9 -> 1.4로 확장 ──
+    w = float(np.clip(w, -1.4, 1.4))
     return (v, w)
 
 # ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
     v = np.clip(v, -0.4, 0.4)
-    w = np.clip(w, -1.8, 1.8)  # [속도 상향] 각속도 제한 1.8로 확장
+    # ── [각속도 상한선 변경] 1.8 -> 2.2로 변경 ──
+    w = np.clip(w, -2.2, 2.2)  
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
 def stop_robot(): send_cmd(0.0, 0.0)
@@ -137,10 +142,10 @@ def stop_robot(): send_cmd(0.0, 0.0)
 COLOR_CFG = {
     "red":    {"hsv1": ([169, 136, 175], [179, 207, 255]),
                "hsv2": None,
-               "bgr":  ([20, 20, 80],  [255, 255, 255]), "draw": (0, 0, 255)},
+               "bgr":  ([20, 20, 80],   [255, 255, 255]), "draw": (0, 0, 255)},
     "yellow": {"hsv1": ([24, 19, 193], [45, 165, 255]),
                "hsv2": None,
-               "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
+               "bgr":  ([0, 80, 80],    [255, 255, 255]), "draw": (0, 200, 255)},
     "blue":   {"hsv1": ([98, 100, 123], [138, 207, 246]),
                "hsv2": None,
                "bgr":  ([40,  0,   0], [255, 220, 220]), "draw": (255, 80, 0)},
@@ -158,11 +163,11 @@ def make_mask(frame, hsv, name):
     return cv2.bitwise_and(m, bm)
 
 # ── PARAMS ────────────────────────────────────────────────────────────
-MIN_AREA       = 400
-KP_ROT         = 0.030
-W_MIN          = 0.25
-APPROACH_V     = 0.17
-PARK_SEC       = 1.2
+MIN_AREA        = 400
+KP_ROT          = 0.035 # 카메라 추적 반응성 강화를 위해 P Gain 약간 상향 (0.030 -> 0.035)
+W_MIN           = 0.30  # 추적 최소 각속도 약간 상향 (0.25 -> 0.30)
+APPROACH_V      = 0.17
+PARK_SEC        = 1.2
 DETECT_CONFIRM = 6
 
 ARRIVE_Y_TOP       = int(240 * 0.85)
@@ -175,16 +180,16 @@ ARRIVE_CONFIRM     = 8
 WALL_TARGET     = 30.0
 WALL_SCAN_DIST  = 45.0
 WALL_APPROACH_V = 0.18
-WALL_KP         = 0.012
+WALL_KP         = 0.015 # 벽면 추적 반응성 향상을 위해 P Gain 상향 (0.012 -> 0.015)
 WALL_V          = 0.20
 WALL_TURN_V     = 0.10
-WALL_LOST_W     = 0.5
+WALL_LOST_W     = 0.8   # ── [벽추종 각속도 상향] 벽 유실 시 복귀 회전 속도 상향 (0.5 -> 0.8) ──
 
 # 순환 감지 및 이탈
 FULL_CIRCLE_RAD    = 2 * math.pi * 0.85
 ESCAPE_RAD         = math.pi * 0.6
 ESCAPE_V           = 0.13
-ESCAPE_W           = 1.25  # [속도 상향] 이탈 회전 각속도 상향
+ESCAPE_W           = 1.70  # ── [벽추종 각속도 상향] 이탈 회전 각속도 상향 (1.25 -> 1.70) ──
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
@@ -272,9 +277,9 @@ try:
                 print(f"[{target}] 발견 → 추적 시작")
                 continue
 
-            if fm < THRESH_STOP:   v, w = 0.09, adir * 0.9
-            elif fm < THRESH_TURN: v, w = 0.13, adir * 0.7
-            elif fm < THRESH_SLOW: v, w = 0.18, adir * 0.4
+            if fm < THRESH_STOP:   v, w = 0.09, adir * 1.1 # 기본 회피각 속도 상향
+            elif fm < THRESH_TURN: v, w = 0.13, adir * 0.8
+            elif fm < THRESH_SLOW: v, w = 0.18, adir * 0.5
             else:                  v, w = 0.28, 0.0
             send_cmd(v, w)
             cv2.putText(frame, "MODE: LIDAR", (10, 25), 0, 0.5, (255, 255, 255), 1)
@@ -322,7 +327,7 @@ try:
                     esc_angle_accum = 0.0
                     if mission_idx < len(MISSION):
                         park_state = "WALL_SEARCH"
-                        ws_start_t = time.time()  # 타이머 초기화
+                        ws_start_t = time.time()  
                         print(f"다음 미션 [{MISSION[mission_idx]}] wall-following 탐색 시작")
                     continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
@@ -345,18 +350,17 @@ try:
                 # [개활지 대책 ①] 주변 80cm 이내에 장애물이 있을 때만 방향 정렬 회전
                 if nd < 80.0:
                     err_a = nearest if nearest <= 180 else nearest - 360
-                    w_s   = float(np.clip(-err_a / 90.0 * 0.8, -0.9, 0.9))
+                    w_s   = float(np.clip(-err_a / 90.0 * 1.2, -1.2, 1.2)) # 벽 정렬 회전 가속
                     send_cmd(0.0, w_s)
                 else:
-                    # [개활지 대책 ②] 주변이 뻥 뚫린 개활지라면, 제자리 회전 대신 완만한 호를 그리며 전진 탐색
-                    # v=0.15로 전진하면서 w=0.35로 넓게 회전하여 새로운 벽/객체를 찾으러 나아감
-                    send_cmd(0.15, 0.35)
+                    # [개활지 대책 ②] 주위가 빈 개활지라면 곡선을 그리며 넓게 서치 (회전 반경 확대)
+                    send_cmd(0.15, 0.45)
 
-                # [개활지 대책 ③] 만약 개활지에서 6.0초 이상 헤매며 아무것도 발견하지 못했다면 강제 직진 탈출
+                # [개활지 대책 ③] 6초 이상 장애물 미검출 시 직진 탈출
                 if time.time() - ws_start_t > 6.0:
                     print("[개활지 예외 처리] 장시간 장애물 미검출 -> 넓은 영역 탈출을 위해 강제 직진")
                     send_cmd(0.22, 0.0)
-                    time.sleep(0.8)  # 0.8초간 강제 직진 후 다시 탐색하도록 타이머 초기화
+                    time.sleep(0.8)  
                     ws_start_t = time.time()
 
                 cv2.putText(frame, f"WALL-SEARCH [{target}] nd={nd:.0f}cm",
@@ -376,13 +380,13 @@ try:
                     continue
 
                 if fm < THRESH_STOP:
-                    v, w = 0.08, adir * 1.0
+                    v, w = 0.08, adir * 1.2
                 elif fm < THRESH_TURN:
-                    v, w = WALL_APPROACH_V * 0.6, adir * 0.7
+                    v, w = WALL_APPROACH_V * 0.6, adir * 0.9
                 else:
                     nearest = nearest_obstacle_angle(scan)
                     err_a   = nearest if nearest <= 180 else nearest - 360
-                    w_a     = float(np.clip(-err_a / 120.0 * 0.4, -0.4, 0.4))
+                    w_a     = float(np.clip(-err_a / 120.0 * 0.6, -0.6, 0.6))
                     v, w    = WALL_APPROACH_V, w_a
                 send_cmd(v, w)
                 cv2.putText(frame, f"WALL-APPROACH [{target}] nd={nd:.0f}cm ld={ld:.0f}cm",
@@ -419,12 +423,12 @@ try:
                 dt  = now - wf_last_t if wf_last_t else 0.0
                 wf_last_t = now
 
-                send_cmd(ESCAPE_V, -ESCAPE_W)
+                send_cmd(ESCAPE_V, -ESCAPE_W) # ESCAPE_W = 1.70 적용
                 esc_angle_accum += ESCAPE_W * dt
 
                 if esc_angle_accum >= ESCAPE_RAD:
                     park_state      = "WALL_SEARCH"
-                    ws_start_t      = time.time()  # 탐색 시각 초기화
+                    ws_start_t      = time.time()  
                     esc_angle_accum = 0.0
                     wf_last_t       = None
                     wf_angle_accum  = 0.0
@@ -465,7 +469,7 @@ try:
                         w = cam_w(err_x)
                     else:
                         w_cam = cam_w(err_x)
-                        w_lid = adir * 0.7
+                        w_lid = adir * 0.9 # 장애물 조우 시 회피 반응성 향상
                         if fm < THRESH_STOP:
                             v, w = 0.09, w_lid
                         elif fm < THRESH_TURN:
@@ -485,14 +489,15 @@ try:
                     arrive_count = 0
                     print(f"[{target}] 객체 놓침 → SEARCH")
 
-                w = -1.3 if last_seen_x > cx_mid else 1.3
+                # ── [객체 탐색 각속도 상향] 1.3 -> 1.8 적용 ──
+                w = -1.8 if last_seen_x > cx_mid else 1.8
                 send_cmd(0.0, w)
 
                 if park_t is None or park_state != "SEARCH":
                     park_t = time.time()
                 if time.time() - park_t > 2.5:
                     park_state     = "WALL_SEARCH"
-                    ws_start_t     = time.time()  # 탐색 상태 진입 시 타이머 리셋
+                    ws_start_t     = time.time()  
                     park_t         = None
                     wf_angle_accum = 0.0
                     wf_last_t      = None
