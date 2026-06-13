@@ -300,7 +300,7 @@ try:
             else:
                 park_state = "SEARCH"
                 v = 0.0
-                w = (-0.8 if last_seen_x > cx_mid else 0.8)
+                w = (-1.0 if last_seen_x > cx_mid else 1.0)
                 send_cmd(v, w)
                 cv2.putText(frame, f"SEARCHING: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
 
