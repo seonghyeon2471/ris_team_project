@@ -16,7 +16,7 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 time.sleep(1.0)
-cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
 cap.set(cv2.CAP_PROP_AUTO_WB, 0)
 
 # ── LIDAR BOOT ────────────────────────────────────────────────────────
@@ -28,10 +28,10 @@ print("LIDAR OK")
 # ── LIDAR ─────────────────────────────────────────────────────────────
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
-FRONT_RANGE  = 50  
-THRESH_SLOW  = 55.0  
-THRESH_TURN  = 35.0  
-THRESH_STOP  = 8.0   
+FRONT_RANGE  = 45
+THRESH_SLOW  = 55.0
+THRESH_TURN  = 35.0
+THRESH_STOP  = 18.0
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -78,20 +78,20 @@ def avoid_dir(scan):
 # ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
     v = np.clip(v, -0.4, 0.4)
-    w = np.clip(w, -1.6, 1.6) 
+    w = np.clip(w, -1.6, 1.6)
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
 def stop_robot(): send_cmd(0.0, 0.0)
 
 # ── COLOR CONFIG ──────────────────────────────────────────────────────
 COLOR_CFG = {
-    "red":    {"hsv1": ([169, 168, 96], [179, 222, 157]),
+    "red":    {"hsv1": ([169, 136, 175], [179, 207, 255]),
                "hsv2": None,
                "bgr":  ([20, 20, 80],  [255, 255, 255]), "draw": (0, 0, 255)},
-    "yellow": {"hsv1": ([16, 137, 142], [30, 214, 195]),
+    "yellow": {"hsv1": ([24, 19, 214], [41, 143, 255]),
                "hsv2": None,
                "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
-    "blue":   {"hsv1": ([106, 168, 54], [131, 210, 82]),
+    "blue":   {"hsv1": ([98, 100, 123], [138, 207, 246]),
                "hsv2": None,
                "bgr":  ([40,  0,   0], [255, 220, 220]), "draw": (255, 80, 0)},
 }
@@ -109,29 +109,36 @@ def make_mask(frame, hsv, name):
 
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
-KP_ROT         = 0.003
-APPROACH_V     = 0.22
+KP_ROT         = 0.030   # 픽셀당 회전속도 (기존 0.003 → 강화)
+W_MIN          = 0.25    # 최소 회전 속도 (너무 약한 회전 방지)
+APPROACH_V     = 0.17
 PARK_SEC       = 1.2
-DETECT_CONFIRM = 3 
-BOTTOM_10PCT   = int(240 * 0.90)  
+DETECT_CONFIRM = 6
 
-# 🚨 [후한 버전 핵심 수정] 20% -> 10% 구역으로 축소하여 정면 인정 범위를 좌우 80%로 확대!
-LEFT_LIMIT     = int(320 * 0.10)  # 32px보다 왼쪽일 때만 구석으로 판정
-RIGHT_LIMIT    = int(320 * 0.90)  # 288px보다 오른쪽일 때만 구석으로 판정
+# ── 도착 판정 영역: centroid가 이 영역 안에 들어오면 도착으로 판정 ──────
+# 화면 하단 중앙 구역 (y: 하단 20%, x: 좌우 40% 이내)
+ARRIVE_Y_TOP   = int(240 * 0.85)   # 세로 기준선 (이 값보다 아래면 OK)
+ARRIVE_X_MARGIN = 40               # 화면 중앙에서 ±60px 이내
+
+# 도착 후 전진 시간 (초)
+ARRIVE_FORWARD_SEC = 1.0
+ARRIVE_FORWARD_V   = 0.15          # 도착 후 전진 속도
+
+# centroid가 이 프레임 수만큼 연속으로 영역 안에 있어야 도착 판정
+ARRIVE_CONFIRM     = 8
 
 # ── STATE ─────────────────────────────────────────────────────────────
-mode          = "START_SEARCH"  
+mode          = "LIDAR"
 mission_idx   = 0
 detect_count  = 0
+arrive_count  = 0              # 연속 도착 판정 카운터
 
+# PARK 세부 상태
 park_state    = "TRACK"
 last_seen_x   = 160
 last_bottom_y = 0
-was_in_bottom = False
-was_in_left   = False
-was_in_right  = False
-
 park_t        = None
+last_cmd      = (0.0, 0.0)   # 도착 직전 마지막 v, w
 
 print(f"START | MISSION: {MISSION}")
 
@@ -163,117 +170,139 @@ try:
         big   = max(cnts, key=cv2.contourArea) if cnts else None
         found = big is not None and cv2.contourArea(big) > MIN_AREA
 
-        # 넓어진 가이드라인 시각화 (빨간선 사이가 전부 정면 영역)
-        cv2.line(frame, (0, BOTTOM_10PCT), (W, BOTTOM_10PCT), (0, 0, 255), 1)
-        cv2.line(frame, (LEFT_LIMIT, 0), (LEFT_LIMIT, H), (0, 0, 255), 1)   
-        cv2.line(frame, (RIGHT_LIMIT, 0), (RIGHT_LIMIT, H), (0, 0, 255), 1) 
-
+        # centroid 계산
+        cx_obj, cy_obj = -1, -1
         if found:
+            M_mom = cv2.moments(big)
+            if M_mom["m00"] > 0:
+                cx_obj = int(M_mom["m10"] / M_mom["m00"])
+                cy_obj = int(M_mom["m01"] / M_mom["m00"])
+
             bx, by_top, bw, bh = cv2.boundingRect(big)
-            ox     = bx + bw // 2
-            by_bot = min(by_top + bh, 239)
-            err_x  = ox - cx_mid
-            last_seen_x   = ox
-            last_bottom_y = by_bot
-            
-            # 🚨 [후한 판정] 가로축 32px ~ 288px 사이의 드넓은 공간에서 바닥에 닿으면 합격!
-            was_in_bottom = (by_bot >= BOTTOM_10PCT) and (LEFT_LIMIT < ox < RIGHT_LIMIT)
-            
-            was_in_left   = (ox <= LEFT_LIMIT)
-            was_in_right  = (ox >= RIGHT_LIMIT)
+            err_x  = cx_obj - cx_mid
+            last_seen_x   = cx_obj
+            last_bottom_y = min(by_top + bh, 239)
 
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
-            cv2.line(frame, (ox, by_top), (ox, by_top + bh), (0, 255, 255), 2)
+            # centroid 표시
+            cv2.circle(frame, (cx_obj, cy_obj), 5, (0, 255, 255), -1)
+            cv2.line(frame, (cx_obj, by_top), (cx_obj, by_top + bh), (0, 255, 255), 1)
 
-        # ══ START_SEARCH 모드 (시작 시 제자리 회전 탐색) ══════════════
-        if mode == "START_SEARCH":
+        # 도착 판정 영역 시각화 (항상 표시)
+        arrive_x1 = cx_mid - ARRIVE_X_MARGIN
+        arrive_x2 = cx_mid + ARRIVE_X_MARGIN
+        cv2.rectangle(frame,
+                      (arrive_x1, ARRIVE_Y_TOP),
+                      (arrive_x2, H - 1),
+                      (0, 0, 255), 1)
+
+        # centroid가 도착 영역 안에 있는지 판정
+        def centroid_in_arrive_zone():
+            return (cx_obj >= arrive_x1 and cx_obj <= arrive_x2 and
+                    cy_obj >= ARRIVE_Y_TOP)
+
+        # ══ LIDAR 모드 ═══════════════════════════════════════════
+        if mode == "LIDAR":
             if found:
                 detect_count += 1
-                if detect_count >= DETECT_CONFIRM:
-                    detect_count = 0
-                    mode = "PARK"
-                    park_state = "TRACK"
-                    print(f" 정면 즉시 포착 완료! 회전 없이 [{target}] 미션 바로 진입.")
-                    continue
-                v, w = 0.0, 0.0 
             else:
                 detect_count = 0
-                v, w = 0.0, 1.3 
 
-            send_cmd(v, w)
-            cv2.putText(frame, "MODE: START_SEARCH", (10, 25), 0, 0.5, (0, 255, 255), 1)
-
-        # ══ LIDAR 모드 (장애물 제자리 조향 회피 제어) ══════════════════════
-        elif mode == "LIDAR":
-            if fm >= THRESH_SLOW:
-                print(" 장애물 회피 완료 -> 다시 객체 탐색 시퀀스 전환")
+            if detect_count >= DETECT_CONFIRM:
+                detect_count = 0
                 mode = "PARK"
-                park_state = "SEARCH" 
-                was_in_bottom = was_in_left = was_in_right = False
+                park_state = "TRACK"
+                print(f"[{target}] 발견 → 추적 시작")
                 continue
 
-            v = 0.0
-            w = adir * 1.3
-            
+            if fm < THRESH_STOP: v, w = 0.09, adir * 0.9
+            elif fm < THRESH_TURN: v, w = 0.13, adir * 0.7
+            elif fm < THRESH_SLOW: v, w = 0.18, adir * 0.4
+            else: v, w = 0.28, 0.0
             send_cmd(v, w)
-            cv2.putText(frame, "MODE: LIDAR (PIVOT AVOID)", (10, 25), 0, 0.5, (0, 0, 255), 1)
+            cv2.putText(frame, "MODE: LIDAR", (10, 25), 0, 0.5, (255, 255, 255), 1)
 
-        # ══ PARK 모드 (추적 / 정차 / 탐색) ══════════════════════════
+        # ══ PARK 모드 ════════════════════════════════════════════
         elif mode == "PARK":
-            # 주행(TRACK) 중에 장애물이 슬로우 영역(55cm) 안으로 들어오면 즉시 제자리 회피(LIDAR) 모드로 변경
-            if park_state == "TRACK" and fm < THRESH_SLOW:
-                print("⚠️ 주행 중 장애물 감지! 제자리 회피(LIDAR) 모드로 전환합니다.")
-                mode = "LIDAR"
-                continue
 
-            # 1. 정차 중 (PARKING)
-            if park_state == "PARKING":
+            # ── 1. 도착 후 전진 중 (FORWARD) ──────────────────────
+            if park_state == "FORWARD":
+                elapsed = time.time() - park_t
+                if elapsed >= ARRIVE_FORWARD_SEC:
+                    stop_robot()
+                    park_state = "PARKING"
+                    park_t = time.time()
+                    print(f"[{target}] 전진 완료 → 정차")
+                else:
+                    send_cmd(*last_cmd)   # 도착 직전 v, w 그대로 유지
+                cv2.putText(frame, f"FORWARD: {target}", (10, 25), 0, 0.6, draw, 2)
+
+            # ── 2. 정차 중 (PARKING) ───────────────────────────────
+            elif park_state == "PARKING":
                 stop_robot()
                 elapsed = time.time() - park_t
                 if elapsed >= PARK_SEC:
                     mission_idx += 1
                     if mission_idx < len(MISSION):
                         park_state = "SEARCH"
-                        last_seen_x = cx_mid + 40 
-                        was_in_bottom = was_in_left = was_in_right = False
+                        last_seen_x = cx_mid + 40
                         print(f"다음 미션 [{MISSION[mission_idx]}] 탐색 회전 시작")
                     continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
 
-            # 2. 객체 추적 중 (TRACK)
+            # ── 3. 객체 추적 중 (TRACK) ────────────────────────────
             elif found:
                 park_state = "TRACK"
-                w_cam = -KP_ROT * err_x
-                v, w = APPROACH_V, w_cam
-                
-                send_cmd(v, w)
+
+                # centroid가 영역 안에 있으면 카운터 증가, 벗어나면 리셋
+                if centroid_in_arrive_zone():
+                    arrive_count += 1
+                else:
+                    arrive_count = 0
+
+                # 연속 ARRIVE_CONFIRM 프레임 동안 영역 안에 있어야 도착 판정
+                if arrive_count >= ARRIVE_CONFIRM:
+                    arrive_count = 0
+                    park_state = "FORWARD"
+                    park_t = time.time()
+                    print(f"[{target}] centroid {ARRIVE_CONFIRM}프레임 확정 → {ARRIVE_FORWARD_SEC}초 전진")
+                    send_cmd(ARRIVE_FORWARD_V, 0.0)
+                    continue
+
+                else:
+                    err_x = cx_obj - cx_mid
+                    # err_x 비례 회전 + 최솟값 보장 (약한 회전 방지)
+                    def cam_w(ex):
+                        raw = -KP_ROT * ex
+                        if abs(raw) < W_MIN and ex != 0:
+                            return -W_MIN if ex > 0 else W_MIN
+                        return raw
+
+                    if fm >= THRESH_SLOW:
+                        v = APPROACH_V
+                        w = cam_w(err_x)
+                    else:
+                        w_cam = cam_w(err_x)
+                        w_lid = adir * 0.7
+                        if fm < THRESH_STOP:
+                            v, w = 0.09, w_lid
+                        elif fm < THRESH_TURN:
+                            v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
+                        else:
+                            v, w = 0.18, 0.3 * w_lid + 0.7 * w_cam
+
+                    last_cmd = (v, w)
+                    send_cmd(v, w)
+
                 cv2.putText(frame, f"TRACKING: {target}", (10, 25), 0, 0.6, draw, 1)
 
-            # 3. 객체 놓침 또는 다음 객체 탐색 (SEARCH)
+            # ── 4. 객체 놓침 / 탐색 (SEARCH) ──────────────────────
             else:
-                # 🚨 [후한 조건 검증] 좌우 완전 끝자락(양옆 32px 구석)이 아니었고, 아래쪽 구역을 밟고 사라진 게 맞다면 주차!
-                if was_in_bottom and not was_in_left and not was_in_right:
-                    park_state = "PARKING"
-                    park_t = time.time()
-                    was_in_bottom = was_in_left = was_in_right = False
-                    print(f"[{target}] 후한 판정 통과! 정상 주차 시퀀스 진입")
-                else:
-                    # 진짜 완전 구석탱이로 빠져나간 경우에만 예외 없이 SEARCH 상태 유지 및 급선회
-                    park_state = "SEARCH"
-                    v = 0.0
-                    
-                    if was_in_left:
-                        w = 1.6  
-                        cv2.putText(frame, "SNAP TURN: LEFT ESCAPE", (10, 50), 0, 0.5, (0, 0, 255), 2)
-                    elif was_in_right:
-                        w = -1.6 
-                        cv2.putText(frame, "SNAP TURN: RIGHT ESCAPE", (10, 50), 0, 0.5, (0, 0, 255), 2)
-                    else:
-                        w = -1.3 if last_seen_x > cx_mid else 1.3
-                    
-                    was_in_bottom = False 
-                    send_cmd(v, w)
-                    cv2.putText(frame, f"SEARCHING: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
+                park_state = "SEARCH"
+                v = 0.0
+                w = (-1.3 if last_seen_x > cx_mid else 1.3)
+                send_cmd(v, w)
+                cv2.putText(frame, f"SEARCHING: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
 
         cv2.imshow("f", frame)
         if cv2.waitKey(1) & 0xFF == 27: break
