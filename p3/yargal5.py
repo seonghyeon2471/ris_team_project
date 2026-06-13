@@ -165,7 +165,7 @@ ARRIVE_CONFIRM     = 8
 
 # wall-following
 WALL_TARGET   = 30.0
-WALL_SCAN_DIST = 100.0  # 벽 탐색 감지 거리 (cm), 이 안에 장애물 있으면 접근 시작
+WALL_SCAN_DIST = 130.0  # 회전 중 정면(fm) 기준 벽 탐색 감지 거리 (cm)
 WALL_APPROACH_V = 0.20  # 벽으로 접근할 때 속도
 WALL_KP       = 0.012
 WALL_V        = 0.22
@@ -299,16 +299,15 @@ try:
                 else:
                     detect_count = 0
 
-                # 1m 안에 장애물 감지 → 접근 시작
-                wall_candidate = side_min(scan, 0, 360)  # 전방향 최솟값
-                if wall_candidate < WALL_SCAN_DIST:
+                # 회전하면서 정면(front_min) 기준으로 멀리 있는 벽 감지
+                if fm < WALL_SCAN_DIST:
                     park_state = "WALL_APPROACH"
-                    print(f"벽 감지 {wall_candidate:.0f}cm → 접근 시작")
+                    print(f"회전 중 벽 감지 fm:{fm:.0f}cm → 접근 시작")
                     continue
 
                 # 아직 아무것도 없음 → 제자리 좌회전으로 탐색
                 send_cmd(0.0, 0.5)
-                cv2.putText(frame, f"WALL-SEARCH [{target}] 회전 중",
+                cv2.putText(frame, f"WALL-SEARCH [{target}] 회전 중 fm:{fm:.0f}",
                             (10, 25), 0, 0.5, (0, 255, 0), 1)
 
             # ── 3-B. 벽으로 접근 중 (WALL_APPROACH) ───────────────
