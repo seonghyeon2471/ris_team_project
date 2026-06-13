@@ -2,7 +2,6 @@ import cv2
 import serial
 import numpy as np
 import time
-import math
 import threading
 
 # ── SERIAL ────────────────────────────────────────────────────────────
@@ -26,12 +25,12 @@ lidar_ser.write(bytes([0xA5, 0x20])); lidar_ser.read(7)
 print("LIDAR OK")
 
 # ── LIDAR ─────────────────────────────────────────────────────────────
-EMA_ALPHA    = 0.35
-MEDIAN_K     = 2
-FRONT_RANGE  = 45
-THRESH_SLOW  = 55.0
-THRESH_TURN  = 35.0
-THRESH_STOP  = 18.0
+EMA_ALPHA   = 0.35
+MEDIAN_K    = 2
+FRONT_RANGE = 45
+THRESH_SLOW = 55.0
+THRESH_TURN = 35.0
+THRESH_STOP = 18.0
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -68,6 +67,13 @@ threading.Thread(target=lidar_loop, daemon=True).start()
 def get_scan():
     with scan_lock: return _scan_pub.copy()
 
+def front_min(scan):
+    idx = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
+    return float(np.min(scan[idx]))
+
+def avoid_dir(scan):
+    return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
+
 def left_dist(scan):
     idx = np.arange(85, 96) % 360
     return float(np.mean(scan[idx]))
@@ -77,7 +83,7 @@ def side_min(scan, start, end):
     return float(np.min(scan[idx]))
 
 def wall_follow(scan, fm, adir):
-    ld = left_dist(scan)
+    ld          = left_dist(scan)
     left_close  = side_min(scan, 60, 120)
     right_close = side_min(scan, 240, 300)
 
@@ -93,24 +99,15 @@ def wall_follow(scan, fm, adir):
         return (WALL_V * 0.7, WALL_LOST_W)
 
     err = ld - WALL_TARGET
-    w = WALL_KP * err
-
+    w   = WALL_KP * err
     if fm < THRESH_SLOW:
         blend = float(np.clip((THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
         w = (1 - blend) * w + blend * adir * 0.5
         v = WALL_V * (1.0 - 0.4 * blend)
     else:
         v = WALL_V
-
     w = float(np.clip(w, -0.9, 0.9))
     return (v, w)
-
-def front_min(scan):
-    idx = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
-    return float(np.min(scan[idx]))
-
-def avoid_dir(scan):
-    return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
 
 # ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
@@ -125,7 +122,7 @@ COLOR_CFG = {
     "red":    {"hsv1": ([169, 136, 175], [179, 207, 255]),
                "hsv2": None,
                "bgr":  ([20, 20, 80],  [255, 255, 255]), "draw": (0, 0, 255)},
-    "yellow": {"hsv1": ([24, 19, 214], [41, 143, 255]),
+    "yellow": {"hsv1": ([24, 19, 193], [45, 165, 255]),
                "hsv2": None,
                "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
     "blue":   {"hsv1": ([98, 100, 123], [138, 207, 246]),
@@ -152,28 +149,31 @@ APPROACH_V     = 0.17
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 
-# ── WALL FOLLOWING ────────────────────────────────────────────────────
-WALL_TARGET  = 25.0
-WALL_KP      = 0.012
-WALL_RANGE   = 20
-WALL_V       = 0.22
-WALL_TURN_V  = 0.10
-WALL_LOST_W  = 0.4
-
-# ── 도착 판정 영역 ─────────────────────────────────────────────────────
+# 도착 판정
 ARRIVE_Y_TOP       = int(240 * 0.85)
 ARRIVE_X_MARGIN    = 40
-ARRIVE_FORWARD_SEC = 1.0
+ARRIVE_FORWARD_SEC = 0.7
+ARRIVE_FORWARD_V   = 0.15
 ARRIVE_CONFIRM     = 8
 
+# wall-following
+WALL_TARGET    = 30.0
+WALL_SCAN_DIST = 130.0
+WALL_APPROACH_V = 0.20
+WALL_KP        = 0.012
+WALL_V         = 0.22
+WALL_TURN_V    = 0.10
+WALL_LOST_W    = 0.4
+
 # ── SEARCH 파라미터 ───────────────────────────────────────────────────
-SPIN_ONE_ROUND_SEC = 4.8   # 1바퀴 소요 시간(초) — 실측 후 조정
-SPIN_ROUNDS        = 3     # 제자리 회전 바퀴 수
-SPIN_W             = 1.3   # 제자리 회전 각속도
-SEARCH_PAUSE_SEC   = 2.0   # SPIN 후 정지 시간(초)
-CIRCLE_V           = 0.18  # 원형 탐색 전진 속도
-CIRCLE_W           = 0.60  # 원형 탐색 회전 속도 (반경 ≈ V/W ≈ 30cm)
-CIRCLE_SEC         = 12.0  # 원형 탐색 최대 지속 시간(초)
+# 1바퀴 시간(초): 실측 필요. w=1.0rad/s → 1바퀴 ≈ 2π/1.0 ≈ 6.3s
+SPIN_ONE_ROUND_SEC = 6.3
+SPIN_ROUNDS        = 3
+SPIN_W             = 1.0
+SEARCH_PAUSE_SEC   = 2.0   # 회전 후 정지 시간
+CIRCLE_V           = 0.18  # 원형 탐색 전진속도
+CIRCLE_W           = 0.60  # 원형 탐색 회전속도 (반경 ≈ V/W ≈ 30cm)
+CIRCLE_SEC         = 12.0  # 원형 탐색 최대 시간
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode         = "LIDAR"
@@ -187,8 +187,9 @@ last_bottom_y = 0
 park_t        = None
 last_cmd      = (0.0, 0.0)
 
+# SEARCH 세부 상태
 search_sub = "SPIN"   # "SPIN" | "PAUSE" | "CIRCLE"
-search_t   = None     # 현재 search_sub 시작 시각
+search_t   = None
 
 print(f"START | MISSION: {MISSION}")
 
@@ -240,7 +241,8 @@ try:
         cv2.rectangle(frame, (arrive_x1, ARRIVE_Y_TOP), (arrive_x2, H - 1), (0, 0, 255), 1)
 
         def centroid_in_arrive_zone():
-            return (cx_obj >= arrive_x1 and cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
+            return (cx_obj >= arrive_x1 and cx_obj <= arrive_x2 and
+                    cy_obj >= ARRIVE_Y_TOP)
 
         # ══ LIDAR 모드 ═══════════════════════════════════════════
         if mode == "LIDAR":
@@ -256,11 +258,12 @@ try:
                 print(f"[{target}] 발견 → 추적 시작")
                 continue
 
-            v, w = wall_follow(scan, fm, adir)
+            if fm < THRESH_STOP:   v, w = 0.09, adir * 0.9
+            elif fm < THRESH_TURN: v, w = 0.13, adir * 0.7
+            elif fm < THRESH_SLOW: v, w = 0.18, adir * 0.4
+            else:                  v, w = 0.28, 0.0
             send_cmd(v, w)
-            ld_disp = left_dist(scan)
-            cv2.putText(frame, f"WALL-FOLLOW L:{ld_disp:.0f}cm", (10, 25),
-                        0, 0.5, (255, 255, 255), 1)
+            cv2.putText(frame, "MODE: LIDAR", (10, 25), 0, 0.5, (255, 255, 255), 1)
 
         # ══ PARK 모드 ════════════════════════════════════════════
         elif mode == "PARK":
@@ -282,44 +285,113 @@ try:
                 stop_robot()
                 elapsed = time.time() - park_t
                 if elapsed >= PARK_SEC:
-                    mission_idx += 1
+                    mission_idx  += 1
+                    arrive_count  = 0
+                    detect_count  = 0
                     if mission_idx < len(MISSION):
-                        park_state = "SEARCH"
+                        park_state = "SEARCH"  # ← SEARCH로 전환
                         search_sub = "SPIN"
                         search_t   = None
-                        last_seen_x = cx_mid + 40
-                        print(f"다음 미션 [{MISSION[mission_idx]}] 탐색 시작 (SPIN)")
+                        print(f"다음 미션 [{MISSION[mission_idx]}] SEARCH(SPIN) 시작")
                     continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
 
-            # ── 3. 추적 (TRACK) ────────────────────────────────────
+            # ── 3. 벽 탐색 회전 (WALL_SEARCH) ─────────────────────
+            elif park_state == "WALL_SEARCH":
+                if found:
+                    detect_count += 1
+                    if detect_count >= DETECT_CONFIRM:
+                        detect_count = 0
+                        park_state   = "TRACK"
+                        search_sub   = "SPIN"
+                        search_t     = None
+                        print(f"[{target}] WALL_SEARCH 중 발견 → TRACK")
+                        continue
+                else:
+                    detect_count = 0
+
+                if fm < WALL_SCAN_DIST:
+                    park_state = "WALL_APPROACH"
+                    print(f"회전 중 벽 감지 fm:{fm:.0f}cm → 접근")
+                    continue
+
+                send_cmd(0.0, 0.5)
+                cv2.putText(frame, f"WALL-SEARCH [{target}] fm:{fm:.0f}",
+                            (10, 25), 0, 0.5, (0, 255, 0), 1)
+
+            # ── 4. 벽 접근 (WALL_APPROACH) ────────────────────────
+            elif park_state == "WALL_APPROACH":
+                if found:
+                    detect_count += 1
+                    if detect_count >= DETECT_CONFIRM:
+                        detect_count = 0
+                        park_state   = "TRACK"
+                        search_sub   = "SPIN"
+                        search_t     = None
+                        print(f"[{target}] WALL_APPROACH 중 발견 → TRACK")
+                        continue
+                else:
+                    detect_count = 0
+
+                ld = left_dist(scan)
+                if ld <= WALL_TARGET * 1.3:
+                    park_state = "WALL_FOLLOW"
+                    print(f"벽 도달 L:{ld:.0f}cm → WALL_FOLLOW")
+                    continue
+
+                if fm < THRESH_STOP:
+                    v, w = 0.08, adir * 1.0
+                elif fm < THRESH_TURN:
+                    v, w = WALL_APPROACH_V * 0.6, adir * 0.7
+                else:
+                    v, w = WALL_APPROACH_V, 0.3
+                send_cmd(v, w)
+                cv2.putText(frame, f"WALL-APPROACH [{target}] L:{ld:.0f}",
+                            (10, 25), 0, 0.5, (0, 200, 0), 1)
+
+            # ── 5. wall-following 탐색 (WALL_FOLLOW) ──────────────
+            elif park_state == "WALL_FOLLOW":
+                if found:
+                    detect_count += 1
+                    if detect_count >= DETECT_CONFIRM:
+                        detect_count = 0
+                        park_state   = "TRACK"
+                        search_sub   = "SPIN"
+                        search_t     = None
+                        print(f"[{target}] WALL_FOLLOW 중 발견 → TRACK")
+                        continue
+                else:
+                    detect_count = 0
+
+                v, w = wall_follow(scan, fm, adir)
+                send_cmd(v, w)
+                ld_disp = left_dist(scan)
+                cv2.putText(frame, f"WALL-FOLLOW [{target}] L:{ld_disp:.0f}",
+                            (10, 25), 0, 0.5, (0, 255, 0), 1)
+
+            # ── 6. 객체 추적 (TRACK) ───────────────────────────────
             elif park_state == "TRACK" and found:
                 search_sub = "SPIN"
                 search_t   = None
-
-                if centroid_in_arrive_zone():
-                    arrive_count += 1
-                else:
-                    arrive_count = 0
+                arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
 
                 if arrive_count >= ARRIVE_CONFIRM:
                     arrive_count = 0
                     park_state   = "FORWARD"
                     park_t       = time.time()
-                    print(f"[{target}] {ARRIVE_CONFIRM}프레임 확정 → {ARRIVE_FORWARD_SEC}초 전진")
-                    send_cmd(*last_cmd)
+                    print(f"[{target}] {ARRIVE_CONFIRM}프레임 확정 → 전진")
+                    send_cmd(ARRIVE_FORWARD_V, 0.0)
                     continue
                 else:
-                    err_x = cx_obj - cx_mid
+                    err_x     = cx_obj - cx_mid
+                    err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
+                    reduced_v = APPROACH_V * (1.0 - err_ratio)
 
                     def cam_w(ex):
                         raw = -KP_ROT * ex
                         if abs(raw) < W_MIN and ex != 0:
                             return -W_MIN if ex > 0 else W_MIN
                         return raw
-
-                    err_ratio = min(abs(err_x) / float(cx_mid), 1.0)
-                    reduced_v = APPROACH_V * (1.0 - err_ratio)
 
                     if fm >= THRESH_SLOW:
                         v = reduced_v
@@ -339,7 +411,7 @@ try:
 
                 cv2.putText(frame, f"TRACKING: {target}", (10, 25), 0, 0.6, draw, 1)
 
-            # ── 4. 탐색 (SEARCH) ───────────────────────────────────
+            # ── 7. 탐색 (SEARCH): SPIN → PAUSE → CIRCLE ───────────
             else:
                 park_state   = "SEARCH"
                 arrive_count = 0
@@ -356,27 +428,27 @@ try:
                 # 최초 진입 시 타이머 시작
                 if search_t is None:
                     search_t = now
-                    print(f"[{target}] SEARCH 시작 → {search_sub}")
+                    print(f"[{target}] SEARCH 진입 → {search_sub}")
 
-                elapsed_sub = now - search_t  # 현재 sub-state 경과 시간
+                elapsed_sub = now - search_t
 
-                # ── SPIN: 제자리 회전 ──────────────────────────
+                # ── SPIN: 제자리 회전 3바퀴 ──────────────────────
                 if search_sub == "SPIN":
                     spin_total = SPIN_ONE_ROUND_SEC * SPIN_ROUNDS
                     if elapsed_sub < spin_total:
                         spin_dir = -1 if last_seen_x > cx_mid else 1
                         send_cmd(0.0, spin_dir * SPIN_W)
-                        rounds_done = elapsed_sub / SPIN_ONE_ROUND_SEC
+                        rounds = elapsed_sub / SPIN_ONE_ROUND_SEC
                         cv2.putText(frame,
-                            f"SPIN {rounds_done:.1f}/{SPIN_ROUNDS} rev",
+                            f"SPIN {rounds:.1f}/{SPIN_ROUNDS} rev",
                             (10, 25), 0, 0.55, (0, 200, 255), 1)
                     else:
                         search_sub = "PAUSE"
                         search_t   = now          # ★ 타이머 리셋
                         stop_robot()
-                        print(f"[{target}] SPIN 완료 → 2초 정지")
+                        print(f"[{target}] SPIN 완료 → PAUSE")
 
-                # ── PAUSE: 정지 ────────────────────────────────
+                # ── PAUSE: 2초 정지 ────────────────────────────
                 elif search_sub == "PAUSE":
                     stop_robot()
                     if elapsed_sub < SEARCH_PAUSE_SEC:
@@ -386,9 +458,9 @@ try:
                     else:
                         search_sub = "CIRCLE"
                         search_t   = now          # ★ 타이머 리셋
-                        print(f"[{target}] PAUSE 완료 → CIRCLE 시작")
+                        print(f"[{target}] PAUSE 완료 → CIRCLE")
 
-                # ── CIRCLE: 원형 탐색 ──────────────────────────
+                # ── CIRCLE: 반경 30cm 원형 탐색 ───────────────
                 elif search_sub == "CIRCLE":
                     if elapsed_sub < CIRCLE_SEC:
                         if fm < THRESH_TURN:
@@ -399,12 +471,12 @@ try:
                             f"CIRCLE {elapsed_sub:.1f}/{CIRCLE_SEC:.0f}s",
                             (10, 25), 0, 0.55, (0, 140, 255), 1)
                     else:
-                        mode         = "LIDAR"
-                        park_state   = "TRACK"
+                        # 시간 초과 → WALL_SEARCH로 fallback
+                        park_state   = "WALL_SEARCH"
                         search_sub   = "SPIN"
-                        search_t     = None       # ★ 타이머 리셋
+                        search_t     = None
                         detect_count = 0
-                        print(f"[{target}] CIRCLE 시간 초과 → LIDAR 복귀")
+                        print(f"[{target}] CIRCLE 시간 초과 → WALL_SEARCH 복귀")
 
         cv2.imshow("f", frame)
         if cv2.waitKey(1) & 0xFF == 27: break
