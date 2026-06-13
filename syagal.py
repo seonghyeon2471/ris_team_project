@@ -76,7 +76,6 @@ def avoid_dir(scan):
     return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
 
 def left_dist(scan):
-    # 왼쪽 90도 부근 평균 (85~95도)
     idx = np.arange(85, 96) % 360
     return float(np.mean(scan[idx]))
 
@@ -85,42 +84,33 @@ def side_min(scan, start, end):
     return float(np.min(scan[idx]))
 
 def nearest_obstacle_angle(scan):
-    """전방위에서 가장 가까운 포인트의 각도"""
     return int(np.argmin(scan))
 
 def nearest_obstacle_dist(scan):
     return float(np.min(scan))
 
 # ── WALL-FOLLOW 함수 ──────────────────────────────────────────────────
-# [수정] WALL_LOST_W를 방향 인자로 받도록 변경 → 놓침 방향 오류 수정
 def wall_follow(scan, fm, adir):
     ld          = left_dist(scan)
     left_close  = side_min(scan, 60, 120)
     right_close = side_min(scan, 240, 300)
 
-    # ① 정면 위험 → 긴급 회피
     if fm < THRESH_STOP:
         return (0.08, adir * 1.1)
     if fm < THRESH_TURN:
         return (WALL_TURN_V, adir * 0.85)
 
-    # ② 측면 너무 가까움 → 반대쪽으로
     if left_close < THRESH_STOP:
         return (WALL_V * 0.7, -0.7)
     if right_close < THRESH_STOP:
         return (WALL_V * 0.7,  0.7)
 
-    # ③ 왼쪽 장애물 놓침
-    # [수정] 단순 좌회전 대신: 가장 가까운 장애물 방향으로 회전
     if ld > WALL_TARGET * 2.0:
         nearest = nearest_obstacle_angle(scan)
-        # 0~180은 오른쪽/정면, 181~359는 왼쪽/후방으로 정규화
         err_a = nearest if nearest <= 180 else nearest - 360
-        # 왼쪽(양수 방향)으로 틀어서 재포착
         w_recover = float(np.clip(-err_a / 90.0 * WALL_LOST_W, -WALL_LOST_W, WALL_LOST_W))
         return (WALL_V * 0.6, w_recover)
 
-    # ④ 정상 wall-following: PD 추종
     err = ld - WALL_TARGET
     w   = WALL_KP * err
     if fm < THRESH_SLOW:
@@ -136,7 +126,7 @@ def wall_follow(scan, fm, adir):
 # ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
     v = np.clip(v, -0.4, 0.4)
-    w = np.clip(w, -1.6, 1.6)
+    w = np.clip(w, -1.8, 1.8)  # [속도 상향] 상한선을 1.6에서 1.8로 확장
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
 def stop_robot(): send_cmd(0.0, 0.0)
@@ -173,7 +163,6 @@ APPROACH_V     = 0.17
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 
-# 도착 판정 영역
 ARRIVE_Y_TOP       = int(240 * 0.85)
 ARRIVE_X_MARGIN    = 40
 ARRIVE_FORWARD_SEC = 0.7
@@ -181,20 +170,19 @@ ARRIVE_FORWARD_V   = 0.15
 ARRIVE_CONFIRM     = 8
 
 # wall-following
-WALL_TARGET     = 30.0   # 왼쪽 유지 목표 거리 (cm)
-# [수정] WALL_SCAN_DIST를 100→45cm로 축소: 너무 빨리 APPROACH 진입 방지
-WALL_SCAN_DIST  = 45.0   # 장애물 감지 거리. 이 안에 들어오면 접근 시작
+WALL_TARGET     = 30.0
+WALL_SCAN_DIST  = 45.0
 WALL_APPROACH_V = 0.18
 WALL_KP         = 0.012
 WALL_V          = 0.20
 WALL_TURN_V     = 0.10
 WALL_LOST_W     = 0.5
 
-# 순환 감지: 누적 회전량 기반 (방법 2)
-FULL_CIRCLE_RAD    = 2 * math.pi * 0.85  # ~300도 누적이면 한 바퀴로 판단
-ESCAPE_RAD         = math.pi * 0.6       # ~108도 이탈 회전
+# 순환 감지 및 이탈
+FULL_CIRCLE_RAD    = 2 * math.pi * 0.85
+ESCAPE_RAD         = math.pi * 0.6
 ESCAPE_V           = 0.13
-ESCAPE_W           = 1.0
+ESCAPE_W           = 1.25  # [속도 상향] 이탈 시 회전력을 1.0 -> 1.25로 상향
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
@@ -208,10 +196,9 @@ last_bottom_y = 0
 park_t        = None
 last_cmd      = (0.0, 0.0)
 
-# WALL_FOLLOW 순환 감지용
-wf_angle_accum  = 0.0   # WALL_FOLLOW 누적 회전량
-wf_last_t       = None  # 직전 프레임 시각
-esc_angle_accum = 0.0   # ESCAPE 누적 회전량
+wf_angle_accum  = 0.0
+wf_last_t       = None
+esc_angle_accum = 0.0
 
 print(f"START | MISSION: {MISSION}")
 
@@ -289,9 +276,6 @@ try:
 
         # ══ PARK 모드 ════════════════════════════════════════════
         elif mode == "PARK":
-
-            # 어느 탐색 상태에서든 객체 발견 시 TRACK으로 즉시 전환
-            # (TRACK/FORWARD/PARKING 제외한 탐색 상태에서만)
             if park_state in ("WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW",
                               "WALL_ESCAPE", "SEARCH"):
                 if found:
@@ -307,7 +291,7 @@ try:
                 else:
                     detect_count = 0
 
-            # ── 1. 도착 후 전진 (FORWARD) ─────────────────────────
+            # ── 1. FORWARD ─────────────────────────────────────────
             if park_state == "FORWARD":
                 elapsed = time.time() - park_t
                 if elapsed >= ARRIVE_FORWARD_SEC:
@@ -319,7 +303,7 @@ try:
                     send_cmd(*last_cmd)
                 cv2.putText(frame, f"FORWARD: {target}", (10, 25), 0, 0.6, draw, 2)
 
-            # ── 2. 정차 (PARKING) ──────────────────────────────────
+            # ── 2. PARKING ─────────────────────────────────────────
             elif park_state == "PARKING":
                 stop_robot()
                 elapsed = time.time() - park_t
@@ -336,39 +320,32 @@ try:
                     continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
 
-            # ── 3-A. 장애물 탐색 (WALL_SEARCH) ────────────────────
-            # [수정] 전방향 최솟값 → 정면+측면 분리 감지로 교체
-            #        너무 가까운 감지 거리(100cm) → 45cm로 축소
+            # ── 3-A. WALL_SEARCH ───────────────────────────────────
             elif park_state == "WALL_SEARCH":
-                # 전방 90도 이내에서 WALL_SCAN_DIST 이내 장애물 감지
-                front_candidate = side_min(scan, 360 - 45, 360) + side_min(scan, 0, 45)
-                front_nearest   = side_min(scan, 315, 405)  # ±45도
+                front_nearest = side_min(scan, 315, 405)
                 if front_nearest < WALL_SCAN_DIST:
                     park_state = "WALL_APPROACH"
                     print(f"장애물 감지 {front_nearest:.0f}cm → 접근 시작")
                     continue
 
-                # 아무것도 없으면 가장 가까운 방향으로 회전
                 nearest = nearest_obstacle_angle(scan)
                 nd      = nearest_obstacle_dist(scan)
                 if nd < 80.0:
-                    # 그 방향으로 서서히 회전
                     err_a = nearest if nearest <= 180 else nearest - 360
-                    w_s   = float(np.clip(-err_a / 90.0 * 0.6, -0.7, 0.7))
+                    # [속도 상향] 장애물 방향 제자리 회전 가중치 0.6 -> 0.8, 제한 0.7 -> 0.9
+                    w_s   = float(np.clip(-err_a / 90.0 * 0.8, -0.9, 0.9))
                     send_cmd(0.0, w_s)
                 else:
-                    # 장애물 자체가 없음 → 제자리 좌회전
-                    send_cmd(0.0, 0.5)
+                    # [속도 상향] 장애물 없을 때 제자리 좌회전 속도 0.5 -> 0.7
+                    send_cmd(0.0, 0.7)
                 cv2.putText(frame, f"WALL-SEARCH [{target}] nd={nd:.0f}cm",
                             (10, 25), 0, 0.5, (0, 255, 0), 1)
 
-            # ── 3-B. 장애물 접근 (WALL_APPROACH) ──────────────────
-            # [수정] 왼쪽 거리만 보던 것 → 전방위 최솟값으로 WALL_FOLLOW 진입 판단
+            # ── 3-B. WALL_APPROACH ─────────────────────────────────
             elif park_state == "WALL_APPROACH":
                 nd = nearest_obstacle_dist(scan)
                 ld = left_dist(scan)
 
-                # 어느 방향이든 WALL_TARGET 거리에 도달하면 wall-following 시작
                 if nd <= WALL_TARGET * 1.3:
                     park_state     = "WALL_FOLLOW"
                     wf_angle_accum = 0.0
@@ -377,13 +354,11 @@ try:
                     print(f"장애물 도달 {nd:.0f}cm → wall-following 시작")
                     continue
 
-                # 정면 막히면 adir 회피하며 접근
                 if fm < THRESH_STOP:
                     v, w = 0.08, adir * 1.0
                 elif fm < THRESH_TURN:
                     v, w = WALL_APPROACH_V * 0.6, adir * 0.7
                 else:
-                    # 가장 가까운 장애물 쪽으로 조금 틀면서 전진
                     nearest = nearest_obstacle_angle(scan)
                     err_a   = nearest if nearest <= 180 else nearest - 360
                     w_a     = float(np.clip(-err_a / 120.0 * 0.4, -0.4, 0.4))
@@ -392,7 +367,7 @@ try:
                 cv2.putText(frame, f"WALL-APPROACH [{target}] nd={nd:.0f}cm ld={ld:.0f}cm",
                             (10, 25), 0, 0.45, (0, 200, 0), 1)
 
-            # ── 3-C. wall-following 탐색 (WALL_FOLLOW) ─────────────
+            # ── 3-C. WALL_FOLLOW ───────────────────────────────────
             elif park_state == "WALL_FOLLOW":
                 now = time.time()
                 dt  = now - wf_last_t if wf_last_t else 0.0
@@ -401,10 +376,8 @@ try:
                 v, w = wall_follow(scan, fm, adir)
                 send_cmd(v, w)
 
-                # 누적 회전량 갱신
                 wf_angle_accum += abs(w) * dt
 
-                # [신규] 순환 감지: 누적 회전량 >= FULL_CIRCLE_RAD → ESCAPE
                 if wf_angle_accum >= FULL_CIRCLE_RAD:
                     park_state      = "WALL_ESCAPE"
                     esc_angle_accum = 0.0
@@ -419,14 +392,13 @@ try:
                             f"rot:{accum_deg:.0f}deg",
                             (10, 25), 0, 0.45, (0, 255, 0), 1)
 
-            # ── 3-D. 순환 이탈 (WALL_ESCAPE) ──────────────────────
-            # [신규] 추종 반대 방향으로 회전+전진 → 다음 장애물로 이동
+            # ── 3-D. WALL_ESCAPE ───────────────────────────────────
             elif park_state == "WALL_ESCAPE":
                 now = time.time()
                 dt  = now - wf_last_t if wf_last_t else 0.0
                 wf_last_t = now
 
-                # wall-follow는 왼쪽(+w) 기준이므로 이탈은 오른쪽(-w)으로
+                # ESCAPE_W 파라미터 상향 적용됨
                 send_cmd(ESCAPE_V, -ESCAPE_W)
                 esc_angle_accum += ESCAPE_W * dt
 
@@ -440,7 +412,7 @@ try:
                 cv2.putText(frame, f"WALL-ESCAPE [{target}]",
                             (10, 25), 0, 0.5, (0, 128, 255), 1)
 
-            # ── 4. 객체 추적 (TRACK) ───────────────────────────────
+            # ── 4. TRACK ───────────────────────────────────────────
             elif found:
                 park_state     = "TRACK"
                 wf_angle_accum = 0.0
@@ -455,7 +427,6 @@ try:
                     print(f"[{target}] centroid {ARRIVE_CONFIRM}프레임 확정 → {ARRIVE_FORWARD_SEC}초 전진")
                     send_cmd(ARRIVE_FORWARD_V, 0.0)
                     continue
-
                 else:
                     err_x     = cx_obj - cx_mid
                     err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
@@ -485,21 +456,17 @@ try:
 
                 cv2.putText(frame, f"TRACKING: {target}", (10, 25), 0, 0.6, draw, 1)
 
-            # ── 5. 객체 놓침 (SEARCH) ──────────────────────────────
-            # [수정] 단순 회전 → WALL_FOLLOW로 복귀
-            #        (단, 처음 TRACK→SEARCH 진입이면 잠깐 회전 후 WALL_SEARCH로)
+            # ── 5. SEARCH ──────────────────────────────────────────
             else:
                 if park_state != "SEARCH":
                     park_state   = "SEARCH"
                     arrive_count = 0
                     print(f"[{target}] 객체 놓침 → SEARCH")
 
-                # 마지막으로 본 방향으로 회전 시도
-                w = -1.0 if last_seen_x > cx_mid else 1.0
+                # [속도 상향] 놓쳤을 때 탐색 제자리 회전 속도 1.0 -> 1.3
+                w = -1.3 if last_seen_x > cx_mid else 1.3
                 send_cmd(0.0, w)
 
-                # 일정 시간 회전해도 못 찾으면 WALL_SEARCH로 전환
-                # (park_t를 재활용해서 SEARCH 진입 시각 추적)
                 if park_t is None or park_state != "SEARCH":
                     park_t = time.time()
                 if time.time() - park_t > 2.5:
