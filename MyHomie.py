@@ -134,9 +134,18 @@ ARRIVE_FORWARD_SEC  = 0.7
 ARRIVE_FORWARD_V    = 0.15
 
 # ── 색상 미인식 타임아웃 + 한바퀴 회전 탐색 ──────────────────────────────
-NO_DETECT_TIMEOUT  = 2.5        # 색상 못보고 주행한 시간 임계값 (초)
-SPIN_W             = 1.6        # 한바퀴 회전 각속도
-SPIN_ONE_ROUND_SEC = (2 * math.pi) / SPIN_W  # 360도 회전에 걸리는 시간 (~3.93초)
+NO_DETECT_TIMEOUT  = 2.5
+SPIN_W             = 1.6
+SPIN_ONE_ROUND_SEC = (2 * math.pi) / SPIN_W  # ~3.93초
+
+# ── SPIN2: 주차 후 SEARCH 한바퀴 돌고 색상 못찾으면 추가 한바퀴 ───────────
+# 회전하면서 라이다로 [장애물][공간][장애물] 패턴을 샘플링
+# 패턴 찾으면 그 공간 방향으로 전진, 못찾으면 LIDAR 주행 복귀
+GAP_OBS_THRESH  = 40.0   # 이 거리(cm) 이하면 장애물
+GAP_FREE_THRESH = 80.0   # 이 거리(cm) 이상이면 공간
+GAP_MIN_DEG     = 20     # 공간으로 인정할 최소 연속 각도(도)
+SPIN2_W         = 1.6    # SPIN2 각속도
+SPIN2_SEC       = (2 * math.pi) / SPIN2_W  # 한바퀴 시간
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
@@ -158,9 +167,16 @@ park_t        = None
 last_cmd      = (0.0, 0.0)
 
 # 색상 미인식 타이머
-no_detect_t   = time.time()     # 마지막으로 색상 인식한 시각
-spin_t        = None            # SPIN 시작 시각
-spin_found    = False           # SPIN 중 색상 발견 여부
+no_detect_t   = time.time()
+spin_t        = None
+spin_found    = False
+
+# SPIN2 (주차 후 탐색 전용)
+spin2_t       = None             # SPIN2 시작 시각
+spin2_samples = []               # (로봇기준 절대각도, 라이다거리) 샘플 리스트
+spin2_heading = 0.0              # 누적 회전 각도 (라디안)
+spin2_last_t  = None             # 이전 프레임 시각 (heading 적분용)
+spin2_gap_deg = None             # 찾은 공간의 절대 방향(도, 0=정면)
 
 print(f"START | MISSION: {MISSION}")
 
@@ -327,16 +343,155 @@ try:
 
             # ── 객체 없음: 탐색 회전 (SEARCH) ────────────────────────
             elif not found:
-                park_state = "SEARCH"
-                align_count = 0
-                arrive_count = 0
+                if park_state != "SEARCH":
+                    # SEARCH 처음 진입 시 타이머 시작
+                    park_state   = "SEARCH"
+                    spin_t       = time.time()
+                    align_count  = 0
+                    arrive_count = 0
+
+                elapsed_search = time.time() - spin_t
+                if elapsed_search >= SPIN_ONE_ROUND_SEC:
+                    # 한바퀴 다 돌았는데도 색상 미발견 → SPIN2 진입
+                    park_state    = "SPIN2"
+                    spin2_t       = time.time()
+                    spin2_last_t  = time.time()
+                    spin2_heading = 0.0
+                    spin2_samples = []
+                    spin2_gap_deg = None
+                    print(f"[{target}] SEARCH 한바퀴 완료, 미발견 → SPIN2(라이다 패턴 탐색)")
+                    continue
+
                 v = 0.0
                 w = -1.0 if last_seen_x > cx_mid else 1.0
                 send_cmd(v, w)
-                cv2.putText(frame, f"SEARCHING: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
+                remain = SPIN_ONE_ROUND_SEC - elapsed_search
+                cv2.putText(frame, f"SEARCHING({remain:.1f}s): {target}",
+                            (10, 25), 0, 0.55, (0, 255, 255), 1)
+
+            # ── SPIN2: 라이다로 [장애물-공간-장애물] 패턴 탐색 ───────────
+            elif park_state == "SPIN2":
+                now      = time.time()
+                dt       = now - spin2_last_t
+                spin2_last_t = now
+
+                # 누적 회전각 적분 (SPIN2_W rad/s 로 회전 중)
+                spin2_heading += SPIN2_W * dt  # 라디안
+
+                # 현재 프레임 라이다 정면 거리 샘플링 (로봇 기준 0도=정면)
+                spin2_samples.append((spin2_heading, float(np.mean(scan[355:360].tolist() + scan[0:6].tolist()))))
+
+                if found:
+                    # SPIN2 중 색상 발견 → 즉시 PARK ALIGN 진입
+                    park_state  = "ALIGN"
+                    align_count = 0
+                    no_detect_t = time.time()
+                    print(f"[{target}] SPIN2 중 색상 발견 → ALIGN")
+                    continue
+
+                if spin2_heading >= 2 * math.pi:
+                    # 한바퀴 완료 → 샘플에서 [장애물-공간-장애물] 패턴 탐색
+                    # samples: [(heading_rad, dist_cm), ...]
+                    # 각도 순 정렬 후 공간 구간 탐지
+                    total = len(spin2_samples)
+                    best_gap_center = None
+                    best_gap_width  = 0
+
+                    if total > 10:
+                        dists  = np.array([s[1] for s in spin2_samples])
+                        angles = np.array([math.degrees(s[0]) % 360 for s in spin2_samples])
+
+                        # 공간(free) / 장애물(obs) 이진화
+                        is_free = dists >= GAP_FREE_THRESH
+                        is_obs  = dists <= GAP_OBS_THRESH
+
+                        # 연속 공간 구간 탐색
+                        in_gap      = False
+                        gap_start   = 0
+                        best_score  = -1
+
+                        for i in range(total + 1):
+                            idx = i % total
+                            if not in_gap and is_free[idx]:
+                                in_gap    = True
+                                gap_start = i
+                            elif in_gap and (not is_free[idx] or i == total):
+                                gap_end   = i
+                                gap_width = gap_end - gap_start
+
+                                # 공간 앞뒤로 장애물 있는지 확인
+                                pre_idx  = (gap_start - 1) % total
+                                post_idx = gap_end % total
+                                has_obs_before = is_obs[pre_idx]
+                                has_obs_after  = is_obs[post_idx]
+
+                                if (has_obs_before and has_obs_after and
+                                        gap_width >= GAP_MIN_DEG and
+                                        gap_width > best_score):
+                                    best_score     = gap_width
+                                    mid_idx        = (gap_start + gap_width // 2) % total
+                                    best_gap_center = angles[mid_idx]
+
+                                in_gap = False
+
+                    if best_gap_center is not None:
+                        spin2_gap_deg = best_gap_center
+                        park_state    = "SPIN2_TURN"
+                        spin2_t       = time.time()
+                        print(f"[{target}] SPIN2 패턴 발견 → 방향 {spin2_gap_deg:.1f}도 조준")
+                    else:
+                        # 패턴 못찾음 → LIDAR 주행 복귀
+                        mode         = "LIDAR"
+                        no_detect_t  = time.time()
+                        detect_count = 0
+                        print(f"[{target}] SPIN2 패턴 미발견 → LIDAR 복귀")
+                else:
+                    send_cmd(0.0, SPIN2_W)
+                    remain = SPIN2_SEC - (time.time() - spin2_t)
+                    cv2.putText(frame, f"SPIN2({remain:.1f}s): {target}",
+                                (10, 25), 0, 0.55, (255, 165, 0), 2)
+
+            # ── SPIN2_TURN: 찾은 공간 방향으로 로봇 회전 후 전진 ──────────
+            elif park_state == "SPIN2_TURN":
+                # spin2_gap_deg 만큼 회전했으면 전진
+                # 회전 시간 = gap_deg / (SPIN2_W * 180/pi)
+                turn_sec = math.radians(spin2_gap_deg) / SPIN2_W
+                elapsed  = time.time() - spin2_t
+                if elapsed < turn_sec:
+                    send_cmd(0.0, SPIN2_W)
+                    cv2.putText(frame, f"SPIN2_TURN: {spin2_gap_deg:.0f}deg",
+                                (10, 25), 0, 0.55, (255, 165, 0), 2)
+                else:
+                    # 조준 완료 → LIDAR_GO처럼 전진 (색 못찾아도 일단 돌진)
+                    park_state  = "SPIN2_GO"
+                    spin2_t     = time.time()
+                    print(f"[{target}] 조준 완료 → 공간으로 전진")
+
+            # ── SPIN2_GO: 공간 방향으로 전진 ──────────────────────────────
+            elif park_state == "SPIN2_GO":
+                if found:
+                    # 색상 발견 → ALIGN으로
+                    park_state  = "ALIGN"
+                    align_count = 0
+                    no_detect_t = time.time()
+                    print(f"[{target}] SPIN2_GO 중 색상 발견 → ALIGN")
+                    continue
+
+                # 라이다 장애물 회피하며 전진
+                if fm < THRESH_STOP:
+                    v, w = 0.09, adir * 0.9
+                elif fm < THRESH_TURN:
+                    v, w = 0.13, adir * 0.7
+                elif fm < THRESH_SLOW:
+                    v, w = 0.18, adir * 0.4
+                else:
+                    v, w = 0.28, 0.0
+
+                send_cmd(v, w)
+                cv2.putText(frame, f"SPIN2_GO: {target}", (10, 25), 0, 0.55, (255, 165, 0), 2)
 
             # ── 객체 발견 시 메인 로직 ─────────────────────────────────
-            else:
+            elif found and park_state not in ("SPIN2", "SPIN2_TURN", "SPIN2_GO"):
                 no_detect_t = time.time()   # 색상 보이는 동안 타이머 리셋
                 err_x = cx_obj - cx_mid
 
