@@ -301,7 +301,7 @@ def try_scan_match(scan):
             with slam_lock:
                 SLAM_X  = sx + dx
                 SLAM_Y  = sy + dy
-                SLAM_TH = sx + dth   # 각도 누적
+                SLAM_TH = sth + dth  # 각도 누적
         else:
             # 오도메트리 델타 반영
             with slam_lock:
@@ -433,17 +433,15 @@ try:
         try_scan_match(scan)
         robot_x, robot_y, robot_th = get_pose()
 
-        # 맵 시각화 오버레이 (카메라 프레임 옆에 표시)
-        map_vis = render_map(robot_x, robot_y, robot_th)
-        # 카메라 프레임과 맵을 가로로 합치기
         cam_h, cam_w = frame.shape[:2]
-        map_resized = cv2.resize(map_vis, (MAP_VIS_SIZE, cam_h))
-        display = np.hstack([frame, map_resized])
 
         if mission_idx >= len(MISSION):
             stop_robot()
-            cv2.putText(display, "ALL MISSIONS DONE", (30, cam_h // 2),
+            cv2.putText(frame, "ALL MISSIONS DONE", (30, cam_h // 2),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            map_vis     = render_map(robot_x, robot_y, robot_th)
+            map_resized = cv2.resize(map_vis, (MAP_VIS_SIZE, int(cam_h)))
+            display     = np.hstack([frame, map_resized])
             cv2.imshow("robot | map", display); cv2.waitKey(1); continue
 
         target = MISSION[mission_idx]
@@ -580,8 +578,10 @@ try:
                 send_cmd(0.0, w)
                 cv2.putText(frame, f"SEARCH: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
 
-        # 맵을 display에 반영 (frame은 이미 그림이 그려진 상태)
-        display[:, :cam_w] = frame
+        # 모든 그리기가 끝난 frame + 맵을 합쳐서 표시
+        map_vis     = render_map(robot_x, robot_y, robot_th)
+        map_resized = cv2.resize(map_vis, (MAP_VIS_SIZE, int(cam_h)))
+        display     = np.hstack([frame, map_resized])
         cv2.imshow("robot | map", display)
         if cv2.waitKey(1) & 0xFF == 27: break
 
