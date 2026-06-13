@@ -29,7 +29,7 @@ print("LIDAR OK")
 # [두 번째 코드 기반 파라미터]
 EMA_ALPHA   = 0.35
 MEDIAN_K    = 2
-FRONT_CHECK_RANGE = 45  # 두 번째 코드 기반
+FRONT_CHECK_RANGE = 60  # 두 번째 코드 기반
 
 # [두 번째 코드 기반] 150cm 상한선으로 축소
 _scan     = np.full(360, 150.0, dtype=np.float32)
