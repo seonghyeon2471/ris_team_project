@@ -129,7 +129,7 @@ COLOR_CFG = {
     "red":    {"hsv1": ([169, 136, 175], [179, 207, 255]),
                "hsv2": None,
                "bgr":  ([20, 20, 80],  [255, 255, 255]), "draw": (0, 0, 255)},
-    "yellow": {"hsv1": ([24, 48, 193], [45, 165, 255]),
+    "yellow": {"hsv1": ([24, 19, 193], [45, 165, 255]),
                "hsv2": None,
                "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
     "blue":   {"hsv1": ([98, 100, 123], [138, 207, 246]),
@@ -165,6 +165,8 @@ ARRIVE_CONFIRM     = 8
 
 # wall-following
 WALL_TARGET   = 30.0
+WALL_SCAN_DIST = 100.0  # 벽 탐색 감지 거리 (cm), 이 안에 장애물 있으면 접근 시작
+WALL_APPROACH_V = 0.20  # 벽으로 접근할 때 속도
 WALL_KP       = 0.012
 WALL_V        = 0.22
 WALL_TURN_V   = 0.10
@@ -176,7 +178,7 @@ mission_idx   = 0
 detect_count  = 0
 arrive_count  = 0
 
-park_state    = "TRACK"   # TRACK | WALL_SEARCH | FORWARD | PARKING
+park_state    = "TRACK"   # TRACK | WALL_SEARCH | WALL_APPROACH | FORWARD | PARKING
 last_seen_x   = 160
 last_bottom_y = 0
 park_t        = None
@@ -285,24 +287,78 @@ try:
                     continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
 
-            # ── 3. wall-following으로 다음 색지 탐색 (WALL_SEARCH) ─
+            # ── 3-A. 벽 탐색 중 제자리 회전 (WALL_SEARCH) ────────
             elif park_state == "WALL_SEARCH":
                 if found:
                     detect_count += 1
+                    if detect_count >= DETECT_CONFIRM:
+                        detect_count = 0
+                        park_state = "TRACK"
+                        print(f"[{target}] 탐색 중 발견 → 추적 시작")
+                        continue
                 else:
                     detect_count = 0
 
-                # 색지 DETECT_CONFIRM 프레임 연속 발견 → TRACK으로 전환
-                if detect_count >= DETECT_CONFIRM:
-                    detect_count = 0
-                    park_state = "TRACK"
-                    print(f"[{target}] wall-following 중 발견 → 추적 시작")
+                # 1m 안에 장애물 감지 → 접근 시작
+                wall_candidate = side_min(scan, 0, 360)  # 전방향 최솟값
+                if wall_candidate < WALL_SCAN_DIST:
+                    park_state = "WALL_APPROACH"
+                    print(f"벽 감지 {wall_candidate:.0f}cm → 접근 시작")
                     continue
+
+                # 아직 아무것도 없음 → 제자리 좌회전으로 탐색
+                send_cmd(0.0, 0.5)
+                cv2.putText(frame, f"WALL-SEARCH [{target}] 회전 중",
+                            (10, 25), 0, 0.5, (0, 255, 0), 1)
+
+            # ── 3-B. 벽으로 접근 중 (WALL_APPROACH) ───────────────
+            elif park_state == "WALL_APPROACH":
+                if found:
+                    detect_count += 1
+                    if detect_count >= DETECT_CONFIRM:
+                        detect_count = 0
+                        park_state = "TRACK"
+                        print(f"[{target}] 접근 중 발견 → 추적 시작")
+                        continue
+                else:
+                    detect_count = 0
+
+                ld = left_dist(scan)
+
+                # 왼쪽이 WALL_TARGET 거리에 도달 → wall-following 시작
+                if ld <= WALL_TARGET * 1.3:
+                    park_state = "WALL_FOLLOW"
+                    print(f"벽 도달 L:{ld:.0f}cm → wall-following 시작")
+                    continue
+
+                # 정면 막히면 adir 회피하며 접근
+                if fm < THRESH_STOP:
+                    v, w = 0.08, adir * 1.0
+                elif fm < THRESH_TURN:
+                    v, w = WALL_APPROACH_V * 0.6, adir * 0.7
+                else:
+                    # 왼쪽으로 틀면서 전진
+                    v, w = WALL_APPROACH_V, 0.3
+                send_cmd(v, w)
+                cv2.putText(frame, f"WALL-APPROACH [{target}] L:{ld:.0f}cm",
+                            (10, 25), 0, 0.5, (0, 200, 0), 1)
+
+            # ── 3-C. wall-following으로 탐색 (WALL_FOLLOW) ─────────
+            elif park_state == "WALL_FOLLOW":
+                if found:
+                    detect_count += 1
+                    if detect_count >= DETECT_CONFIRM:
+                        detect_count = 0
+                        park_state = "TRACK"
+                        print(f"[{target}] wall-following 중 발견 → 추적 시작")
+                        continue
+                else:
+                    detect_count = 0
 
                 v, w = wall_follow(scan, fm, adir)
                 send_cmd(v, w)
                 ld_disp = left_dist(scan)
-                cv2.putText(frame, f"WALL-SEARCH [{target}] L:{ld_disp:.0f}cm",
+                cv2.putText(frame, f"WALL-FOLLOW [{target}] L:{ld_disp:.0f}cm",
                             (10, 25), 0, 0.5, (0, 255, 0), 1)
 
             # ── 4. 객체 추적 중 (TRACK) ────────────────────────────
