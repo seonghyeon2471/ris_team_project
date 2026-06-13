@@ -30,9 +30,10 @@ EMA_ALPHA   = 0.60
 MEDIAN_K    = 1         
 FRONT_RANGE = 40        
 
-THRESH_SLOW = 35.0      
-THRESH_TURN = 18.0      
-THRESH_STOP = 12.0      
+# 32cm 타겟 주행에 맞춘 전방 감속 및 제동 임계값 최적화
+THRESH_SLOW = 40.0      # 기존 45.0 -> 40.0cm (32cm 유지 주행 중 자연스러운 감속 진입)
+THRESH_TURN = 22.0      # 기존 25.0 -> 22.0cm (코너링 조향 시작점 조율)
+THRESH_STOP = 14.0      # 기존 15.0 -> 14.0cm (물리 제동 마진 확보)
 
 _scan     = np.full(360, 250.0, dtype=np.float32)
 _scan_pub = np.full(360, 250.0, dtype=np.float32)
@@ -97,7 +98,7 @@ def wall_follow(scan, fm, adir):
     right_close = side_min(scan, 240, 300)
 
     if fm < THRESH_STOP:
-        return (0.04, adir * 1.6) # 위기 정체 상황 선속도 최소화
+        return (0.04, adir * 1.6) 
     if fm < THRESH_TURN:
         return (WALL_TURN_V, adir * 1.2) 
 
@@ -106,7 +107,7 @@ def wall_follow(scan, fm, adir):
     if right_close < THRESH_STOP:
         return (WALL_V * 0.5,  1.1) 
 
-    if ld > WALL_TARGET * 2.0:
+    if ld > WALL_TARGET * 1.8: 
         nearest = nearest_obstacle_angle(scan)
         err_a = nearest if nearest <= 180 else nearest - 360
         w_recover = float(np.clip(-err_a / 90.0 * WALL_LOST_W, -WALL_LOST_W, WALL_LOST_W))
@@ -158,33 +159,33 @@ def make_mask(frame, hsv, name):
     bm = cv2.inRange(frame, np.array(cfg["bgr"][0]), np.array(cfg["bgr"][1]))
     return cv2.bitwise_and(m, bm)
 
-# ── PARAMS (평상시 주행 속도 스케일 전면 하향) ───────────────────────────
+# ── PARAMS (벽 추종 타겟 거리 32cm 세팅) ──────────────────────────────────
 MIN_AREA        = 400
 KP_ROT          = 0.035 
 W_MIN           = 0.30  
-APPROACH_V      = 0.12  # 기존 0.17 -> 0.12m/s (카메라 추적 접근 속도 하향)
+APPROACH_V      = 0.12  
 PARK_SEC        = 1.2
 DETECT_CONFIRM = 6
 
 ARRIVE_Y_TOP       = int(240 * 0.85)
 ARRIVE_X_MARGIN    = 40
-ARRIVE_FORWARD_SEC = 0.9  # 속도가 느려졌으므로 도달 시간은 0.7 -> 0.9초로 살짝 확장
-ARRIVE_FORWARD_V   = 0.11  # 기존 0.15 -> 0.11m/s (최종 주차 진입 속도 안정화)
+ARRIVE_FORWARD_SEC = 0.9  
+ARRIVE_FORWARD_V   = 0.11  
 ARRIVE_CONFIRM     = 8
 
-# wall-following 밸런스 속도 튜닝
-WALL_TARGET     = 25.0  
-WALL_SCAN_DIST  = 45.0
-WALL_APPROACH_V = 0.11  # 기존 0.15 -> 0.11m/s (벽 접근 속도 하향)
-WALL_KP         = 0.010 
-WALL_V          = 0.13  # 기존 0.18 -> 0.13m/s (벽 추종 기본 속도 감속)
-WALL_TURN_V     = 0.05  # 기존 0.07 -> 0.05m/s (코너링 선속도 최소화)
+# wall-following 밸런스 튜닝
+WALL_TARGET     = 32.0  # 요구사항 반영: 38.0 -> 32.0cm 수정 (적정 거리 밸런스 유지)
+WALL_SCAN_DIST  = 50.0  # 기존 55.0 -> 50.0cm 조율 (타겟 축소에 맞춘 매칭)
+WALL_APPROACH_V = 0.11  
+WALL_KP         = 0.012 # 기존 0.014 -> 0.012 조율 (32cm 지점 주행 시 지그재그 감쇠 최적화)
+WALL_V          = 0.13  
+WALL_TURN_V     = 0.05  
 WALL_LOST_W     = 0.8   
 
 # 순환 감지 및 이탈
 FULL_CIRCLE_RAD    = 2 * math.pi * 0.85
 ESCAPE_RAD         = math.pi * 0.6
-ESCAPE_V           = 0.10  # 기존 0.13 -> 0.10m/s
+ESCAPE_V           = 0.10  
 ESCAPE_W           = 1.70  
 
 # ── STATE ─────────────────────────────────────────────────────────────
@@ -248,7 +249,7 @@ try:
         target = MISSION[mission_idx]
         draw   = COLOR_CFG[target]["draw"]
 
-        mask = make_mask(frame, hsv, target)
+        mask = make_mask(frame, hsv, name=target)
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         big   = max(cnts, key=cv2.contourArea) if cnts else None
         found = big is not None and cv2.contourArea(big) > MIN_AREA
@@ -290,7 +291,6 @@ try:
                 print(f"[{target}] 발견 → 추적 시작")
                 continue
 
-            # 평상시 직진 순항 최고속도를 0.28 -> 0.18로 하향 안정화
             if fm < THRESH_STOP:   v, w = 0.04, adir * 1.4  
             elif fm < THRESH_TURN: v, w = 0.08, adir * 1.0
             elif fm < THRESH_SLOW: v, w = 0.12, adir * 0.6
@@ -366,7 +366,7 @@ try:
                     w_s   = float(np.clip(-err_a / 90.0 * 1.2, -1.2, 1.2)) 
                     send_cmd(0.0, w_s)
                 else:
-                    send_cmd(0.11, 0.45) # 탐색 시 선속도 하향
+                    send_cmd(0.11, 0.45) 
 
                 if time.time() - ws_start_t > 6.0:
                     print("[개활지 예외 처리] 강제 선제 직진 속도 최적화")
