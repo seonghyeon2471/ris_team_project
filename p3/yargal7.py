@@ -38,9 +38,20 @@ _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
 scan_lock = threading.Lock()
 
+# ── 라이다 워밍업 플래그 ──────────────────────────────────────────────
+# 실제 측정값이 채워진 각도의 비율을 추적해서, 충분히 채워질 때까지
+# 메인 루프에서 주행을 시작하지 않도록 함.
+_scan_filled = np.zeros(360, dtype=bool)
+LIDAR_WARMUP_RATIO = 0.85   # 360도 중 이 비율 이상 측정되면 워밍업 완료
+lidar_ready = threading.Event()
+
 def _ema(a, d):
     if d > 0:
         _scan[a] = (1 - EMA_ALPHA) * _scan[a] + EMA_ALPHA * d
+        if not _scan_filled[a]:
+            _scan_filled[a] = True
+            if (not lidar_ready.is_set()) and (_scan_filled.sum() / 360.0 >= LIDAR_WARMUP_RATIO):
+                lidar_ready.set()
 
 def _median():
     k = MEDIAN_K
@@ -78,6 +89,15 @@ def avoid_dir(scan):
 
 # ── 점유 격자 맵 (Occupancy Grid) ─────────────────────────────────────
 # 2cm/셀, 200×200 셀 → 4m×4m 공간 표현 (로봇 시작점이 중앙)
+#
+# 좌표계 설계 노트:
+#   robot_th = 0 (정면, 직진 방향)을 화면(맵 이미지)에서 "위쪽"으로 표시.
+#   이미지 좌표계: x증가 = 오른쪽, y증가 = 아래쪽
+#   => 로봇 전진(+wx 방향, th=0) 시 화면 위로(gy 감소) 이동해야 함
+#   => 로봇이 왼쪽으로 90도 돈 방향(+wy 방향, th=90deg)일 때 화면 왼쪽으로 이동
+#
+#   gx = origin_x - wy / CELL_SIZE   (월드 y → 화면 좌우, 부호 반전)
+#   gy = origin_y - wx / CELL_SIZE   (월드 x → 화면 상하, 부호 반전: 전진=위쪽)
 CELL_SIZE   = 0.02          # 셀 크기 (m)
 GRID_W      = 200           # 격자 가로 셀 수 (4m)
 GRID_H      = 200           # 격자 세로 셀 수 (4m)
@@ -95,9 +115,10 @@ L_MAX     =  5.0
 L_MIN     = -5.0
 
 def world_to_grid(wx, wy):
-    """월드 좌표(m) → 격자 인덱스"""
-    gx = int(GRID_ORIGIN[0] + wx / CELL_SIZE)
-    gy = int(GRID_ORIGIN[1] - wy / CELL_SIZE)   # y축 반전 (위쪽이 +y)
+    """월드 좌표(m) → 격자 인덱스.
+    th=0(직진) 방향이 화면 위쪽이 되도록 90도 회전된 좌표계."""
+    gx = int(GRID_ORIGIN[0] - wy / CELL_SIZE)
+    gy = int(GRID_ORIGIN[1] - wx / CELL_SIZE)
     return gx, gy
 
 def bresenham(x0, y0, x1, y1):
@@ -121,7 +142,6 @@ def update_map(robot_x, robot_y, robot_th, scan):
     if not (0 <= rx < GRID_W and 0 <= ry < GRID_H):
         return
 
-    angles_rad = np.deg2rad(np.arange(360))
     with grid_lock:
         for a_deg in range(0, 360, 2):   # 2도 간격으로 처리 (속도 절충)
             d = scan[a_deg]
@@ -144,8 +164,6 @@ def update_map(robot_x, robot_y, robot_th, scan):
                 log_odds[ey_g, ex_g] = min(L_MAX, log_odds[ey_g, ex_g] + L_OCC)
 
         # 로그 오즈 → 그레이스케일 변환
-        occ = (log_odds > 0.5).astype(np.uint8) * 255
-        free = (log_odds < -0.3).astype(np.uint8) * 128
         grid[:] = 128
         grid[log_odds < -0.3] = 0
         grid[log_odds >  0.5] = 255
@@ -191,7 +209,7 @@ def map_boundary_turn(robot_x, robot_y, robot_th, scan):
 # 이전 스캔의 XY 포인트를 저장해 두고, 다음 스캔과 비교해 Δpose 추출
 prev_points      = None
 MATCH_MAX_DIST   = 0.20   # 매칭 허용 최대 거리 (m)
-MATCH_MIN_PTS    = 30     # 최소 매칭 포인트 수
+MATCH_MIN_PTS    = 60     # 최소 매칭 포인트 수 (회전 추정 안정성 위해 상향: 30 → 60)
 MATCH_SKIP_DEG   = 3      # 몇 도 간격으로 샘플링할지
 
 def scan_to_points(scan, robot_x, robot_y, robot_th):
@@ -246,7 +264,8 @@ def icp_once(src, dst):
     dx, dy = float(t[0]), float(t[1])
 
     # 너무 큰 점프는 무시 (튀는 값 방어)
-    if abs(dx) > 0.15 or abs(dy) > 0.15 or abs(dth) > 0.3:
+    # dth 임계값도 보수적으로 축소 (0.3 → 0.05): 작은 회전만 신뢰
+    if abs(dx) > 0.15 or abs(dy) > 0.15 or abs(dth) > 0.05:
         return 0.0, 0.0, 0.0
 
     return dx, dy, dth
@@ -257,7 +276,7 @@ SLAM_Y  = 0.0
 SLAM_TH = 0.0
 slam_lock = threading.Lock()
 
-# 오도메트리 (ICP 실패 시 폴백 + ICP 초기값)
+# 오도메트리 (ICP 실패 시 폴백 + 회전 기준값)
 ODOM_X   = 0.0
 ODOM_Y   = 0.0
 ODOM_TH  = 0.0
@@ -279,7 +298,10 @@ last_match_t      = time.time()
 def try_scan_match(scan):
     """
     스캔 매칭을 시도해 SLAM 위치를 보정.
-    ICP가 실패하면 오도메트리 값을 그대로 사용.
+    회전(theta)은 ICP 결과를 누적하지 않고 항상 오도메트리(ODOM_TH)를
+    기준으로 사용한다. brute-force ICP의 회전 추정은 노이즈가 커서
+    누적 시 빠르게 발산(맵이 방사형으로 어긋나는 현상)하기 때문.
+    위치(x, y)는 ICP 보정이 유효하면 사용하고, 아니면 오도메트리로 폴백.
     """
     global prev_points, SLAM_X, SLAM_Y, SLAM_TH, last_match_t
 
@@ -294,26 +316,28 @@ def try_scan_match(scan):
     # 현재 스캔 → 글로벌 포인트 (현재 추정 위치 기준)
     cur_pts = scan_to_points(scan, sx, sy, sth)
 
+    new_th = ODOM_TH  # 회전은 항상 odom 기준
+
     if prev_points is not None and cur_pts is not None:
         dx, dy, dth = icp_once(cur_pts, prev_points)
-        # ICP 보정이 유의미하면 적용, 아니면 오도메트리 델타 사용
-        if abs(dx) + abs(dy) + abs(dth) > 1e-6:
+        if abs(dx) + abs(dy) > 1e-6:
+            # ICP 위치 보정 적용, 회전은 odom 사용
             with slam_lock:
                 SLAM_X  = sx + dx
                 SLAM_Y  = sy + dy
-                SLAM_TH = sth + dth  # 각도 누적
+                SLAM_TH = new_th
         else:
-            # 오도메트리 델타 반영
+            # ICP 보정 없음 → 오도메트리 그대로
             with slam_lock:
                 SLAM_X  = ODOM_X
                 SLAM_Y  = ODOM_Y
-                SLAM_TH = ODOM_TH
+                SLAM_TH = new_th
     else:
         # 첫 스캔이거나 포인트 부족 → 오도메트리
         with slam_lock:
             SLAM_X  = ODOM_X
             SLAM_Y  = ODOM_Y
-            SLAM_TH = ODOM_TH
+            SLAM_TH = new_th
 
     prev_points = cur_pts
 
@@ -351,9 +375,10 @@ def render_map(robot_x, robot_y, robot_th):
     rx, ry = world_to_grid(robot_x, robot_y)
     if 0 <= rx < GRID_W and 0 <= ry < GRID_H:
         cv2.circle(vis, (rx, ry), 3, (0, 255, 0), -1)
-        # 방향 화살표
-        ex = int(rx + 8 * math.cos(robot_th))
-        ey = int(ry - 8 * math.sin(robot_th))
+        # 방향 화살표 (world_to_grid와 동일한 회전 적용:
+        #   th=0(전진) → 화면 위쪽, 좌회전(+th) → 화면 왼쪽)
+        ex = int(rx - 8 * math.sin(robot_th))
+        ey = int(ry - 8 * math.cos(robot_th))
         cv2.arrowedLine(vis, (rx, ry), (ex, ey), (0, 255, 255), 1, tipLength=0.4)
 
     # 2x2m 바운더리 표시
@@ -414,6 +439,24 @@ park_t        = None
 last_cmd      = (0.0, 0.0)
 
 print(f"START | MISSION: {MISSION}")
+
+# ── 라이다 워밍업 대기 ─────────────────────────────────────────────────
+# 라이다 스레드가 360도 전 영역에 대해 충분한 측정값을 채울 때까지
+# 로봇을 정지 상태로 두고 대기. 이렇게 하면 시작 직후 잘못된(기본값
+# 150cm) 거리값을 기준으로 바로 전진하는 문제를 방지할 수 있다.
+print("LIDAR 워밍업 대기 중...")
+stop_robot()
+warmup_start = time.time()
+while not lidar_ready.is_set():
+    # 워밍업 중에도 카메라 프레임은 소비해서 버퍼가 쌓이지 않도록 함
+    cap.read()
+    if time.time() - warmup_start > 5.0:
+        print("LIDAR 워밍업 타임아웃(5s) - 진행")
+        break
+    time.sleep(0.05)
+print(f"LIDAR 워밍업 완료 ({time.time() - warmup_start:.1f}s) - 주행 시작")
+last_odom_t = time.time()  # 워밍업 동안 흐른 시간이 odom에 반영되지 않도록 리셋
+last_match_t = time.time()
 
 # ── 메인 루프 ─────────────────────────────────────────────────────────
 try:
