@@ -80,8 +80,8 @@ _last_v = 0.0
 _last_w = 0.0
 
 # 정지→이동 시 부드러운 전환을 위한 램프업 설정
-RAMP_STEP_V  = 0.04   # 프레임당 v 최대 변화량
-RAMP_STEP_W  = 0.15   # 프레임당 w 최대 변화량
+RAMP_STEP_V  = 0.04   # 프레임 당 v 최대 변화량
+RAMP_STEP_W  = 0.30   # 프레임 당 w 최대 변화량 (0.15 → 0.30으로 2배 증가)
 
 def send_cmd(v, w, ramp=True):
     """
@@ -145,17 +145,15 @@ ARRIVE_FORWARD_V   = 0.15
 ARRIVE_CONFIRM     = 8
 
 # ── SCAN SEARCH (제자리 회전 스캔) ────────────────────────────────────
-SPIN_W             = 1.2        # 제자리 회전 각속도 (rad/s)
-SPIN_FULL_SEC      = 10.5       # 360° 완료 기준 시간 (여유 포함)
+SPIN_W             = 1.6        # 제자리 회전 각속도 (0.6 → 1.6 rad/s로 2.67 배 증가)
+SPIN_FULL_SEC      = 4.0        # 360° 완료 기준 시간 (10.5 → 4.0s, 360°/1.6 ≈ 2.25s 여유 포함)
 SPIN_DETECT_FRAMES = 4          # 회전 중 색상 연속 인식 프레임 수
 
-# ── WANDER SEARCH (30cm 반경 배회) ────────────────────────────────────
+# ── WANDER SEARCH (원 반경 30cm 배회) ─────────────────────────────────
 SEARCH_RADIUS_CM   = 30.0       # 원점에서 최대 이동 반경
 WANDER_V           = 0.18       # 배회 전진 속도
 WANDER_W_BASE      = 0.4        # 배회 시 기본 회전
-WANDER_STEP_SEC    = 1.5        # 한 방향 전진 시간
-WANDER_TURN_SEC    = 1.0        # 방향 전환 시간
-STOP_BETWEEN_SEC   = 0.3        # 동작 사이 정지 시간
+STOP_BETWEEN_SEC   = 0.0        # 동작 사이 정지 시간 (0 for 연속 이동)
 
 # ── 간단한 오도메트리 (LiDAR 없이 cmd 적분) ──────────────────────────
 # 로봇 heading 을 추적하여 원점 대비 상대 위치를 추정함
@@ -196,11 +194,8 @@ arrive_count  = 0
 spin_start_t  = time.time()
 spin_found    = False         # 회전 중 색상 발견 여부
 
-# WANDER 세부
-wander_state     = "STOP_PRE"  # STOP_PRE → FORWARD → STOP_MID → TURN → STOP_MID → ...
-wander_state_t   = time.time()
-wander_dir       = 1            # +1 or -1
-wander_phase_idx = 0            # 배회 패턴 인덱스
+# WANDER 세부 (원형 경로 - 상태 머신 제거)
+wander_dir       = 1            # +1: 우회전, -1: 좌회전 (원형 경로 방향)
 
 # PARK 세부
 park_state    = "TRACK"
@@ -288,14 +283,12 @@ try:
                 stop_robot()
                 time.sleep(STOP_BETWEEN_SEC)
                 mode = "WANDER"
-                wander_state   = "STOP_PRE"
-                wander_state_t = time.time()
-                wander_dir     = 1
+                wander_dir     = 1  # +1: 우회전, -1: 좌회전
                 # 오도메트리 원점 리셋 (현재 위치가 새로운 탐색 원점)
                 with odo_lock:
                     odo_x, odo_y, odo_yaw = 0.0, 0.0, 0.0
                 odo_t = time.time()
-                print(f"[SPIN_SCAN] 완료, 미발견 → 30cm 반경 배회 시작")
+                print(f"[SPIN_SCAN] 완료, 미발견 → 원 반경 30cm 배회 시작")
                 continue
 
             # 회전 중 (정지 직후라면 램프업으로 부드럽게 가속)
@@ -305,7 +298,7 @@ try:
                         (10, 25), 0, 0.5, (255, 255, 255), 1)
 
         # ══════════════════════════════════════════════════════════════
-        # MODE: WANDER  ─ 30cm 반경 배회 탐색
+        # MODE: WANDER  ─ 원 반경 30cm 배회 탐색 (원형 경로)
         # ══════════════════════════════════════════════════════════════
         elif mode == "WANDER":
             now = time.time()
@@ -326,84 +319,55 @@ try:
                 continue
 
             dist_from_origin = get_dist_from_origin()
-            over_radius = dist_from_origin >= SEARCH_RADIUS_CM
-
-            # ─ 배회 상태 머신 ────────────────────────────────────────
-            if wander_state == "STOP_PRE":
-                # 동작 전 짧은 정지
-                stop_robot()
-                if now - wander_state_t >= STOP_BETWEEN_SEC:
-                    wander_state   = "FORWARD"
-                    wander_state_t = now
-                label = "WANDER STOP"
-
-            elif wander_state == "FORWARD":
-                elapsed_w = now - wander_state_t
-
-                if over_radius:
-                    # 반경 초과 → 즉시 정지 후 방향 전환
-                    stop_robot()
-                    wander_dir     = -wander_dir   # 반대 방향으로 전환
-                    wander_state   = "STOP_MID"
-                    wander_state_t = now
-                    print(f"[WANDER] 반경 초과({dist_from_origin:.1f}cm) → 방향 전환")
-                elif elapsed_w >= WANDER_STEP_SEC:
-                    # 전진 시간 완료 → 정지 후 회전
-                    stop_robot()
-                    wander_state   = "STOP_MID"
-                    wander_state_t = now
-                else:
-                    # 전진 중 (장애물 회피 포함)
-                    if fm < THRESH_STOP:
-                        v, w = 0.0, adir * 0.7
-                        stop_robot()  # 장애물 직전 정지
-                        wander_state   = "STOP_MID"
-                        wander_state_t = now
-                    elif fm < THRESH_TURN:
-                        v, w = 0.10, adir * 0.5
-                        send_cmd(v, w)
-                        update_odometry(v, w)
-                    else:
-                        v, w = WANDER_V, WANDER_W_BASE * wander_dir * 0.3
-                        send_cmd(v, w)
-                        update_odometry(v, w)
-                label = f"WANDER FWD  r={dist_from_origin:.0f}cm"
-
-            elif wander_state == "STOP_MID":
-                # 전진↔회전 사이 정지
-                stop_robot()
-                if now - wander_state_t >= STOP_BETWEEN_SEC:
-                    wander_state   = "TURN"
-                    wander_state_t = now
-                label = "WANDER STOP"
-
-            elif wander_state == "TURN":
-                elapsed_w = now - wander_state_t
-                if elapsed_w >= WANDER_TURN_SEC:
-                    wander_dir     = -wander_dir        # 다음 턴은 반대 방향
-                    stop_robot()
-                    wander_state   = "STOP_PRE"
-                    wander_state_t = now
-                else:
-                    # 원점 방향 편향: 원점과 멀수록 원점 쪽을 향하도록 보정
-                    ox, oy, oyaw = get_odo()
-                    angle_to_origin = math.atan2(-oy, -ox)   # 원점 방향 각도
-                    angle_err = angle_to_origin - oyaw
-                    # -π ~ π 정규화
-                    angle_err = (angle_err + math.pi) % (2 * math.pi) - math.pi
-                    # 반경 50% 초과 시 원점 방향 회전 가중치 추가
-                    if dist_from_origin > SEARCH_RADIUS_CM * 0.5:
-                        bias = np.clip(angle_err * 0.5, -0.4, 0.4)
-                    else:
-                        bias = 0.0
-                    w = WANDER_W_BASE * wander_dir + bias
-                    send_cmd(0.0, w)
-                    update_odometry(0.0, w)
-                label = f"WANDER TURN r={dist_from_origin:.0f}cm"
-
+            
+            # ─ 원형 경로 추적 ─────────────────────────────────────────
+            ox, oy, oyaw = get_odo()
+            
+            # 원점에서 현재 위치 방향 각도
+            angle_to_origin = math.atan2(-oy, -ox)
+            
+            # 원형 경로를 따라 이동하기 위한 타겟 각도 (원점 방향 + 90° 또는 -90°)
+            target_angle = angle_to_origin + (math.pi / 2) * wander_dir
+            
+            # 현재 heading 과 타겟 각도의 오차
+            angle_err = target_angle - oyaw
+            # -π ~ π 정규화
+            angle_err = (angle_err + math.pi) % (2 * math.pi) - math.pi
+            
+            # 반경 보정: 반경보다 멀리 가면 원점 쪽으로, 가까이 가면orig 부터 멀어도록
+            radius_err = dist_from_origin - SEARCH_RADIUS_CM
+            radius_bias = np.clip(radius_err * 0.3, -0.3, 0.3)
+            
+            # 원형 경로_FOLLOW 각속도 계산
+            w_turn = angle_err * 0.8 + radius_bias
+            
+            # 반경 초과 시 즉시 원점 방향 보정 강화
+            if dist_from_origin >= SEARCH_RADIUS_CM * 1.1:
+                w_turn = -angle_to_origin - oyaw  # 즉시 원점 방향
+                w_turn = np.clip(w_turn, -1.2, 1.2)
+            
+            # 전진 속도: 반경 внутри則 정상, 초과 시 감소
+            if dist_from_origin >= SEARCH_RADIUS_CM:
+                v = WANDER_V * 0.5  # 반경 초과 시 속도 감소
             else:
-                label = "WANDER ?"
-
+                v = WANDER_V
+            
+            # 장애물 회피 Priority
+            if fm < THRESH_STOP:
+                v, w = 0.0, adir * 0.7
+                stop_robot()
+            elif fm < THRESH_TURN:
+                v, w = 0.10, adir * 0.5 + w_turn * 0.5
+                send_cmd(v, w)
+                update_odometry(v, w)
+            else:
+                # 원형 경로_follow
+                w = SPIN_W * wander_dir * 0.25 + w_turn  # 기본 회전 + 경로보정
+                w = np.clip(w, -1.2, 1.2)
+                send_cmd(v, w)
+                update_odometry(v, w)
+            
+            label = f"WANDER CIRCLE r={dist_from_origin:.0f}cm"
             cv2.putText(frame, f"WANDER [{target}] {label}", (10, 25), 0, 0.45, (255, 200, 0), 1)
             ox, oy, _ = get_odo()
             cv2.putText(frame, f"odo ({ox:.0f},{oy:.0f})cm", (10, 45), 0, 0.4, (200, 200, 200), 1)
