@@ -25,14 +25,14 @@ lidar_ser.reset_input_buffer()
 lidar_ser.write(bytes([0xA5, 0x20])); lidar_ser.read(7)
 print("LIDAR OK")
 
-# ── LIDAR FILTER & THRESHOLDS (처박기 방지 최적화) ─────────────────────
-EMA_ALPHA   = 0.60      # 기존 0.35 -> 0.60으로 상향 (새 데이터 반영 속도 대폭 업)
-MEDIAN_K    = 1         # 기존 2 -> 1로 하향 (윈도우 크기를 줄여 필터 연산 지연 최소화)
-FRONT_RANGE = 40        # 기존 45 -> 40으로 축소 (정면 충돌 위험 구역 예리하게 압축)
+# ── LIDAR FILTER & THRESHOLDS ─────────────────────────────────────────
+EMA_ALPHA   = 0.60      
+MEDIAN_K    = 1         
+FRONT_RANGE = 40        
 
-THRESH_SLOW = 35.0      # 기존 25.0 -> 35.0cm로 상향 (멀리서부터 안전하게 감속 시작)
-THRESH_TURN = 18.0      # 기존 10.0 -> 18.0cm로 상향 (여유 공간 확보 후 조향 시작)
-THRESH_STOP = 12.0      # 기존  7.0 -> 12.0cm로 상향 (물리적 제동 거리 및 관성 마진 확보)
+THRESH_SLOW = 35.0      
+THRESH_TURN = 18.0      
+THRESH_STOP = 12.0      
 
 _scan     = np.full(360, 250.0, dtype=np.float32)
 _scan_pub = np.full(360, 250.0, dtype=np.float32)
@@ -90,15 +90,14 @@ def nearest_obstacle_angle(scan):
 def nearest_obstacle_dist(scan):
     return float(np.min(scan))
 
-# ── WALL-FOLLOW 함수 (코너 회피력 강화 및 지그재그 완화) ───────────────
+# ── WALL-FOLLOW 함수 ──────────────────────────────────────────────────
 def wall_follow(scan, fm, adir):
     ld          = left_dist(scan)
     left_close  = side_min(scan, 60, 120)
     right_close = side_min(scan, 240, 300)
 
-    # 전방 급박 상황 시 선속도를 더 낮추고 조향 회전력을 대폭 강화
     if fm < THRESH_STOP:
-        return (0.05, adir * 1.6) 
+        return (0.04, adir * 1.6) # 위기 정체 상황 선속도 최소화
     if fm < THRESH_TURN:
         return (WALL_TURN_V, adir * 1.2) 
 
@@ -113,15 +112,14 @@ def wall_follow(scan, fm, adir):
         w_recover = float(np.clip(-err_a / 90.0 * WALL_LOST_W, -WALL_LOST_W, WALL_LOST_W))
         return (WALL_V * 0.6, w_recover)
 
-    # WALL_KP 감소 효과로 측면 벽 추종이 출렁이지 않고 부드러워짐
     err = ld - WALL_TARGET
     w   = WALL_KP * err
     
     if fm < THRESH_SLOW:
         blend = float(np.clip(
             (THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
-        w = (1 - blend) * w + blend * adir * 0.9  # 회피 조향 가중치 강화
-        v = WALL_V * (1.0 - 0.5 * blend)          # 전방 감속 스케일 강화
+        w = (1 - blend) * w + blend * adir * 0.9  
+        v = WALL_V * (1.0 - 0.5 * blend)          
     else:
         v = WALL_V
     
@@ -160,33 +158,33 @@ def make_mask(frame, hsv, name):
     bm = cv2.inRange(frame, np.array(cfg["bgr"][0]), np.array(cfg["bgr"][1]))
     return cv2.bitwise_and(m, bm)
 
-# ── PARAMS (스케일 및 주행 밸런스 조정) ──────────────────────────────────
+# ── PARAMS (평상시 주행 속도 스케일 전면 하향) ───────────────────────────
 MIN_AREA        = 400
 KP_ROT          = 0.035 
 W_MIN           = 0.30  
-APPROACH_V      = 0.17
+APPROACH_V      = 0.12  # 기존 0.17 -> 0.12m/s (카메라 추적 접근 속도 하향)
 PARK_SEC        = 1.2
 DETECT_CONFIRM = 6
 
 ARRIVE_Y_TOP       = int(240 * 0.85)
 ARRIVE_X_MARGIN    = 40
-ARRIVE_FORWARD_SEC = 0.7
-ARRIVE_FORWARD_V   = 0.15
+ARRIVE_FORWARD_SEC = 0.9  # 속도가 느려졌으므로 도달 시간은 0.7 -> 0.9초로 살짝 확장
+ARRIVE_FORWARD_V   = 0.11  # 기존 0.15 -> 0.11m/s (최종 주차 진입 속도 안정화)
 ARRIVE_CONFIRM     = 8
 
-# wall-following 밸런스 튜닝
-WALL_TARGET     = 25.0  # 기존 30.0 -> 25.0cm (벽면 타겟을 좁혀 탈출 통로 확보 원활)
+# wall-following 밸런스 속도 튜닝
+WALL_TARGET     = 25.0  
 WALL_SCAN_DIST  = 45.0
-WALL_APPROACH_V = 0.15  # 기존 0.18 -> 0.15m/s (벽 진입 속도를 한 단계 낮춰 처박기 원천 방지)
-WALL_KP         = 0.010 # 기존 0.015 -> 0.010으로 하향 (지그재그 흔들림 완화, 둔하고 묵직하게)
-WALL_V          = 0.18  # 기존 0.20 -> 0.18m/s (주행 선속도를 낮춰 제어 안정성 상향)
-WALL_TURN_V     = 0.07  # 기존 0.10 -> 0.07m/s (코너링 속도를 깎아서 박지 않고 유연하게 피봇팅)
+WALL_APPROACH_V = 0.11  # 기존 0.15 -> 0.11m/s (벽 접근 속도 하향)
+WALL_KP         = 0.010 
+WALL_V          = 0.13  # 기존 0.18 -> 0.13m/s (벽 추종 기본 속도 감속)
+WALL_TURN_V     = 0.05  # 기존 0.07 -> 0.05m/s (코너링 선속도 최소화)
 WALL_LOST_W     = 0.8   
 
 # 순환 감지 및 이탈
 FULL_CIRCLE_RAD    = 2 * math.pi * 0.85
 ESCAPE_RAD         = math.pi * 0.6
-ESCAPE_V           = 0.13
+ESCAPE_V           = 0.10  # 기존 0.13 -> 0.10m/s
 ESCAPE_W           = 1.70  
 
 # ── STATE ─────────────────────────────────────────────────────────────
@@ -223,18 +221,17 @@ try:
         fm     = front_min(scan)
         adir   = avoid_dir(scan)
 
-        # ── [실시간 추가] 사방 폐쇄(삼각형 구석 등) 무조건 반전 탈출 로직 ──
+        # ── 사방 폐쇄(골목/삼각형 구석) 진입 전 선제적 차단 및 복귀 로직 ──
         left_avg  = float(np.mean(scan[45:135]))
         right_avg = float(np.mean(scan[225:315]))
 
-        # 타이트했던 35cm 제한을 반응 속도를 고려해 40cm 마진으로 상향 조정
-        if fm < 40.0 and left_avg < 40.0 and right_avg < 40.0:
-            print("[EMERGENCY] 사방이 벽으로 가로막힘 감지! 제자리 180도 회전 실행")
+        if fm < 65.0 and left_avg < 65.0 and right_avg < 65.0:
+            print(f"[EMERGENCY PREVENT] 사방 폐쇄 구간 진입 조기 차단! (정면:{fm:.1f}cm)")
             stop_robot()
-            time.sleep(0.1)
+            time.sleep(0.15) 
             
             send_cmd(0.0, adir * 2.2) 
-            time.sleep(0.75) 
+            time.sleep(0.80) 
             
             stop_robot()
             time.sleep(0.1)
@@ -293,11 +290,11 @@ try:
                 print(f"[{target}] 발견 → 추적 시작")
                 continue
 
-            # 상향된 안전 임계값(THRESH)이 그대로 반영되어 원거리 조기 제동 수행
-            if fm < THRESH_STOP:   v, w = 0.05, adir * 1.4  # 선속은 더 줄이고 제동 조향각은 상향
-            elif fm < THRESH_TURN: v, w = 0.10, adir * 1.0
-            elif fm < THRESH_SLOW: v, w = 0.15, adir * 0.6
-            else:                  v, w = 0.28, 0.0
+            # 평상시 직진 순항 최고속도를 0.28 -> 0.18로 하향 안정화
+            if fm < THRESH_STOP:   v, w = 0.04, adir * 1.4  
+            elif fm < THRESH_TURN: v, w = 0.08, adir * 1.0
+            elif fm < THRESH_SLOW: v, w = 0.12, adir * 0.6
+            else:                  v, w = 0.18, 0.0
             send_cmd(v, w)
             cv2.putText(frame, "MODE: LIDAR", (10, 25), 0, 0.5, (255, 255, 255), 1)
 
@@ -369,11 +366,11 @@ try:
                     w_s   = float(np.clip(-err_a / 90.0 * 1.2, -1.2, 1.2)) 
                     send_cmd(0.0, w_s)
                 else:
-                    send_cmd(0.15, 0.45)
+                    send_cmd(0.11, 0.45) # 탐색 시 선속도 하향
 
                 if time.time() - ws_start_t > 6.0:
-                    print("[개활지 예외 처리] 장시간 장애물 미검출 -> 넓은 영역 탈출을 위해 강제 직진")
-                    send_cmd(0.22, 0.0)
+                    print("[개활지 예외 처리] 강제 선제 직진 속도 최적화")
+                    send_cmd(0.15, 0.0)
                     time.sleep(0.8)  
                     ws_start_t = time.time()
 
@@ -394,7 +391,7 @@ try:
                     continue
 
                 if fm < THRESH_STOP:
-                    v, w = 0.05, adir * 1.4
+                    v, w = 0.04, adir * 1.4
                 elif fm < THRESH_TURN:
                     v, w = WALL_APPROACH_V * 0.5, adir * 1.1
                 else:
@@ -446,7 +443,7 @@ try:
                     esc_angle_accum = 0.0
                     wf_last_t       = None
                     wf_angle_accum  = 0.0
-                    print(f"[{target}] 이탈 완료 → WALL_SEARCH (다음 장애물)")
+                    print(f"[{target}] 이탈 완료 → WALL_SEARCH")
 
                 cv2.putText(frame, f"WALL-ESCAPE [{target}]",
                             (10, 25), 0, 0.5, (0, 128, 255), 1)
@@ -464,7 +461,7 @@ try:
                     arrive_count = 0
                     park_state   = "FORWARD"
                     park_t       = time.time()
-                    print(f"[{target}] centroid {ARRIVE_CONFIRM}프레임 확정 → {ARRIVE_FORWARD_SEC}초 전진")
+                    print(f"[{target}] centroid 확정 → 안전 전진")
                     send_cmd(ARRIVE_FORWARD_V, 0.0)
                     continue
                 else:
@@ -483,11 +480,11 @@ try:
                         w = cam_w(err_x)
                     else:
                         w_cam = cam_w(err_x)
-                        w_lid = adir * 1.2 # 감속 추적 시 회피각 강화
+                        w_lid = adir * 1.2 
                         if fm < THRESH_STOP:
-                            v, w = 0.05, w_lid
+                            v, w = 0.04, w_lid
                         elif fm < THRESH_TURN:
-                            v, w = 0.10, 0.7 * w_lid + 0.3 * w_cam
+                            v, w = 0.08, 0.7 * w_lid + 0.3 * w_cam
                         else:
                             v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
 
@@ -514,7 +511,7 @@ try:
                     park_t         = None
                     wf_angle_accum = 0.0
                     wf_last_t      = None
-                    print(f"[{target}] SEARCH 2.5초 초과 → WALL_SEARCH")
+                    print(f"[{target}] SEARCH 초과 → WALL_SEARCH")
 
                 cv2.putText(frame, f"SEARCHING: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
 
