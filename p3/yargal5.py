@@ -179,6 +179,7 @@ WALL_KP       = 0.012
 WALL_V        = 0.22
 WALL_TURN_V   = 0.10
 WALL_LOST_W   = 0.4
+WALL_SEARCH_W = 1.1     # 벽 탐색 제자리 회전 각속도
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"   # LIDAR | PARK
@@ -275,7 +276,7 @@ try:
                     lidar_state = "WALL_APPROACH"
                     print(f"[LIDAR] 회전 중 벽 감지 fm:{fm:.0f}cm, follow_side={follow_side} → 접근 시작")
                 else:
-                    send_cmd(0.0, 0.5)
+                    send_cmd(0.0, WALL_SEARCH_W)
                     cv2.putText(frame, f"LIDAR-WALL-SEARCH fm:{fm:.0f}",
                                 (10, 25), 0, 0.5, (0, 255, 0), 1)
 
@@ -359,7 +360,7 @@ try:
                     continue
 
                 # 아직 아무것도 없음 → 제자리 좌회전으로 탐색
-                send_cmd(0.0, 0.5)
+                send_cmd(0.0, WALL_SEARCH_W)
                 cv2.putText(frame, f"WALL-SEARCH [{target}] 회전 중 fm:{fm:.0f}",
                             (10, 25), 0, 0.5, (0, 255, 0), 1)
 
