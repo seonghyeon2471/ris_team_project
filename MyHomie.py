@@ -116,15 +116,14 @@ PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 
 # ── 화면 영역 기준 ─────────────────────────────────────────────────────
-# 좌우 20% 영역: centroid가 이 범위를 벗어나면 카메라 조향으로 정렬
-# 화면 폭 320px 기준: 좌 64px 미만 or 우 256px 초과 → 벗어남
-ALIGN_MARGIN   = int(320 * 0.20)          # 64px  (양쪽 20%)
-ALIGN_LEFT     = ALIGN_MARGIN             # 64
-ALIGN_RIGHT    = 320 - ALIGN_MARGIN       # 256
-# centroid가 중앙 정렬된 것으로 볼 허용 오차 (±픽셀)
-CENTER_TOL     = 20                       # ±20px 이내면 "정렬 완료"
-# 정렬 완료 확인용 연속 프레임 수
-ALIGN_CONFIRM  = 5
+# 좌우 15% 영역으로 타이트하게 조정
+ALIGN_MARGIN   = int(320 * 0.15)          # 48px  (양쪽 15%)
+ALIGN_LEFT     = ALIGN_MARGIN             # 48
+ALIGN_RIGHT    = 320 - ALIGN_MARGIN       # 272
+# centroid가 중앙 정렬된 것으로 볼 허용 오차 (±픽셀) → 더 타이트하게
+CENTER_TOL     = 10                       # ±10px 이내면 "정렬 완료"
+# 정렬 완료 확인용 연속 프레임 수 → 더 엄격하게
+ALIGN_CONFIRM  = 8
 
 # ── 도착 판정 ──────────────────────────────────────────────────────────
 ARRIVE_Y_TOP        = int(240 * 0.85)
@@ -139,13 +138,11 @@ SPIN_W             = 1.6
 SPIN_ONE_ROUND_SEC = (2 * math.pi) / SPIN_W  # ~3.93초
 
 # ── SPIN2: 주차 후 SEARCH 한바퀴 돌고 색상 못찾으면 추가 한바퀴 ───────────
-# 회전하면서 라이다로 [장애물][공간][장애물] 패턴을 샘플링
-# 패턴 찾으면 그 공간 방향으로 전진, 못찾으면 LIDAR 주행 복귀
-GAP_OBS_THRESH  = 40.0   # 이 거리(cm) 이하면 장애물
-GAP_FREE_THRESH = 80.0   # 이 거리(cm) 이상이면 공간
-GAP_MIN_DEG     = 20     # 공간으로 인정할 최소 연속 각도(도)
-SPIN2_W         = 1.6    # SPIN2 각속도
-SPIN2_SEC       = (2 * math.pi) / SPIN2_W  # 한바퀴 시간
+GAP_OBS_THRESH  = 40.0
+GAP_FREE_THRESH = 80.0
+GAP_MIN_DEG     = 20
+SPIN2_W         = 1.6
+SPIN2_SEC       = (2 * math.pi) / SPIN2_W
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
@@ -153,30 +150,21 @@ mission_idx   = 0
 detect_count  = 0
 arrive_count  = 0
 
-# PARK 세부 상태
-# "ALIGN"   : centroid가 20% 밖 → 카메라 조향으로 중앙 정렬
-# "LIDAR_GO": 정렬 완료 → 라이다 조향으로 전진
-# "FORWARD" : 도착 직전 전진
-# "PARKING" : 정차
-# "SEARCH"  : 객체 놓침 → 회전 탐색
-# "SPIN"    : 한바퀴 회전 탐색 중
 park_state    = "ALIGN"
-align_count   = 0            # 연속 정렬 완료 프레임 카운터
+align_count   = 0
 last_seen_x   = 160
 park_t        = None
 last_cmd      = (0.0, 0.0)
 
-# 색상 미인식 타이머
 no_detect_t   = time.time()
 spin_t        = None
 spin_found    = False
 
-# SPIN2 (주차 후 탐색 전용)
-spin2_t       = None             # SPIN2 시작 시각
-spin2_samples = []               # (로봇기준 절대각도, 라이다거리) 샘플 리스트
-spin2_heading = 0.0              # 누적 회전 각도 (라디안)
-spin2_last_t  = None             # 이전 프레임 시각 (heading 적분용)
-spin2_gap_deg = None             # 찾은 공간의 절대 방향(도, 0=정면)
+spin2_t       = None
+spin2_samples = []
+spin2_heading = 0.0
+spin2_last_t  = None
+spin2_gap_deg = None
 
 print(f"START | MISSION: {MISSION}")
 
@@ -221,10 +209,8 @@ try:
             cv2.circle(frame, (cx_obj, cy_obj), 5, (0, 255, 255), -1)
 
         # ── 시각화 ─────────────────────────────────────────────────────
-        # 좌우 20% 경계선
         cv2.line(frame, (ALIGN_LEFT,  0), (ALIGN_LEFT,  H - 1), (200, 200, 0), 1)
         cv2.line(frame, (ALIGN_RIGHT, 0), (ALIGN_RIGHT, H - 1), (200, 200, 0), 1)
-        # 도착 판정 영역
         arrive_x1 = cx_mid - ARRIVE_X_MARGIN
         arrive_x2 = cx_mid + ARRIVE_X_MARGIN
         cv2.rectangle(frame,
@@ -234,11 +220,11 @@ try:
 
         # ── 헬퍼 함수 ──────────────────────────────────────────────────
         def centroid_out_of_center():
-            """centroid가 좌우 20% 밖에 있는가"""
+            """centroid가 좌우 15% 밖에 있는가"""
             return cx_obj < ALIGN_LEFT or cx_obj > ALIGN_RIGHT
 
         def centroid_centered():
-            """centroid가 중앙 ±CENTER_TOL 이내인가"""
+            """centroid가 중앙 ±CENTER_TOL(10px) 이내인가"""
             return abs(cx_obj - cx_mid) <= CENTER_TOL
 
         def centroid_in_arrive_zone():
@@ -255,7 +241,7 @@ try:
         if mode == "LIDAR":
             if found:
                 detect_count += 1
-                no_detect_t = time.time()   # 색상 보이면 타이머 리셋
+                no_detect_t = time.time()
             else:
                 detect_count = 0
 
@@ -268,12 +254,11 @@ try:
                 print(f"[{target}] 발견 → PARK 모드 진입")
                 continue
 
-            # ── 색상 못본 지 2.5초 초과 → SPIN 한바퀴 탐색 ──────────────
             if time.time() - no_detect_t >= NO_DETECT_TIMEOUT:
                 mode = "SPIN"
                 spin_t = time.time()
                 spin_found = False
-                no_detect_t = time.time()   # 스핀 후 재진입 방지용 리셋
+                no_detect_t = time.time()
                 print(f"[{target}] {NO_DETECT_TIMEOUT}초 미인식 → SPIN 탐색 시작")
                 continue
 
@@ -289,9 +274,8 @@ try:
             elapsed_spin = time.time() - spin_t
 
             if found and not spin_found:
-                # 회전 중 색상 발견 → 즉시 PARK 모드로 전환
                 spin_found = True
-                detect_count = DETECT_CONFIRM   # 확정 처리
+                detect_count = DETECT_CONFIRM
                 mode = "PARK"
                 park_state = "ALIGN"
                 align_count = 0
@@ -300,14 +284,12 @@ try:
                 continue
 
             elif elapsed_spin >= SPIN_ONE_ROUND_SEC:
-                # 한바퀴 다 돌았는데 못찾음 → LIDAR 주행으로 복귀
                 mode = "LIDAR"
                 no_detect_t = time.time()
                 detect_count = 0
                 print(f"[{target}] SPIN 완료, 미발견 → LIDAR 주행 복귀")
                 send_cmd(0.28, 0.0)
             else:
-                # 회전 중
                 send_cmd(0.0, SPIN_W)
                 remain = SPIN_ONE_ROUND_SEC - elapsed_spin
                 cv2.putText(frame, f"SPIN: {remain:.1f}s", (10, 25), 0, 0.6, (0, 255, 0), 2)
@@ -344,7 +326,6 @@ try:
             # ── 객체 없음: 탐색 회전 (SEARCH) ────────────────────────
             elif not found:
                 if park_state != "SEARCH":
-                    # SEARCH 처음 진입 시 타이머 시작
                     park_state   = "SEARCH"
                     spin_t       = time.time()
                     align_count  = 0
@@ -352,7 +333,6 @@ try:
 
                 elapsed_search = time.time() - spin_t
                 if elapsed_search >= SPIN_ONE_ROUND_SEC:
-                    # 한바퀴 다 돌았는데도 색상 미발견 → SPIN2 진입
                     park_state    = "SPIN2"
                     spin2_t       = time.time()
                     spin2_last_t  = time.time()
@@ -362,6 +342,7 @@ try:
                     print(f"[{target}] SEARCH 한바퀴 완료, 미발견 → SPIN2(라이다 패턴 탐색)")
                     continue
 
+                # ── 주차 후 탐색 각속도: 1.6 rad/s ──────────────────
                 v = 0.0
                 w = -1.6 if last_seen_x > cx_mid else 1.6
                 send_cmd(v, w)
@@ -375,14 +356,11 @@ try:
                 dt       = now - spin2_last_t
                 spin2_last_t = now
 
-                # 누적 회전각 적분 (SPIN2_W rad/s 로 회전 중)
-                spin2_heading += SPIN2_W * dt  # 라디안
+                spin2_heading += SPIN2_W * dt
 
-                # 현재 프레임 라이다 정면 거리 샘플링 (로봇 기준 0도=정면)
                 spin2_samples.append((spin2_heading, float(np.mean(scan[355:360].tolist() + scan[0:6].tolist()))))
 
                 if found:
-                    # SPIN2 중 색상 발견 → 즉시 PARK ALIGN 진입
                     park_state  = "ALIGN"
                     align_count = 0
                     no_detect_t = time.time()
@@ -390,9 +368,6 @@ try:
                     continue
 
                 if spin2_heading >= 2 * math.pi:
-                    # 한바퀴 완료 → 샘플에서 [장애물-공간-장애물] 패턴 탐색
-                    # samples: [(heading_rad, dist_cm), ...]
-                    # 각도 순 정렬 후 공간 구간 탐지
                     total = len(spin2_samples)
                     best_gap_center = None
                     best_gap_width  = 0
@@ -401,11 +376,9 @@ try:
                         dists  = np.array([s[1] for s in spin2_samples])
                         angles = np.array([math.degrees(s[0]) % 360 for s in spin2_samples])
 
-                        # 공간(free) / 장애물(obs) 이진화
                         is_free = dists >= GAP_FREE_THRESH
                         is_obs  = dists <= GAP_OBS_THRESH
 
-                        # 연속 공간 구간 탐색
                         in_gap      = False
                         gap_start   = 0
                         best_score  = -1
@@ -419,7 +392,6 @@ try:
                                 gap_end   = i
                                 gap_width = gap_end - gap_start
 
-                                # 공간 앞뒤로 장애물 있는지 확인
                                 pre_idx  = (gap_start - 1) % total
                                 post_idx = gap_end % total
                                 has_obs_before = is_obs[pre_idx]
@@ -440,7 +412,6 @@ try:
                         spin2_t       = time.time()
                         print(f"[{target}] SPIN2 패턴 발견 → 방향 {spin2_gap_deg:.1f}도 조준")
                     else:
-                        # 패턴 못찾음 → LIDAR 주행 복귀
                         mode         = "LIDAR"
                         no_detect_t  = time.time()
                         detect_count = 0
@@ -453,8 +424,6 @@ try:
 
             # ── SPIN2_TURN: 찾은 공간 방향으로 로봇 회전 후 전진 ──────────
             elif park_state == "SPIN2_TURN":
-                # spin2_gap_deg 만큼 회전했으면 전진
-                # 회전 시간 = gap_deg / (SPIN2_W * 180/pi)
                 turn_sec = math.radians(spin2_gap_deg) / SPIN2_W
                 elapsed  = time.time() - spin2_t
                 if elapsed < turn_sec:
@@ -462,7 +431,6 @@ try:
                     cv2.putText(frame, f"SPIN2_TURN: {spin2_gap_deg:.0f}deg",
                                 (10, 25), 0, 0.55, (255, 165, 0), 2)
                 else:
-                    # 조준 완료 → LIDAR_GO처럼 전진 (색 못찾아도 일단 돌진)
                     park_state  = "SPIN2_GO"
                     spin2_t     = time.time()
                     print(f"[{target}] 조준 완료 → 공간으로 전진")
@@ -470,14 +438,12 @@ try:
             # ── SPIN2_GO: 공간 방향으로 전진 ──────────────────────────────
             elif park_state == "SPIN2_GO":
                 if found:
-                    # 색상 발견 → ALIGN으로
                     park_state  = "ALIGN"
                     align_count = 0
                     no_detect_t = time.time()
                     print(f"[{target}] SPIN2_GO 중 색상 발견 → ALIGN")
                     continue
 
-                # 라이다 장애물 회피하며 전진
                 if fm < THRESH_STOP:
                     v, w = 0.09, adir * 0.9
                 elif fm < THRESH_TURN:
@@ -492,10 +458,10 @@ try:
 
             # ── 객체 발견 시 메인 로직 ─────────────────────────────────
             elif found and park_state not in ("SPIN2", "SPIN2_TURN", "SPIN2_GO"):
-                no_detect_t = time.time()   # 색상 보이는 동안 타이머 리셋
+                no_detect_t = time.time()
                 err_x = cx_obj - cx_mid
 
-                # [도착 판정] 어떤 상태에서든 도착 영역 진입 시 우선 처리
+                # [도착 판정]
                 if centroid_in_arrive_zone():
                     arrive_count += 1
                 else:
@@ -510,7 +476,7 @@ try:
                     send_cmd(ARRIVE_FORWARD_V, 0.0)
                     continue
 
-                # ── ALIGN: centroid가 좌우 20% 밖 → 카메라 조향 정렬 ──
+                # ── ALIGN: centroid 중앙 정렬 (카메라 조향) ──────────
                 if park_state in ("ALIGN", "SEARCH"):
                     park_state = "ALIGN"
 
@@ -521,12 +487,12 @@ try:
                         align_count = 0
 
                     if align_count >= ALIGN_CONFIRM:
-                        # 정렬 완료 → 라이다 전진 모드로 전환
+                        # 정렬 완료 → 라이다 전진 모드
                         align_count = 0
                         park_state  = "LIDAR_GO"
-                        print(f"[{target}] 정렬 완료 → LIDAR_GO")
+                        print(f"[{target}] 정렬 완료(±{CENTER_TOL}px, {ALIGN_CONFIRM}프레임) → LIDAR_GO")
                     else:
-                        # 카메라 조향: 제자리 회전 or 느린 전진+회전
+                        # 카메라 조향: 오차 60px 초과 시 제자리 회전
                         w = cam_w(err_x)
                         v = 0.0 if abs(err_x) > 60 else 0.08
                         last_cmd = (v, w)
@@ -535,9 +501,9 @@ try:
                     cv2.putText(frame, f"ALIGN({align_count}/{ALIGN_CONFIRM}): {target}",
                                 (10, 25), 0, 0.55, draw, 1)
 
-                # ── LIDAR_GO: 정렬된 상태에서 라이다로 전진 ─────────────
+                # ── LIDAR_GO: 정렬 후 라이다로 장애물 피하며 전진 ──────
                 elif park_state == "LIDAR_GO":
-                    # centroid가 다시 20% 밖으로 벗어나면 ALIGN으로 복귀
+                    # centroid가 다시 15% 밖으로 벗어나면 ALIGN 복귀
                     if centroid_out_of_center():
                         park_state  = "ALIGN"
                         align_count = 0
@@ -552,7 +518,7 @@ try:
                     elif fm < THRESH_SLOW:
                         v, w = 0.18, adir * 0.4
                     else:
-                        v, w = APPROACH_V, 0.0     # 장애물 없으면 직진
+                        v, w = APPROACH_V, 0.0
 
                     last_cmd = (v, w)
                     send_cmd(v, w)
