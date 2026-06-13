@@ -30,8 +30,8 @@ EMA_ALPHA   = 0.35
 MEDIAN_K    = 2
 FRONT_RANGE = 45
 THRESH_SLOW = 20.0
-THRESH_TURN = 8.0
-THRESH_STOP = 6.0
+THRESH_TURN = 9.0
+THRESH_STOP = 7.0
 
 _scan     = np.full(360, 250.0, dtype=np.float32)
 _scan_pub = np.full(360, 250.0, dtype=np.float32)
@@ -137,7 +137,7 @@ COLOR_CFG = {
     "red":    {"hsv1": ([169, 136, 175], [179, 207, 255]),
                "hsv2": None,
                "bgr":  ([20, 20, 80],   [255, 255, 255]), "draw": (0, 0, 255)},
-    "yellow": {"hsv1": ([24, 48, 193],  [45, 170, 255]),  
+    "yellow": {"hsv1": ([24, 48, 193],  [45, 170, 255]),
                "hsv2": None,
                "bgr":  ([0, 80, 80],    [255, 255, 255]), "draw": (0, 200, 255)},
     "blue":   {"hsv1": ([98, 100, 123], [138, 207, 246]),
@@ -203,10 +203,6 @@ esc_angle_accum = 0.0
 
 ws_start_t      = None 
 
-# ── [삼각형 구석 대책 변수] ──
-trap_stage      = 0     # 1: 후진탈출, 2: 제자리회전탈출
-trap_t          = None
-
 print(f"START | MISSION: {MISSION}")
 
 # ── MAIN LOOP ─────────────────────────────────────────────────────────
@@ -223,9 +219,26 @@ try:
         fm     = front_min(scan)
         adir   = avoid_dir(scan)
 
-        # 구석 검출용 실시간 측면 최소거리 체크
-        left_side  = side_min(scan, 60, 120)
-        right_side = side_min(scan, 240, 300)
+        # ── [실시간 추가] 사방 폐쇄(삼각형 구석 등) 무조건 반전 탈출 로직 ──
+        # 좌측 45~135도 범위, 우측 225~315도 범위의 평균 거리 센싱
+        left_avg  = float(np.mean(scan[45:135]))
+        right_avg = float(np.mean(scan[225:315]))
+
+        # 전방 벽이 코앞에 도달(35cm)하고 양옆마저 완벽히 밀착해 막힌 경우 작동
+        if fm < 35.0 and left_avg < 35.0 and right_avg < 35.0:
+            print("[EMERGENCY] 사방이 벽으로 가로막힘 감지! 제자리 180도 회전 실행")
+            stop_robot()
+            time.sleep(0.1)
+            
+            # 후진 기어 대신 가장 넓은 공간 방향(adir)으로 최대 속도(2.2) 제자리 턴
+            send_cmd(0.0, adir * 2.2) 
+            time.sleep(0.75) # 마찰력에 따라 180도 턴이 덜 되거나 더 되면 이 시간 값 조정
+            
+            stop_robot()
+            time.sleep(0.1)
+            continue # 상태머신 연산 없이 루프를 즉시 스킵하여 뒤를 돌아본 뒤 주행 안전 재개
+
+        # ──────────────────────────────────────────────────────────────────
 
         if mission_idx >= len(MISSION):
             stop_robot()
@@ -278,15 +291,6 @@ try:
                 print(f"[{target}] 발견 → 추적 시작")
                 continue
 
-            # 기본 자율 주행 모드 중에도 좁은 삼각형 구석에 끼는 현상 예방 로직 적용
-            if fm < 12.0 and left_side < 35.0 and right_side < 35.0:
-                mode = "PARK"
-                park_state = "WALL_TRAP"
-                trap_stage = 1
-                trap_t = time.time()
-                print("[LIDAR 예외] 삼각형 트랩 구역 진입 감지! 강제 탈출 실행")
-                continue
-
             if fm < THRESH_STOP:   v, w = 0.09, adir * 1.1 
             elif fm < THRESH_TURN: v, w = 0.13, adir * 0.8
             elif fm < THRESH_SLOW: v, w = 0.18, adir * 0.5
@@ -296,57 +300,24 @@ try:
 
         # ══ PARK 모드 ════════════════════════════════════════════
         elif mode == "PARK":
-            # 트랩 탈출 상태가 아닐 때만 카메라 타깃 전환 감지 가능
-            if park_state not in ("WALL_TRAP", "FORWARD", "PARKING") and found:
-                detect_count += 1
-                if detect_count >= DETECT_CONFIRM:
-                    detect_count   = 0
-                    park_state     = "TRACK"
-                    wf_angle_accum = 0.0
-                    wf_last_t      = None
-                    esc_angle_accum = 0.0
-                    ws_start_t     = None
-                    print(f"[{target}] 탐색 중 발견 → TRACK")
-                    continue
-            elif park_state not in ("WALL_TRAP", "FORWARD", "PARKING"):
-                detect_count = 0
-
-            # ── [핵심 예외 처리] 주행 상태 중 삼각형 트랩 차단 실시간 감지 ──
-            if park_state in ("WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH"):
-                if fm < 12.0 and left_side < 35.0 and right_side < 35.0:
-                    park_state = "WALL_TRAP"
-                    trap_stage = 1
-                    trap_t = time.time()
-                    print(f"[WALL 예외] {park_state} 진행 중 삼각형 구석 감지! WALL_TRAP 전환")
-                    continue
-
-            # ── 0. WALL_TRAP (삼각형 구석 강제 이탈 단계) ─────────────────
-            if park_state == "WALL_TRAP":
-                elapsed = time.time() - trap_t
-                
-                if trap_stage == 1: # 1단계: 일단 뒤로 빼기 (안전한 공간 확보)
-                    if elapsed >= 0.8: # 0.8초간 후진 완료
-                        trap_stage = 2
-                        trap_t = time.time()
-                        print("[WALL_TRAP] 1단계 후진 완료 -> 2단계 우회전 이탈 시작")
-                    else:
-                        send_cmd(-0.15, 0.0) # 안전한 속도로 직진 후진
-                        
-                elif trap_stage == 2: # 2단계: 뒤로 빠졌으니 각속도 2.0으로 좁은 곳 등지고 탈출하기
-                    if elapsed >= 1.0: # 1.0초간 제자리 회전 완료
-                        park_state = "WALL_SEARCH"
-                        ws_start_t = time.time()
-                        trap_stage = 0
-                        trap_t = None
-                        print("[WALL_TRAP] 삼각형 탈출 성공 -> 다시 WALL_SEARCH")
-                    else:
-                        # 주행 상황에 따라 탈출 방향 설정 (열린 공간으로 크게 피하기 위해 고속 회전)
-                        send_cmd(0.0, adir * 2.0) 
-                        
-                cv2.putText(frame, f"EMERGENCY: WALL_TRAP STG{trap_stage}", (10, 25), 0, 0.6, (0, 0, 255), 2)
+            if park_state in ("WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW",
+                              "WALL_ESCAPE", "SEARCH"):
+                if found:
+                    detect_count += 1
+                    if detect_count >= DETECT_CONFIRM:
+                        detect_count   = 0
+                        park_state     = "TRACK"
+                        wf_angle_accum = 0.0
+                        wf_last_t      = None
+                        esc_angle_accum = 0.0
+                        ws_start_t     = None
+                        print(f"[{target}] 탐색 중 발견 → TRACK")
+                        continue
+                else:
+                    detect_count = 0
 
             # ── 1. FORWARD ─────────────────────────────────────────
-            elif park_state == "FORWARD":
+            if park_state == "FORWARD":
                 elapsed = time.time() - park_t
                 if elapsed >= ARRIVE_FORWARD_SEC:
                     stop_robot()
