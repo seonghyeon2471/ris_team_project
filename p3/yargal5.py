@@ -75,18 +75,26 @@ def front_min(scan):
 def avoid_dir(scan):
     return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
 
-def left_dist(scan):
-    idx = np.arange(85, 96) % 360
+def side_dist(scan, side):
+    # side: "L" → 85~95도(왼쪽), "R" → 265~275도(오른쪽)
+    if side == "L":
+        idx = np.arange(85, 96) % 360
+    else:
+        idx = np.arange(265, 276) % 360
     return float(np.mean(scan[idx]))
+
+def left_dist(scan):
+    return side_dist(scan, "L")
 
 def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
 
-def wall_follow(scan, fm, adir):
-    ld          = left_dist(scan)
+def wall_follow(scan, fm, adir, follow_side):
+    sd          = side_dist(scan, follow_side)
     left_close  = side_min(scan, 60, 120)
     right_close = side_min(scan, 240, 300)
+    sign = 1 if follow_side == "L" else -1
 
     # ① 정면 위험 → adir 긴급 회피
     if fm < THRESH_STOP:
@@ -100,13 +108,13 @@ def wall_follow(scan, fm, adir):
     if right_close < THRESH_STOP:
         return (WALL_V * 0.7,  0.7)
 
-    # ③ 왼쪽 장애물 없음 → 좌회전해서 찾기
-    if ld > WALL_TARGET * 2.0:
-        return (WALL_V * 0.7, WALL_LOST_W)
+    # ③ 따라가는 쪽 장애물 없음 → 그쪽으로 돌아서 찾기
+    if sd > WALL_TARGET * 2.0:
+        return (WALL_V * 0.7, sign * WALL_LOST_W)
 
     # ④ 정상 wall-following
-    err = ld - WALL_TARGET
-    w   = WALL_KP * err
+    err = sd - WALL_TARGET
+    w   = sign * WALL_KP * err
     if fm < THRESH_SLOW:
         blend = float(np.clip((THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
         w = (1 - blend) * w + blend * adir * 0.5
@@ -177,6 +185,9 @@ mode          = "LIDAR"   # LIDAR | PARK
 mission_idx   = 0
 detect_count  = 0
 arrive_count  = 0
+
+# 어느 쪽 벽을 따라갈지 ("L" | "R") — 벽 감지 시점에 결정
+follow_side   = "L"
 
 # LIDAR 모드에서도 PARK과 동일한 wall 탐색 상태머신을 사용
 # lidar_state: WALL_SEARCH | WALL_APPROACH | WALL_FOLLOW
@@ -258,8 +269,11 @@ try:
             # ── A. 벽 탐색 중 제자리 회전 (WALL_SEARCH) ──────────
             if lidar_state == "WALL_SEARCH":
                 if fm < WALL_SCAN_DIST:
+                    l = side_dist(scan, "L")
+                    r = side_dist(scan, "R")
+                    follow_side = "L" if l <= r else "R"
                     lidar_state = "WALL_APPROACH"
-                    print(f"[LIDAR] 회전 중 벽 감지 fm:{fm:.0f}cm → 접근 시작")
+                    print(f"[LIDAR] 회전 중 벽 감지 fm:{fm:.0f}cm, follow_side={follow_side} → 접근 시작")
                 else:
                     send_cmd(0.0, 0.5)
                     cv2.putText(frame, f"LIDAR-WALL-SEARCH fm:{fm:.0f}",
@@ -267,28 +281,29 @@ try:
 
             # ── B. 벽으로 접근 중 (WALL_APPROACH) ─────────────────
             elif lidar_state == "WALL_APPROACH":
-                ld = left_dist(scan)
+                sd = side_dist(scan, follow_side)
 
-                if ld <= WALL_TARGET * 1.3:
+                if sd <= WALL_TARGET * 1.3:
                     lidar_state = "WALL_FOLLOW"
-                    print(f"[LIDAR] 벽 도달 L:{ld:.0f}cm → wall-following 시작")
+                    print(f"[LIDAR] 벽 도달 {follow_side}:{sd:.0f}cm → wall-following 시작")
                 else:
+                    sign = 1 if follow_side == "L" else -1
                     if fm < THRESH_STOP:
                         v, w = 0.08, adir * 1.0
                     elif fm < THRESH_TURN:
                         v, w = WALL_APPROACH_V * 0.6, adir * 0.7
                     else:
-                        v, w = WALL_APPROACH_V, 0.3
+                        v, w = WALL_APPROACH_V, sign * 0.3
                     send_cmd(v, w)
-                    cv2.putText(frame, f"LIDAR-WALL-APPROACH L:{ld:.0f}cm",
+                    cv2.putText(frame, f"LIDAR-WALL-APPROACH {follow_side}:{sd:.0f}cm",
                                 (10, 25), 0, 0.5, (0, 200, 0), 1)
 
             # ── C. wall-following으로 탐색 (WALL_FOLLOW) ─────────
             elif lidar_state == "WALL_FOLLOW":
-                v, w = wall_follow(scan, fm, adir)
+                v, w = wall_follow(scan, fm, adir, follow_side)
                 send_cmd(v, w)
-                ld_disp = left_dist(scan)
-                cv2.putText(frame, f"LIDAR-WALL-FOLLOW L:{ld_disp:.0f}cm",
+                sd_disp = side_dist(scan, follow_side)
+                cv2.putText(frame, f"LIDAR-WALL-FOLLOW {follow_side}:{sd_disp:.0f}cm",
                             (10, 25), 0, 0.5, (0, 255, 0), 1)
 
             cv2.putText(frame, "MODE: LIDAR", (10, 45), 0, 0.5, (255, 255, 255), 1)
@@ -336,8 +351,11 @@ try:
 
                 # 회전하면서 정면(front_min) 기준으로 멀리 있는 벽 감지
                 if fm < WALL_SCAN_DIST:
+                    l = side_dist(scan, "L")
+                    r = side_dist(scan, "R")
+                    follow_side = "L" if l <= r else "R"
                     park_state = "WALL_APPROACH"
-                    print(f"회전 중 벽 감지 fm:{fm:.0f}cm → 접근 시작")
+                    print(f"회전 중 벽 감지 fm:{fm:.0f}cm, follow_side={follow_side} → 접근 시작")
                     continue
 
                 # 아직 아무것도 없음 → 제자리 좌회전으로 탐색
@@ -357,24 +375,24 @@ try:
                 else:
                     detect_count = 0
 
-                ld = left_dist(scan)
+                sd = side_dist(scan, follow_side)
 
-                # 왼쪽이 WALL_TARGET 거리에 도달 → wall-following 시작
-                if ld <= WALL_TARGET * 1.3:
+                # follow_side 거리가 WALL_TARGET에 도달 → wall-following 시작
+                if sd <= WALL_TARGET * 1.3:
                     park_state = "WALL_FOLLOW"
-                    print(f"벽 도달 L:{ld:.0f}cm → wall-following 시작")
+                    print(f"벽 도달 {follow_side}:{sd:.0f}cm → wall-following 시작")
                     continue
 
-                # 정면 막히면 adir 회피하며 접근
+                # 정면 막히면 adir 회피하며 접근, 아니면 follow_side 쪽으로 틀며 전진
+                sign = 1 if follow_side == "L" else -1
                 if fm < THRESH_STOP:
                     v, w = 0.08, adir * 1.0
                 elif fm < THRESH_TURN:
                     v, w = WALL_APPROACH_V * 0.6, adir * 0.7
                 else:
-                    # 왼쪽으로 틀면서 전진
-                    v, w = WALL_APPROACH_V, 0.3
+                    v, w = WALL_APPROACH_V, sign * 0.3
                 send_cmd(v, w)
-                cv2.putText(frame, f"WALL-APPROACH [{target}] L:{ld:.0f}cm",
+                cv2.putText(frame, f"WALL-APPROACH [{target}] {follow_side}:{sd:.0f}cm",
                             (10, 25), 0, 0.5, (0, 200, 0), 1)
 
             # ── 3-C. wall-following으로 탐색 (WALL_FOLLOW) ─────────
@@ -389,10 +407,10 @@ try:
                 else:
                     detect_count = 0
 
-                v, w = wall_follow(scan, fm, adir)
+                v, w = wall_follow(scan, fm, adir, follow_side)
                 send_cmd(v, w)
-                ld_disp = left_dist(scan)
-                cv2.putText(frame, f"WALL-FOLLOW [{target}] L:{ld_disp:.0f}cm",
+                sd_disp = side_dist(scan, follow_side)
+                cv2.putText(frame, f"WALL-FOLLOW [{target}] {follow_side}:{sd_disp:.0f}cm",
                             (10, 25), 0, 0.5, (0, 255, 0), 1)
 
             # ── 4. 객체 추적 중 (TRACK) ────────────────────────────
