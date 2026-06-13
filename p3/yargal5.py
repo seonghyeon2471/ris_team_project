@@ -28,7 +28,7 @@ print("LIDAR OK")
 # ── LIDAR ─────────────────────────────────────────────────────────────
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
-FRONT_RANGE  = 100   # 정면 감지 범위 (±100도 = 총 200도)
+FRONT_RANGE  = 90   # 정면 감지 범위 (±100도 = 총 200도)
 THRESH_SLOW  = 55.0
 THRESH_TURN  = 35.0
 THRESH_STOP  = 18.0
