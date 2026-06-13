@@ -150,7 +150,7 @@ park_t        = None
 last_cmd      = (0.0, 0.0)
 
 # 시작 탐색 회전 속도 (너무 빠르지 않게)
-INIT_SCAN_W   = 0.5
+INIT_SCAN_W   = 1.3
 
 print(f"START | MISSION: {MISSION}")
 
