@@ -48,7 +48,7 @@ MEDIAN_K = 2
 scan_data = np.full(360, 150.0, dtype=np.float32)
 scan_lock = threading.Lock()
 
-# ── LIDAR UTIL (중복 함수 제거) ───────────────────────────────────────
+# ── LIDAR UTIL ────────────────────────────────────────────────────────
 def apply_ema(angle, new_dist_cm):
     if not isinstance(new_dist_cm, (int, float)) or new_dist_cm <= 0:
         return
@@ -73,10 +73,10 @@ def choose_avoid_direction():
     right_avg = float(np.mean(scan_data[271:360]))
     return 1 if left_avg >= right_avg else -1
 
-def nearest_obstacle_angle():  # [수정] scan 매개변수 제거
+def nearest_obstacle_angle():
     return int(np.argmin(scan_data))
 
-def nearest_obstacle_dist():  # [수정] scan 매개변수 제거
+def nearest_obstacle_dist():
     return float(np.min(scan_data))
 
 def left_dist(scan):
@@ -86,6 +86,12 @@ def left_dist(scan):
 def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
+
+def nearest_obstacle_angle(scan):
+    return int(np.argmin(scan))
+
+def nearest_obstacle_dist(scan):
+    return float(np.min(scan))
 
 # ── LIDAR LOOP ────────────────────────────────────────────────────────
 def lidar_loop():
@@ -311,8 +317,8 @@ try:
                 print(f"[{target}] 발견 → 추적 시작")
                 continue
 
-            nearest = nearest_obstacle_angle()  # [수정] 매개변수 없이 호출
-            nd = nearest_obstacle_dist()  # [수정] 매개변수 없이 호출
+            nearest = nearest_obstacle_angle()
+            nd = nearest_obstacle_dist()
             
             if nd < WALL_SEARCH_DIST:
                 err_a = nearest if nearest <= 180 else nearest - 360
@@ -374,6 +380,7 @@ try:
                 else:
                     detect_count = 0
 
+            # ── 1. FORWARD ────────────────────────────────────────────
             if park_state == "FORWARD":
                 elapsed = time.time() - park_t
                 if elapsed >= ARRIVE_FORWARD_SEC:
@@ -385,6 +392,7 @@ try:
                     send_cmd(*last_cmd)
                 cv2.putText(frame, f"FORWARD: {target}", (10, 25), 0, 0.6, draw, 2)
 
+            # ── 2. PARKING ────────────────────────────────────────────
             elif park_state == "PARKING":
                 stop_robot()
                 elapsed = time.time() - park_t
@@ -395,13 +403,23 @@ try:
                     wf_angle_accum = 0.0
                     wf_last_t = None
                     esc_angle_accum = 0.0
+                    
                     if mission_idx < len(MISSION):
                         park_state = "WALL_SEARCH"
                         ws_start_t = time.time()
                         print(f"다음 미션 [{MISSION[mission_idx]}] wall-following 탐색 시작")
-                    continue
+                        continue  # [수정] continue 추가
+                    else:
+                        # 모든 미션 완료
+                        stop_robot()
+                        cv2.putText(frame, "ALL MISSIONS DONE", (30, H // 2),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                        cv2.imshow("f", frame)
+                        cv2.waitKey(1)
+                        continue  # [수정] 계속 대기
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
 
+            # ── 3-A. WALL_SEARCH ──────────────────────────────────────
             elif park_state == "WALL_SEARCH":
                 if ws_start_t is None:
                     ws_start_t = time.time()
@@ -432,6 +450,7 @@ try:
                 cv2.putText(frame, f"WALL-SEARCH [{target}] nd={nd_sa:.0f}cm",
                             (10, 25), 0, 0.5, (0, 255, 0), 1)
 
+            # ── 3-B. WALL_APPROACH ────────────────────────────────────
             elif park_state == "WALL_APPROACH":
                 nd = nearest_obstacle_dist(scan)
                 ld = left_dist(scan)
@@ -457,6 +476,7 @@ try:
                 cv2.putText(frame, f"WALL-APPROACH [{target}] nd={nd:.0f}cm",
                             (10, 25), 0, 0.45, (0, 200, 0), 1)
 
+            # ── 3-C. WALL_FOLLOW ──────────────────────────────────────
             elif park_state == "WALL_FOLLOW":
                 now = time.time()
                 dt = now - wf_last_t if wf_last_t else 0.0
@@ -480,6 +500,7 @@ try:
                             f"WALL-FOLLOW [{target}] L:{ld_disp:.0f}cm rot:{accum_deg:.0f}deg",
                             (10, 25), 0, 0.45, (0, 255, 0), 1)
 
+            # ── 3-D. WALL_ESCAPE ──────────────────────────────────────
             elif park_state == "WALL_ESCAPE":
                 now = time.time()
                 dt = now - wf_last_t if wf_last_t else 0.0
@@ -499,6 +520,7 @@ try:
                 cv2.putText(frame, f"WALL-ESCAPE [{target}]",
                             (10, 25), 0, 0.5, (0, 128, 255), 1)
 
+            # ── 4. TRACK ──────────────────────────────────────────────
             elif found:
                 park_state = "TRACK"
                 wf_angle_accum = 0.0
@@ -543,6 +565,7 @@ try:
 
                 cv2.putText(frame, f"TRACKING: {target}", (10, 25), 0, 0.6, draw, 1)
 
+            # ── 5. SEARCH ─────────────────────────────────────────────
             else:
                 if park_state != "SEARCH":
                     park_state = "SEARCH"
