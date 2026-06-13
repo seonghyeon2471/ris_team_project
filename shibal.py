@@ -79,8 +79,21 @@ def front_min(scan):
     idx = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     return float(np.min(scan[idx]))
 
+# [개선] 양쪽 장애물 진입 시 널뛰는 조향 진동 방지 (데드존 및 고정 탈출 알고리즘 적용)
 def avoid_dir(scan):
-    return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
+    left_m = np.mean(scan[1:90])
+    right_m = np.mean(scan[271:360])
+    
+    # 양쪽 거리가 모두 60cm 미만으로 좁은 곳에 갇혔을 때 (양측 폐쇄 상황)
+    if left_m < 60.0 and right_m < 60.0:
+        # 미세 노이즈로 날뛰지 않도록, 조금이라도 더 넓은 쪽으로 완전히 일관되게 조향 유도
+        return -1 if left_m > right_m else 1
+        
+    # 일반적인 상황에서의 조향 날뜀 방지 데드존 (5cm 이내 차이는 우회전 우선 고정)
+    if abs(left_m - right_m) < 5.0: 
+        return -1
+        
+    return 1 if left_m >= right_m else -1
 
 def left_dist(scan):
     idx = np.arange(85, 96) % 360
@@ -365,12 +378,11 @@ try:
                     continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
 
-            # ── 3-A. WALL_SEARCH [★ 주차 후 제자리 회전 돌다 벽 발견 시 추종 진입 수정] ──
+            # ── 3-A. WALL_SEARCH [★ 제자리 회전 늪 전면 수정 완료] ──
             elif park_state == "WALL_SEARCH":
                 if ws_start_t is None:
                     ws_start_t = time.time()
 
-                # 전방 시야(315도 ~ 45도 사이)에 벽이 들어오기 시작하면 APPROACH로 전격 전환
                 front_nearest = side_min(scan, 315, 405)
                 if front_nearest < WALL_SCAN_DIST:
                     park_state = "WALL_APPROACH"
@@ -384,25 +396,44 @@ try:
                 if nd < 80.0:
                     err_a = nearest if nearest <= 180 else nearest - 360
                     
-                    # 각도 차이가 크면 제자리 회전하여 정면 정렬 우선
+                    # [개선] 양쪽에 벽이 있어 가장 가까운 곳이 완연한 측면(60도 이상)에 위치할 때
+                    # 제자리 정렬하려다 뱅뱅 도는 현상을 차단하고 곧바로 벽 타기(WALL_FOLLOW)로 강제 이행
+                    if abs(err_a) > 60:
+                        print("측면 벽 즉시 감지 -> 교착 예방을 위해 바로 WALL_FOLLOW 진입")
+                        park_state = "WALL_FOLLOW"
+                        wf_last_t = time.time()
+                        wf_angle_accum = 0.0
+                        continue
+                    
+                    # [개선] 45도 조건에서도 선속도를 완전 0이 아닌 최소값(0.06)을 주어 
+                    # 한 자리에서 계속 맴돌지 않고 탈출형 나선 궤적을 그리도록 유도
                     if abs(err_a) > 45:
-                        v_s = 0.0
-                        w_s = float(np.clip(-err_a / 90.0 * 1.2, -1.2, 1.2))
-                    # 정면 범위(45도 이내)에 벽이 걸리면 미속 전진하며 벽에 접근하도록 유도
-                    else:
+                        v_s = 0.06  
+                        w_s = float(np.clip(-err_a / 90.0 * 1.0, -1.0, 1.0))
+                    else:  
                         v_s = 0.12  
                         w_s = float(np.clip(-err_a / 45.0 * 0.6, -0.6, 0.6))
                     
+                    if fm < THRESH_STOP:    v_s, w_s = 0.04, adir * 1.4
+                    elif fm < THRESH_TURN:  v_s, w_s = 0.08, adir * 1.0
+                    elif fm < THRESH_SLOW:  v_s, w_s = 0.12, adir * 0.6
+                    
                     send_cmd(v_s, w_s)
-                else:
-                    # 완전 개활지일 경우 부드럽게 대각 주행 탐색
-                    send_cmd(0.16, adir * 0.45) 
+                else:  
+                    v_s = 0.22  
+                    w_s = adir * 0.35  
+                    
+                    if fm < THRESH_STOP:    v_s, w_s = 0.04, adir * 1.4
+                    elif fm < THRESH_TURN:  v_s, w_s = 0.08, adir * 1.0
+                    elif fm < THRESH_SLOW:  v_s, w_s = 0.12, adir * 0.6
+                    
+                    send_cmd(v_s, w_s)
 
-                # 갇힘 방지 타임아웃 주기를 기민하게 4초로 단축
+                # [개선] 타임아웃 발생 시에도 완전 직진보다는 탈출각 조향을 연계하여 좁은 복도 탈출 극대화
                 if time.time() - ws_start_t > 4.0:
-                    print("[개활지 예외 처리] 강제 선제 직진 탈출")
-                    send_cmd(0.20, 0.0)
-                    time.sleep(0.5)  
+                    print("[교착/개활지 예외 처리] 탈출각 연계 미속 직진")
+                    send_cmd(0.18, adir * 0.5)
+                    time.sleep(0.6)  
                     ws_start_t = time.time()
 
                 cv2.putText(frame, f"WALL-SEARCH [{target}] nd={nd:.0f}cm", (10, 25), 0, 0.5, (0, 255, 0), 1)
@@ -413,7 +444,7 @@ try:
                 ld = left_dist(scan)
 
                 if nd <= WALL_TARGET * 1.3:
-                    park_state     = "WALL_FOLLOW"
+                    park_state      = "WALL_FOLLOW"
                     wf_angle_accum = 0.0
                     wf_last_t      = time.time()
                     esc_angle_accum = 0.0
