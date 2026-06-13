@@ -149,8 +149,10 @@ last_bottom_y = 0
 park_t        = None
 last_cmd      = (0.0, 0.0)
 
-# 시작 탐색 회전 속도 (너무 빠르지 않게)
-INIT_SCAN_W   = 1.3
+# 시작 탐색 회전 속도 및 한 바퀴 시간
+INIT_SCAN_W      = 1.3
+INIT_SCAN_SEC    = (2 * 3.1416) / INIT_SCAN_W   # 한 바퀴 소요 시간 (~4.8초)
+init_scan_start  = None   # 회전 시작 시각
 
 print(f"START | MISSION: {MISSION}")
 
@@ -222,19 +224,35 @@ try:
 
         # ══ INIT_SCAN 모드: 시작 시 빨간색 찾을 때까지 제자리 회전 ══
         if mode == "INIT_SCAN":
-            if found:
-                detect_count += 1
-            else:
-                detect_count = 0
+            # 회전 시작 시각 기록
+            if init_scan_start is None:
+                init_scan_start = time.time()
 
-            if detect_count >= DETECT_CONFIRM:
-                detect_count = 0
-                mode = "PARK"
-                park_state = "TRACK"
-                print(f"[{target}] 초기 탐색 발견 → 추적 시작")
+            elapsed = time.time() - init_scan_start
+
+            if elapsed >= INIT_SCAN_SEC:
+                # 한 바퀴 완료 → 색상 찾으면 PARK, 없으면 LIDAR
+                if found:
+                    detect_count += 1
+                else:
+                    detect_count = 0
+
+                if detect_count >= DETECT_CONFIRM:
+                    detect_count = 0
+                    mode = "PARK"
+                    park_state = "TRACK"
+                    stop_robot()
+                    print(f"[{target}] 한 바퀴 후 발견 → 추적 시작")
+                    continue
+                else:
+                    mode = "LIDAR"
+                    print("한 바퀴 완료 → LIDAR 모드")
+                    continue
             else:
-                send_cmd(0.0, INIT_SCAN_W)   # 제자리 회전
-                cv2.putText(frame, "INIT SCAN...", (10, 25), 0, 0.6, (0, 0, 255), 2)
+                # 한 바퀴 미완료 → 무조건 회전
+                send_cmd(0.0, INIT_SCAN_W)
+                cv2.putText(frame, f"INIT SCAN {elapsed:.1f}/{INIT_SCAN_SEC:.1f}s",
+                            (10, 25), 0, 0.5, (0, 0, 255), 2)
 
         # ══ LIDAR 모드 ═══════════════════════════════════════════
         elif mode == "LIDAR":
