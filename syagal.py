@@ -25,13 +25,14 @@ lidar_ser.reset_input_buffer()
 lidar_ser.write(bytes([0xA5, 0x20])); lidar_ser.read(7)
 print("LIDAR OK")
 
-# ── LIDAR ─────────────────────────────────────────────────────────────
-EMA_ALPHA   = 0.35
-MEDIAN_K    = 2
-FRONT_RANGE = 45
-THRESH_SLOW = 20.0
-THRESH_TURN = 9.0
-THRESH_STOP = 7.0
+# ── LIDAR FILTER & THRESHOLDS (처박기 방지 최적화) ─────────────────────
+EMA_ALPHA   = 0.60      # 기존 0.35 -> 0.60으로 상향 (새 데이터 반영 속도 대폭 업)
+MEDIAN_K    = 1         # 기존 2 -> 1로 하향 (윈도우 크기를 줄여 필터 연산 지연 최소화)
+FRONT_RANGE = 40        # 기존 45 -> 40으로 축소 (정면 충돌 위험 구역 예리하게 압축)
+
+THRESH_SLOW = 35.0      # 기존 25.0 -> 35.0cm로 상향 (멀리서부터 안전하게 감속 시작)
+THRESH_TURN = 18.0      # 기존 10.0 -> 18.0cm로 상향 (여유 공간 확보 후 조향 시작)
+THRESH_STOP = 12.0      # 기존  7.0 -> 12.0cm로 상향 (물리적 제동 거리 및 관성 마진 확보)
 
 _scan     = np.full(360, 250.0, dtype=np.float32)
 _scan_pub = np.full(360, 250.0, dtype=np.float32)
@@ -89,21 +90,22 @@ def nearest_obstacle_angle(scan):
 def nearest_obstacle_dist(scan):
     return float(np.min(scan))
 
-# ── WALL-FOLLOW 함수 ──────────────────────────────────────────────────
+# ── WALL-FOLLOW 함수 (코너 회피력 강화 및 지그재그 완화) ───────────────
 def wall_follow(scan, fm, adir):
     ld          = left_dist(scan)
     left_close  = side_min(scan, 60, 120)
     right_close = side_min(scan, 240, 300)
 
+    # 전방 급박 상황 시 선속도를 더 낮추고 조향 회전력을 대폭 강화
     if fm < THRESH_STOP:
-        return (0.08, adir * 1.3) 
+        return (0.05, adir * 1.6) 
     if fm < THRESH_TURN:
-        return (WALL_TURN_V, adir * 1.0) 
+        return (WALL_TURN_V, adir * 1.2) 
 
     if left_close < THRESH_STOP:
-        return (WALL_V * 0.7, -0.9) 
+        return (WALL_V * 0.5, -1.1) 
     if right_close < THRESH_STOP:
-        return (WALL_V * 0.7,  0.9) 
+        return (WALL_V * 0.5,  1.1) 
 
     if ld > WALL_TARGET * 2.0:
         nearest = nearest_obstacle_angle(scan)
@@ -111,13 +113,15 @@ def wall_follow(scan, fm, adir):
         w_recover = float(np.clip(-err_a / 90.0 * WALL_LOST_W, -WALL_LOST_W, WALL_LOST_W))
         return (WALL_V * 0.6, w_recover)
 
+    # WALL_KP 감소 효과로 측면 벽 추종이 출렁이지 않고 부드러워짐
     err = ld - WALL_TARGET
     w   = WALL_KP * err
+    
     if fm < THRESH_SLOW:
         blend = float(np.clip(
             (THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
-        w = (1 - blend) * w + blend * adir * 0.7 
-        v = WALL_V * (1.0 - 0.4 * blend)
+        w = (1 - blend) * w + blend * adir * 0.9  # 회피 조향 가중치 강화
+        v = WALL_V * (1.0 - 0.5 * blend)          # 전방 감속 스케일 강화
     else:
         v = WALL_V
     
@@ -156,7 +160,7 @@ def make_mask(frame, hsv, name):
     bm = cv2.inRange(frame, np.array(cfg["bgr"][0]), np.array(cfg["bgr"][1]))
     return cv2.bitwise_and(m, bm)
 
-# ── PARAMS ────────────────────────────────────────────────────────────
+# ── PARAMS (스케일 및 주행 밸런스 조정) ──────────────────────────────────
 MIN_AREA        = 400
 KP_ROT          = 0.035 
 W_MIN           = 0.30  
@@ -170,13 +174,13 @@ ARRIVE_FORWARD_SEC = 0.7
 ARRIVE_FORWARD_V   = 0.15
 ARRIVE_CONFIRM     = 8
 
-# wall-following
-WALL_TARGET     = 30.0
+# wall-following 밸런스 튜닝
+WALL_TARGET     = 25.0  # 기존 30.0 -> 25.0cm (벽면 타겟을 좁혀 탈출 통로 확보 원활)
 WALL_SCAN_DIST  = 45.0
-WALL_APPROACH_V = 0.18
-WALL_KP         = 0.015 
-WALL_V          = 0.20
-WALL_TURN_V     = 0.10
+WALL_APPROACH_V = 0.15  # 기존 0.18 -> 0.15m/s (벽 진입 속도를 한 단계 낮춰 처박기 원천 방지)
+WALL_KP         = 0.010 # 기존 0.015 -> 0.010으로 하향 (지그재그 흔들림 완화, 둔하고 묵직하게)
+WALL_V          = 0.18  # 기존 0.20 -> 0.18m/s (주행 선속도를 낮춰 제어 안정성 상향)
+WALL_TURN_V     = 0.07  # 기존 0.10 -> 0.07m/s (코너링 속도를 깎아서 박지 않고 유연하게 피봇팅)
 WALL_LOST_W     = 0.8   
 
 # 순환 감지 및 이탈
@@ -220,23 +224,21 @@ try:
         adir   = avoid_dir(scan)
 
         # ── [실시간 추가] 사방 폐쇄(삼각형 구석 등) 무조건 반전 탈출 로직 ──
-        # 좌측 45~135도 범위, 우측 225~315도 범위의 평균 거리 센싱
         left_avg  = float(np.mean(scan[45:135]))
         right_avg = float(np.mean(scan[225:315]))
 
-        # 전방 벽이 코앞에 도달(35cm)하고 양옆마저 완벽히 밀착해 막힌 경우 작동
-        if fm < 35.0 and left_avg < 35.0 and right_avg < 35.0:
+        # 타이트했던 35cm 제한을 반응 속도를 고려해 40cm 마진으로 상향 조정
+        if fm < 40.0 and left_avg < 40.0 and right_avg < 40.0:
             print("[EMERGENCY] 사방이 벽으로 가로막힘 감지! 제자리 180도 회전 실행")
             stop_robot()
             time.sleep(0.1)
             
-            # 후진 기어 대신 가장 넓은 공간 방향(adir)으로 최대 속도(2.2) 제자리 턴
             send_cmd(0.0, adir * 2.2) 
-            time.sleep(0.75) # 마찰력에 따라 180도 턴이 덜 되거나 더 되면 이 시간 값 조정
+            time.sleep(0.75) 
             
             stop_robot()
             time.sleep(0.1)
-            continue # 상태머신 연산 없이 루프를 즉시 스킵하여 뒤를 돌아본 뒤 주행 안전 재개
+            continue 
 
         # ──────────────────────────────────────────────────────────────────
 
@@ -291,9 +293,10 @@ try:
                 print(f"[{target}] 발견 → 추적 시작")
                 continue
 
-            if fm < THRESH_STOP:   v, w = 0.09, adir * 1.1 
-            elif fm < THRESH_TURN: v, w = 0.13, adir * 0.8
-            elif fm < THRESH_SLOW: v, w = 0.18, adir * 0.5
+            # 상향된 안전 임계값(THRESH)이 그대로 반영되어 원거리 조기 제동 수행
+            if fm < THRESH_STOP:   v, w = 0.05, adir * 1.4  # 선속은 더 줄이고 제동 조향각은 상향
+            elif fm < THRESH_TURN: v, w = 0.10, adir * 1.0
+            elif fm < THRESH_SLOW: v, w = 0.15, adir * 0.6
             else:                  v, w = 0.28, 0.0
             send_cmd(v, w)
             cv2.putText(frame, "MODE: LIDAR", (10, 25), 0, 0.5, (255, 255, 255), 1)
@@ -391,9 +394,9 @@ try:
                     continue
 
                 if fm < THRESH_STOP:
-                    v, w = 0.08, adir * 1.2
+                    v, w = 0.05, adir * 1.4
                 elif fm < THRESH_TURN:
-                    v, w = WALL_APPROACH_V * 0.6, adir * 0.9
+                    v, w = WALL_APPROACH_V * 0.5, adir * 1.1
                 else:
                     nearest = nearest_obstacle_angle(scan)
                     err_a   = nearest if nearest <= 180 else nearest - 360
@@ -480,11 +483,11 @@ try:
                         w = cam_w(err_x)
                     else:
                         w_cam = cam_w(err_x)
-                        w_lid = adir * 0.9 
+                        w_lid = adir * 1.2 # 감속 추적 시 회피각 강화
                         if fm < THRESH_STOP:
-                            v, w = 0.09, w_lid
+                            v, w = 0.05, w_lid
                         elif fm < THRESH_TURN:
-                            v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
+                            v, w = 0.10, 0.7 * w_lid + 0.3 * w_cam
                         else:
                             v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
 
