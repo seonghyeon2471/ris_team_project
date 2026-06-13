@@ -27,8 +27,8 @@ lidar_ser.write(bytes([0xA5, 0x20]))
 lidar_ser.read(7)
 print("LIDAR START")
 
-# ── LIDAR PARAMETERS (두 번째 코드 기반) ──────────────────────────────
-MAX_SPEED = 0.30
+# ── LIDAR PARAMETERS (두 번째 코드 기반 - 장애물 회피 강력) ────────────
+MAX_SPEED = 0.22      # 0.30 → 0.22 (멀리 돌아다니는 문제 해결)
 MIN_SPEED = 0.09
 MAX_W = 0.9
 
@@ -38,14 +38,19 @@ THRESH_10 = 12.0  # VERY CLOSE
 
 FRONT_CHECK_RANGE = 45
 
+# 장애물 탐색 모드 파라미터 추가
+WALL_SEARCH_V = 0.15      # 장애물 탐색 속도 (매우 천천히)
+WALL_SEARCH_W = 0.45      # 장애물 탐색 회전 각속도
+WALL_SEARCH_DIST = 80.0   # 장애물 탐색 거리 (80cm 이내)
+
 # ── LIDAR FILTER (두 번째 코드 기반) ──────────────────────────────────
 EMA_ALPHA = 0.35
 MEDIAN_K = 2
-
-# [두 번째 코드 기반] 150cm 상한선
 scan_data = np.full(360, 150.0, dtype=np.float32)
 
-# ── LIDAR UTIL (두 번째 코드 기반 함수) ───────────────────────────────
+scan_lock = threading.Lock()
+
+# ── LIDAR UTIL (두 번째 코드 기반) ────────────────────────────────────
 def apply_ema(angle, new_dist_cm):
     if not isinstance(new_dist_cm, (int, float)) or new_dist_cm <= 0:
         return
@@ -70,9 +75,21 @@ def choose_avoid_direction():
     right_avg = float(np.mean(scan_data[271:360]))
     return 1 if left_avg >= right_avg else -1
 
-# ── LIDAR LOOP (두 번째 코드 기반) ────────────────────────────────────
-scan_lock = threading.Lock()
+def nearest_obstacle_angle():
+    return int(np.argmin(scan_data))
 
+def nearest_obstacle_dist():
+    return float(np.min(scan_data))
+
+def left_dist(scan):
+    idx = np.arange(85, 96) % 360
+    return float(np.mean(scan[idx]))
+
+def side_min(scan, start, end):
+    idx = np.arange(start, end) % 360
+    return float(np.min(scan[idx]))
+
+# ── LIDAR LOOP (두 번째 코드 기반) ────────────────────────────────────
 def lidar_loop():
     while True:
         raw = lidar_ser.read(5)
@@ -86,7 +103,7 @@ def lidar_loop():
         angle = int(((raw[1]>>1) | (raw[2]<<7)) / 64.0) % 360
         dist_cm = (raw[3] | (raw[4]<<8)) / 40.0
         
-        # [두 번째 코드 기반] 150cm 상한선
+        # 150cm 상한선
         if 3 < dist_cm < 150:
             apply_ema(angle, dist_cm)
         
@@ -102,63 +119,6 @@ threading.Thread(target=lidar_loop, daemon=True).start()
 def get_scan():
     with scan_lock:
         return scan_data.copy()
-
-# ── 추가 라이다 함수 (첫 번째 코드에서 유지) ────────────────────────────
-def left_dist(scan):
-    idx = np.arange(85, 96) % 360
-    return float(np.mean(scan[idx]))
-
-def side_min(scan, start, end):
-    idx = np.arange(start, end) % 360
-    return float(np.min(scan[idx]))
-
-def nearest_obstacle_angle(scan):
-    return int(np.argmin(scan))
-
-def nearest_obstacle_dist(scan):
-    return float(np.min(scan))
-
-# ── WALL-FOLLOW 함수 (첫 번째 코드 유지) ──────────────────────────────
-WALL_TARGET     = 30.0
-WALL_SCAN_DIST  = 45.0
-WALL_APPROACH_V = 0.18
-WALL_KP         = 0.015
-WALL_V          = 0.20
-WALL_TURN_V     = 0.10
-WALL_LOST_W     = 0.8
-
-def wall_follow(scan, fm, adir):
-    ld = left_dist(scan)
-    left_close = side_min(scan, 60, 120)
-    right_close = side_min(scan, 240, 300)
-
-    if fm < THRESH_10:  # [두 번째 코드] VERY CLOSE
-        return (MIN_SPEED, adir * MAX_W)
-    if fm < THRESH_20:  # [두 번째 코드] CRITICAL
-        return (0.12, adir * 0.8)
-
-    if left_close < THRESH_10:
-        return (WALL_V * 0.7, -0.9)
-    if right_close < THRESH_10:
-        return (WALL_V * 0.7,  0.9)
-
-    if ld > WALL_TARGET * 2.0:
-        nearest = nearest_obstacle_angle(scan)
-        err_a = nearest if nearest <= 180 else nearest - 360
-        w_recover = float(np.clip(-err_a / 90.0 * WALL_LOST_W, -WALL_LOST_W, WALL_LOST_W))
-        return (WALL_V * 0.6, w_recover)
-
-    err = ld - WALL_TARGET
-    w = WALL_KP * err
-    if fm < THRESH_30:  # [두 번째 코드] WARNING
-        blend = float(np.clip((THRESH_30 - fm) / (THRESH_30 - THRESH_20 + 1e-6), 0.0, 1.0))
-        w = (1 - blend) * w + blend * adir * 0.7
-        v = WALL_V * (1.0 - 0.4 * blend)
-    else:
-        v = WALL_V
-    
-    w = float(np.clip(w, -1.4, 1.4))
-    return (v, w)
 
 # ── MOTOR (두 번째 코드 기반) ─────────────────────────────────────────
 def send_cmd(v, w):
@@ -212,6 +172,14 @@ ESCAPE_RAD = math.pi * 0.6
 ESCAPE_V = 0.13
 ESCAPE_W = 1.70
 
+WALL_TARGET = 30.0
+WALL_SCAN_DIST = 45.0
+WALL_APPROACH_V = 0.18
+WALL_KP = 0.015
+WALL_V = 0.20
+WALL_TURN_V = 0.10
+WALL_LOST_W = 0.8
+
 # ── STATE (첫 번째 코드 유지) ─────────────────────────────────────────
 mode = "LIDAR"
 mission_idx = 0
@@ -231,7 +199,7 @@ ws_start_t = None
 
 print(f"START | MISSION: {MISSION}")
 
-# ── MAIN LOOP (첫 번째 코드 구조 유지, LIDAR 모드만 두 번째 코드 기반) ─
+# ── MAIN LOOP ─────────────────────────────────────────────────────────
 try:
     while True:
         ret, frame = cap.read()
@@ -243,8 +211,22 @@ try:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         
         scan = get_scan()
-        fm = get_front_min()  # [두 번째 코드 기반]
-        adir = choose_avoid_direction()  # [두 번째 코드 기반]
+        fm = get_front_min()
+        adir = choose_avoid_direction()
+
+        # ── [EMERGENCY] 사방 폐쇄 무조건 반전 탈출 ─────────────────────
+        left_avg = float(np.mean(scan[45:135]))
+        right_avg = float(np.mean(scan[225:315]))
+        
+        if fm < 35.0 and left_avg < 35.0 and right_avg < 35.0:
+            print("[EMERGENCY] 사방이 벽으로 가로막힘! 180 도 회전")
+            stop_robot()
+            time.sleep(0.1)
+            send_cmd(0.0, adir * MAX_W)
+            time.sleep(0.75)
+            stop_robot()
+            time.sleep(0.1)
+            continue
 
         if mission_idx >= len(MISSION):
             stop_robot()
@@ -284,7 +266,7 @@ try:
         def centroid_in_arrive_zone():
             return (cx_obj >= arrive_x1 and cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
 
-        # ══ LIDAR 모드 (두 번째 코드 기반 3 단계 회피 로직) ════════════
+        # ══ LIDAR 모드 (장애물 탐색 + Absolutely 회피) ════════════════
         if mode == "LIDAR":
             if found:
                 detect_count += 1
@@ -298,28 +280,54 @@ try:
                 print(f"[{target}] 발견 → 추적 시작")
                 continue
 
-            # [두 번째 코드 기반 순수 장애물 회피 로직]
-            if fm < THRESH_10:  # VERY CLOSE (12cm 이하)
-                direction = choose_avoid_direction()
-                v = MIN_SPEED
-                w = direction * MAX_W
-                print(f"VERY CLOSE {fm:.1f}")
-            elif fm < THRESH_20:  # CRITICAL (22cm 이하)
-                direction = choose_avoid_direction()
-                v = 0.12
-                w = direction * 0.8
-                print(f"CRITICAL {fm:.1f}")
-            elif fm < THRESH_30:  # WARNING (32cm 이하)
-                direction = choose_avoid_direction()
-                v = 0.15
-                w = direction * 0.7
-                print(f"WARNING {fm:.1f}")
-            else:  # 안전 거리
-                v = MAX_SPEED
-                w = 0.0
-
-            send_cmd(v, w)
-            cv2.putText(frame, "MODE: LIDAR", (10, 25), 0, 0.5, (255, 255, 255), 1)
+            # ── [장애물 탐색 로직] 장애물 쪽으로 이동하면서 색지 찾기 ────
+            nearest = nearest_obstacle_angle()
+            nd = nearest_obstacle_dist()
+            
+            # 장애물이 80cm 이내: 장애물 방향으로 회전하며 접근
+            if nd < WALL_SEARCH_DIST:
+                err_a = nearest if nearest <= 180 else nearest - 360
+                
+                if abs(err_a) > 10:  # 장애물 방향과 차이 있을 때 회전
+                    w_s = float(np.clip(-err_a / 60.0 * WALL_SEARCH_W, -WALL_SEARCH_W, WALL_SEARCH_W))
+                    v_s = WALL_SEARCH_V
+                else:  # 일치할 때 직진
+                    v_s = WALL_SEARCH_V * 1.2
+                    w_s = 0.0
+                
+                # ── [Absolutely 장애물 회피] 3 단계 로직 우선 적용 ───────
+                if fm < THRESH_10:  # VERY CLOSE (12cm 이하) - 절대 부딪히지 않음
+                    v_s = MIN_SPEED
+                    w_s = adir * MAX_W
+                    print(f"[ VERY CLOSE] {fm:.1f}cm - 급회전 회피")
+                elif fm < THRESH_20:  # CRITICAL (22cm 이하)
+                    v_s = 0.12
+                    w_s = adir * 0.8
+                    print(f"[CRITICAL] {fm:.1f}cm - 회피")
+                elif fm < THRESH_30:  # WARNING (32cm 이하)
+                    v_s = 0.15
+                    w_s = adir * 0.7
+                    print(f"[WARNING] {fm:.1f}cm - 감속")
+                
+                send_cmd(v_s, w_s)
+                cv2.putText(frame, f"LIDAR: 장애물 탐색 nd={nd:.0f}cm", (10, 25), 0, 0.5, (0, 255, 0), 1)
+            else:  # 장애물이 80cm 이상: 천천히 주변 탐색 + 약간의 회전
+                v = WALL_SEARCH_V  # 0.15 (매우 천천히)
+                w = adir * 0.2  # 약간의 회전 추가 (원형 운동)
+                
+                # ── [Absolutely 장애물 회피] 3 단계 로직 우선 적용 ───────
+                if fm < THRESH_10:
+                    v, w = MIN_SPEED, adir * MAX_W
+                    print(f"[ VERY CLOSE] {fm:.1f}cm - 급회전 회피")
+                elif fm < THRESH_20:
+                    v, w = 0.12, adir * 0.8
+                    print(f"[CRITICAL] {fm:.1f}cm - 회피")
+                elif fm < THRESH_30:
+                    v, w = 0.15, adir * 0.7
+                    print(f"[WARNING] {fm:.1f}cm - 감속")
+                
+                send_cmd(v, w)
+                cv2.putText(frame, f"LIDAR: 주변 탐색 fm={fm:.0f}cm", (10, 25), 0, 0.5, (0, 255, 0), 1)
 
         # ══ PARK 모드 (첫 번째 코드 유지) ══════════════════════════════
         elif mode == "PARK":
@@ -378,11 +386,11 @@ try:
                     print(f"장애물 감지 {front_nearest:.0f}cm → 접근 시작")
                     continue
 
-                nearest = nearest_obstacle_angle(scan)
-                nd = nearest_obstacle_dist(scan)
+                nearest_sa = nearest_obstacle_angle(scan)
+                nd_sa = nearest_obstacle_dist(scan)
 
-                if nd < 80.0:
-                    err_a = nearest if nearest <= 180 else nearest - 360
+                if nd_sa < 80.0:
+                    err_a = nearest_sa if nearest_sa <= 180 else nearest_sa - 360
                     w_s = float(np.clip(-err_a / 90.0 * 1.2, -1.2, 1.2))
                     send_cmd(0.0, w_s)
                 else:
@@ -394,7 +402,7 @@ try:
                     time.sleep(0.8)
                     ws_start_t = time.time()
 
-                cv2.putText(frame, f"WALL-SEARCH [{target}] nd={nd:.0f}cm",
+                cv2.putText(frame, f"WALL-SEARCH [{target}] nd={nd_sa:.0f}cm",
                             (10, 25), 0, 0.5, (0, 255, 0), 1)
 
             elif park_state == "WALL_APPROACH":
@@ -414,12 +422,12 @@ try:
                 elif fm < THRESH_20:
                     v, w = WALL_APPROACH_V * 0.6, adir * 0.9
                 else:
-                    nearest = nearest_obstacle_angle(scan)
-                    err_a = nearest if nearest <= 180 else nearest - 360
+                    nearest_wa = nearest_obstacle_angle(scan)
+                    err_a = nearest_wa if nearest_wa <= 180 else nearest_wa - 360
                     w_a = float(np.clip(-err_a / 120.0 * 0.6, -0.6, 0.6))
                     v, w = WALL_APPROACH_V, w_a
                 send_cmd(v, w)
-                cv2.putText(frame, f"WALL-APPROACH [{target}] nd={nd:.0f}cm ld={ld:.0f}cm",
+                cv2.putText(frame, f"WALL-APPROACH [{target}] nd={nd:.0f}cm",
                             (10, 25), 0, 0.45, (0, 200, 0), 1)
 
             elif park_state == "WALL_FOLLOW":
@@ -540,3 +548,38 @@ finally:
     lidar_ser.write(bytes([0xA5, 0x25]))
     lidar_ser.close()
     cv2.destroyAllWindows()
+
+
+# ── WALL-FOLLOW 함수 (첫 번째 코드 유지) ──────────────────────────────
+def wall_follow(scan, fm, adir):
+    ld = left_dist(scan)
+    left_close = side_min(scan, 60, 120)
+    right_close = side_min(scan, 240, 300)
+
+    if fm < THRESH_10:
+        return (MIN_SPEED, adir * MAX_W)
+    if fm < THRESH_20:
+        return (0.12, adir * 0.8)
+
+    if left_close < THRESH_10:
+        return (WALL_V * 0.7, -0.9)
+    if right_close < THRESH_10:
+        return (WALL_V * 0.7,  0.9)
+
+    if ld > WALL_TARGET * 2.0:
+        nearest = nearest_obstacle_angle(scan)
+        err_a = nearest if nearest <= 180 else nearest - 360
+        w_recover = float(np.clip(-err_a / 90.0 * WALL_LOST_W, -WALL_LOST_W, WALL_LOST_W))
+        return (WALL_V * 0.6, w_recover)
+
+    err = ld - WALL_TARGET
+    w = WALL_KP * err
+    if fm < THRESH_30:
+        blend = float(np.clip((THRESH_30 - fm) / (THRESH_30 - THRESH_20 + 1e-6), 0.0, 1.0))
+        w = (1 - blend) * w + blend * adir * 0.7
+        v = WALL_V * (1.0 - 0.4 * blend)
+    else:
+        v = WALL_V
+    
+    w = float(np.clip(w, -1.4, 1.4))
+    return (v, w)
