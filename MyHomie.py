@@ -171,13 +171,13 @@ def wall_follow(scan, fm, adir):
 
 # ── COLOR CONFIG ──────────────────────────────────────────────────────
 COLOR_CFG = {
-    "red":    {"hsv1": ([169, 136, 114], [179, 220, 255]),
+    "red":    {"hsv1": ([169, 136, 175], [179, 207, 255]),
                "hsv2": None,
                "bgr":  ([20, 20, 80], [255, 255, 255]), "draw": (0, 0, 255)},
-    "yellow": {"hsv1": ([24, 19, 193], [45, 165, 255]),
+    "yellow": {"hsv1": ([24, 48, 193], [45, 170, 255]),
                "hsv2": None,
                "bgr":  ([0, 80, 80], [255, 255, 255]), "draw": (0, 200, 255)},
-    "blue":   {"hsv1": ([98, 100, 95], [138, 207, 246]),
+    "blue":   {"hsv1": ([98, 100, 123], [138, 207, 246]),
                "hsv2": None,
                "bgr":  ([40, 0, 0], [255, 220, 220]), "draw": (255, 80, 0)},
 }
@@ -215,53 +215,6 @@ ESCAPE_W = 1.70
 # ── SPIN_SEARCH 파라미터 ──────────────────────────────────────────────
 SPIN_W          = 1.6               # 제자리 회전 각속도
 SPIN_TARGET_RAD = 2 * 2 * math.pi  # 2바퀴
-GAP_MIN_DIST    = 60.0              # 이 거리 이상이면 공간으로 인식 (cm)
-GAP_ENTER_V     = 0.18             # 공간 진입 전진 속도
-GAP_ENTER_KP    = 0.012            # 공간 중앙 조향 게인
-GAP_ENTER_DIST  = 40.0             # 공간 진입 완료 판단 전진 거리 (cm 기준 시간으로 대체)
-GAP_ENTER_SEC   = 1.5              # 공간 진입 전진 시간
-
-def find_gap_center(scan):
-    """
-    360도 스캔에서 [장애물][공간][장애물] 패턴을 찾아
-    공간의 중앙 각도(0=정면 기준 -180~180)를 반환.
-    공간 없으면 None 반환.
-    """
-    GAP_THRESHOLD = GAP_MIN_DIST
-    # 전방 ±150도 범위만 탐색 (후방 제외)
-    search_angles = list(range(0, 151)) + list(range(210, 360))
-
-    in_gap = False
-    gap_start = None
-    best_gap = None
-    best_gap_width = 0
-
-    for i, a in enumerate(search_angles):
-        dist = scan[a % 360]
-        if dist >= GAP_THRESHOLD:
-            if not in_gap:
-                in_gap = True
-                gap_start = a
-        else:
-            if in_gap:
-                in_gap = False
-                gap_end = search_angles[i - 1]
-                width = gap_end - gap_start
-                if width > best_gap_width:
-                    best_gap_width = width
-                    best_gap = (gap_start + gap_end) // 2
-    # 마지막까지 gap이면
-    if in_gap:
-        gap_end = search_angles[-1]
-        width = gap_end - gap_start
-        if width > best_gap_width:
-            best_gap = (gap_start + gap_end) // 2
-
-    if best_gap is None:
-        return None
-    # 0~360 → -180~180 변환
-    center = best_gap if best_gap <= 180 else best_gap - 360
-    return center
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode = "LIDAR"
@@ -282,7 +235,6 @@ ws_start_t = None
 
 spin_angle_accum = 0.0   # SPIN_SEARCH 누적 각도
 spin_last_t = None
-gap_enter_t = None       # GAP_ENTER 진입 시각
 
 print(f"START | MISSION: {MISSION}")
 
@@ -416,7 +368,7 @@ try:
         # ══ PARK 모드 ════════════════════════════════════════════════
         elif mode == "PARK":
 
-            if park_state in ("SPIN_SEARCH", "GAP_ENTER", "WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW",
+            if park_state in ("SPIN_SEARCH", "WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW",
                               "WALL_ESCAPE", "SEARCH"):
                 if found:
                     detect_count += 1
@@ -429,7 +381,6 @@ try:
                         ws_start_t = None
                         spin_angle_accum = 0.0
                         spin_last_t = None
-                        gap_enter_t = None
                         print(f"[{target}] 탐색 중 발견 → TRACK")
                         continue
                 else:
@@ -477,46 +428,14 @@ try:
                 cv2.putText(frame, f"SPIN-SEARCH [{target}] {accum_deg:.0f}deg / {math.degrees(SPIN_TARGET_RAD):.0f}deg",
                             (10, 25), 0, 0.45, (0, 200, 255), 1)
 
-                # 2바퀴 완료 → gap 찾아서 진입 또는 WALL_SEARCH
+                # 2바퀴 완료 → WALL_SEARCH로 전환
                 if spin_angle_accum >= SPIN_TARGET_RAD:
                     stop_robot()
                     spin_angle_accum = 0.0
                     spin_last_t = None
-                    gap = find_gap_center(scan)
-                    if gap is not None:
-                        park_state = "GAP_ENTER"
-                        gap_enter_t = time.time()
-                        print(f"[{target}] 2바퀴 완료 → 공간 중앙 {gap:.1f}도 → GAP_ENTER")
-                    else:
-                        park_state = "WALL_SEARCH"
-                        ws_start_t = time.time()
-                        print(f"[{target}] 2바퀴 완료 → 공간 없음 → WALL_SEARCH")
-
-            elif park_state == "GAP_ENTER":
-                # ── 장애물 사이 공간 중앙으로 조향 후 진입 ───────────
-                gap = find_gap_center(scan)
-
-                if gap is not None:
-                    # 공간 중앙 각도 기준 조향
-                    w_gap = float(np.clip(-gap / 90.0 * 1.0, -1.2, 1.2))
-                    # 정면과 공간이 거의 정렬되면 직진, 아니면 제자리 회전
-                    if abs(gap) < 20:
-                        send_cmd(GAP_ENTER_V, w_gap)
-                    else:
-                        send_cmd(0.0, w_gap)
-                else:
-                    send_cmd(GAP_ENTER_V, 0.0)
-
-                elapsed_gap = time.time() - gap_enter_t
-                cv2.putText(frame, f"GAP-ENTER [{target}] t={elapsed_gap:.1f}s",
-                            (10, 25), 0, 0.5, (0, 128, 255), 1)
-
-                # 진입 시간 초과 → WALL_SEARCH로 전환
-                if elapsed_gap > GAP_ENTER_SEC:
                     park_state = "WALL_SEARCH"
                     ws_start_t = time.time()
-                    gap_enter_t = None
-                    print(f"[{target}] GAP_ENTER 완료 → WALL_SEARCH")
+                    print(f"[{target}] 2바퀴 완료 → WALL_SEARCH")
 
             elif park_state == "WALL_SEARCH":
                 if ws_start_t is None:
@@ -529,15 +448,12 @@ try:
                     print(f"장애물 감지 {front_nearest:.0f}cm → 접근 시작")
                     continue
 
+                # 제자리 탐색 없이 항상 전진하면서 가까운 장애물 방향으로 자연스럽게 조향
                 nearest_sa = nearest_obstacle_angle(scan)
                 nd_sa = nearest_obstacle_dist(scan)
-
-                if nd_sa < 80.0:
-                    err_a = nearest_sa if nearest_sa <= 180 else nearest_sa - 360
-                    w_s = float(np.clip(-err_a / 90.0 * 1.2, -1.2, 1.2))
-                    send_cmd(0.0, w_s)
-                else:
-                    send_cmd(0.15, 0.45)
+                err_a = nearest_sa if nearest_sa <= 180 else nearest_sa - 360
+                w_s = float(np.clip(-err_a / 90.0 * 0.6, -0.6, 0.6))
+                send_cmd(0.18, w_s)
 
                 if time.time() - ws_start_t > 6.0:
                     print("[개활지 예외 처리] 장시간 장애물 미검출 -> 강제 직진")
