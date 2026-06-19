@@ -176,7 +176,7 @@ def make_mask(frame, hsv, name):
 
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
-KP_ROT         = 0.035  # 0.030 → 0.035 (카메라 추적 회전 감도 ↑)
+KP_ROT         = 0.040
 W_MIN          = 0.35   # 0.25  → 0.35  (최소 회전속도 ↑)
 APPROACH_V     = 0.22   # 0.17  → 0.22  (색상 추적 전진속도 ↑)
 PARK_SEC       = 1.2
@@ -184,8 +184,8 @@ DETECT_CONFIRM = 6
 
 ARRIVE_Y_TOP    = int(240 * 0.85)
 ARRIVE_X_MARGIN = 30
-ARRIVE_FORWARD_SEC = 0.8
-ARRIVE_FORWARD_V   = 0.15
+ARRIVE_FORWARD_SEC = 0.10
+ARRIVE_FORWARD_V   = 0.10
 ARRIVE_CONFIRM     = 8
 
 # wall-following
