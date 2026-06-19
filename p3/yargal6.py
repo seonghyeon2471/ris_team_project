@@ -5,7 +5,6 @@ import time
 import math
 import threading
 
-
 # ── SERIAL ────────────────────────────────────────────────────────────
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
 lidar_ser   = serial.Serial("/dev/ttyUSB0",  460800, timeout=0.1)
@@ -91,52 +90,41 @@ def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
 
-def side_min_follow(scan, side):
-    # follow_side 쪽 "벽이 진짜 있는지" 판단용 최솟값 (노이즈에 강함)
-    if side == "L":
-        return side_min(scan, 85, 96)
-    else:
-        return side_min(scan, 265, 276)
-
-# ── WALL-FOLLOW STATE (모서리/통로 노이즈 대응) ─────────────────────
-WALL_LOST_THRESH  = 70.0   # side_min 기준, 이 거리 넘게 벽이 없다고 판단되면 LOST
-WALL_LOST_CONFIRM = 5      # 연속 프레임 확인 후에만 LOST 전환 (노이즈 1~2프레임 무시)
-_lost_streak = {"L": 0, "R": 0}
+# ── WALL-FOLLOW 재탐색 부스트 상태 ──────────────────────────────────
+# 측면이 너무 가까워 반대쪽으로 회피한 직후, 다시 follow_side 벽을 찾아
+# 돌아갈 때(③ 분기) 평소보다 훨씬 세게 꺾이도록 하기 위한 타임스탬프.
+_last_avoid_t      = {"L": -1e9, "R": -1e9}
+WALL_REACQUIRE_BOOST  = 3.0   # 회피 직후 재탐색 시 각속도 배율 (3배)
+WALL_REACQUIRE_WINDOW = 1.0   # 회피 후 이 시간(초) 이내면 boost 적용
 
 def wall_follow(scan, fm, adir, follow_side):
-    sd          = side_dist(scan, follow_side)         # 제어용 (평균, 부드러움)
-    sd_min      = side_min_follow(scan, follow_side)    # LOST 판단용 (최솟값, 노이즈에 강함)
+    sd          = side_dist(scan, follow_side)
     left_close  = side_min(scan, 60, 120)
     right_close = side_min(scan, 240, 300)
     sign = 1 if follow_side == "L" else -1
 
-    # ① 정면 위험 → 긴급 회피. 단, follow_side 쪽으로 편향시켜서
-    #    회피 후에도 따라가던 벽에서 너무 멀어지지 않게 한다.
+    # ① 정면 위험 → adir 긴급 회피
     if fm < THRESH_STOP:
-        w = 0.6 * (adir * 1.1) + 0.4 * (sign * 1.1)
-        return (0.08, float(np.clip(w, -1.4, 1.4)))
+        return (0.08, adir * 1.1)
     if fm < THRESH_TURN:
-        w = 0.6 * (adir * 0.85) + 0.4 * (sign * 0.85)
-        return (WALL_TURN_V, float(np.clip(w, -1.2, 1.2)))
+        return (WALL_TURN_V, adir * 0.85)
 
-    # ② 측면 너무 가까움 (모서리에 끼는 상황) → 반대쪽으로
+    # ② 측면 너무 가까움 → 반대쪽으로 (현재 따라가는 쪽이면 회피 시각 기록)
     if left_close < THRESH_STOP:
+        if follow_side == "L":
+            _last_avoid_t["L"] = time.time()
         return (WALL_V * 0.7, -0.7)
     if right_close < THRESH_STOP:
+        if follow_side == "R":
+            _last_avoid_t["R"] = time.time()
         return (WALL_V * 0.7,  0.7)
 
-    # ③ 따라가는 쪽 벽을 "진짜" 잃었는지 확인 (최솟값 + 연속 프레임)
-    #    평균(sd)만 보면 모서리/통로에서 순간적으로 튀어 오발동하므로
-    #    side_min이 임계값을 WALL_LOST_CONFIRM 프레임 연속으로 넘을 때만 LOST 처리.
-    if sd_min > WALL_LOST_THRESH:
-        _lost_streak[follow_side] += 1
-    else:
-        _lost_streak[follow_side] = 0
-
-    if _lost_streak[follow_side] >= WALL_LOST_CONFIRM:
-        # 벽을 진짜 잃음 → follow_side 쪽으로 더 적극적으로 틀면서 저속 탐색
-        # (기존 WALL_LOST_W=0.5는 너무 약해 직진처럼 보였음 → 강화 + 속도 추가 감속)
-        return (WALL_V * 0.5, sign * 0.9)
+    # ③ 따라가는 쪽 장애물 없음 → 그쪽으로 돌아서 찾기
+    if sd > WALL_TARGET * 2.0:
+        boost = 1.0
+        if (time.time() - _last_avoid_t[follow_side]) < WALL_REACQUIRE_WINDOW:
+            boost = WALL_REACQUIRE_BOOST
+        return (WALL_V * 0.7, sign * WALL_LOST_W * boost)
 
     # ④ 정상 wall-following
     err = sd - WALL_TARGET
@@ -185,15 +173,15 @@ def make_mask(frame, hsv, name):
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
 KP_ROT         = 0.030
-W_MIN          = 0.25
+W_MIN          = 0.20
 APPROACH_V     = 0.17
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 
 # 도착 판정 영역
 ARRIVE_Y_TOP    = int(240 * 0.85)
-ARRIVE_X_MARGIN = 40
-ARRIVE_FORWARD_SEC = 0.7
+ARRIVE_X_MARGIN = 30
+ARRIVE_FORWARD_SEC = 0.8
 ARRIVE_FORWARD_V   = 0.15
 ARRIVE_CONFIRM     = 8
 
@@ -204,12 +192,8 @@ WALL_APPROACH_V = 0.20  # 벽으로 접근할 때 속도
 WALL_KP       = 0.012
 WALL_V        = 0.22
 WALL_TURN_V   = 0.10
-WALL_LOST_W   = 0.5      # (참고용, 실제 LOST 처리는 wall_follow 내부 로직으로 대체됨)
+WALL_LOST_W   = 0.5
 WALL_SEARCH_W = 1.1     # 벽 탐색 제자리 회전 각속도
-
-# WALL_APPROACH → WALL_FOLLOW 전환 시 노이즈 방지용 연속 프레임 확인
-WALL_APPROACH_CONFIRM = 3
-_approach_streak = {"LIDAR": 0, "PARK": 0}
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"   # LIDAR | PARK
@@ -283,12 +267,6 @@ try:
             return (cx_obj >= arrive_x1 and cx_obj <= arrive_x2 and
                     cy_obj >= ARRIVE_Y_TOP)
 
-        # 디버그용: 현재 follow_side 기준 거리/오차 표시 (화면 우측 상단)
-        _dbg_sd  = side_dist(scan, follow_side)
-        _dbg_min = side_min_follow(scan, follow_side)
-        cv2.putText(frame, f"sd:{_dbg_sd:.0f} min:{_dbg_min:.0f} fm:{fm:.0f} lost:{_lost_streak[follow_side]}",
-                    (W - 230, 20), 0, 0.45, (200, 200, 200), 1)
-
         # ══ LIDAR 모드 (첫 번째 색지 탐색, wall-following 포함) ══
         if mode == "LIDAR":
             if found:
@@ -310,7 +288,6 @@ try:
                     r = side_dist(scan, "R")
                     follow_side = "L" if l <= r else "R"
                     lidar_state = "WALL_APPROACH"
-                    _approach_streak["LIDAR"] = 0
                     print(f"[LIDAR] 회전 중 벽 감지 fm:{fm:.0f}cm, follow_side={follow_side} → 접근 시작")
                 else:
                     send_cmd(0.0, WALL_SEARCH_W)
@@ -321,15 +298,8 @@ try:
             elif lidar_state == "WALL_APPROACH":
                 sd = side_dist(scan, follow_side)
 
-                # 연속 프레임 확인 후 전환 (비스듬한 접근 중 일시적으로 가까워지는 노이즈 방지)
                 if sd <= WALL_TARGET * 1.3:
-                    _approach_streak["LIDAR"] += 1
-                else:
-                    _approach_streak["LIDAR"] = 0
-
-                if _approach_streak["LIDAR"] >= WALL_APPROACH_CONFIRM:
                     lidar_state = "WALL_FOLLOW"
-                    _lost_streak[follow_side] = 0
                     print(f"[LIDAR] 벽 도달 {follow_side}:{sd:.0f}cm → wall-following 시작")
                 else:
                     sign = 1 if follow_side == "L" else -1
@@ -348,7 +318,7 @@ try:
                 v, w = wall_follow(scan, fm, adir, follow_side)
                 send_cmd(v, w)
                 sd_disp = side_dist(scan, follow_side)
-                cv2.putText(frame, f"LIDAR-WALL-FOLLOW {follow_side}:{sd_disp:.0f}cm v:{v:.2f} w:{w:.2f}",
+                cv2.putText(frame, f"LIDAR-WALL-FOLLOW {follow_side}:{sd_disp:.0f}cm",
                             (10, 25), 0, 0.5, (0, 255, 0), 1)
 
             cv2.putText(frame, "MODE: LIDAR", (10, 45), 0, 0.5, (255, 255, 255), 1)
@@ -378,8 +348,6 @@ try:
                     detect_count = 0
                     if mission_idx < len(MISSION):
                         park_state = "WALL_SEARCH"   # ← wall-following으로 전환
-                        _lost_streak["L"] = 0
-                        _lost_streak["R"] = 0
                         print(f"다음 미션 [{MISSION[mission_idx]}] wall-following 탐색 시작")
                     continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
@@ -402,7 +370,6 @@ try:
                     r = side_dist(scan, "R")
                     follow_side = "L" if l <= r else "R"
                     park_state = "WALL_APPROACH"
-                    _approach_streak["PARK"] = 0
                     print(f"회전 중 벽 감지 fm:{fm:.0f}cm, follow_side={follow_side} → 접근 시작")
                     continue
 
@@ -426,15 +393,8 @@ try:
                 sd = side_dist(scan, follow_side)
 
                 # follow_side 거리가 WALL_TARGET에 도달 → wall-following 시작
-                # (연속 프레임 확인으로 비스듬한 접근 중 노이즈 전환 방지)
                 if sd <= WALL_TARGET * 1.3:
-                    _approach_streak["PARK"] += 1
-                else:
-                    _approach_streak["PARK"] = 0
-
-                if _approach_streak["PARK"] >= WALL_APPROACH_CONFIRM:
                     park_state = "WALL_FOLLOW"
-                    _lost_streak[follow_side] = 0
                     print(f"벽 도달 {follow_side}:{sd:.0f}cm → wall-following 시작")
                     continue
 
@@ -465,7 +425,7 @@ try:
                 v, w = wall_follow(scan, fm, adir, follow_side)
                 send_cmd(v, w)
                 sd_disp = side_dist(scan, follow_side)
-                cv2.putText(frame, f"WALL-FOLLOW [{target}] {follow_side}:{sd_disp:.0f}cm v:{v:.2f} w:{w:.2f}",
+                cv2.putText(frame, f"WALL-FOLLOW [{target}] {follow_side}:{sd_disp:.0f}cm",
                             (10, 25), 0, 0.5, (0, 255, 0), 1)
 
             # ── 4. 객체 추적 중 (TRACK) ────────────────────────────
