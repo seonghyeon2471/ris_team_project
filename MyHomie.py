@@ -144,12 +144,12 @@ def wall_follow(scan, fm, adir):
     if fm < THRESH_10:
         return (MIN_SPEED, adir * MAX_W)
     if fm < THRESH_20:
-        return (0.12, adir * 0.8)
+        return (0.12, adir * 0.75)        # 0.8 → 0.75
 
     if left_close < THRESH_10:
-        return (WALL_V * 0.7, -0.9)
+        return (WALL_V * 0.7, -0.8)       # -0.9 → -0.8
     if right_close < THRESH_10:
-        return (WALL_V * 0.7,  0.9)
+        return (WALL_V * 0.7,  0.8)       #  0.9 →  0.8
 
     if ld > WALL_TARGET * 2.0:
         nearest = nearest_obstacle_angle(scan)
@@ -161,12 +161,12 @@ def wall_follow(scan, fm, adir):
     w = WALL_KP * err
     if fm < THRESH_30:
         blend = float(np.clip((THRESH_30 - fm) / (THRESH_30 - THRESH_20 + 1e-6), 0.0, 1.0))
-        w = (1 - blend) * w + blend * adir * 0.7
+        w = (1 - blend) * w + blend * adir * 0.65   # 0.7 → 0.65
         v = WALL_V * (1.0 - 0.4 * blend)
     else:
         v = WALL_V
 
-    w = float(np.clip(w, -1.4, 1.4))
+    w = float(np.clip(w, -1.3, 1.3))    # ±1.4 → ±1.3
     return (v, w)
 
 # ── COLOR CONFIG ──────────────────────────────────────────────────────
