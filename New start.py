@@ -423,4 +423,215 @@ try:
 
         # 안전상태가 정상일 때만 아래 로직 실행
         else:
-            
+            # ─────────────────────────────────────────────
+            # LIDAR 모드
+            # 첫 번째 색지 탐색 / wall-following
+            # ─────────────────────────────────────────────
+            if mode == "LIDAR":
+                if found:
+                    detect_count += 1
+                else:
+                    detect_count = 0
+
+                # 색지를 일정 프레임 이상 보면 PARK 모드로 전환
+                if detect_count >= DETECT_CONFIRM:
+                    detect_count = 0
+                    mode = "PARK"
+                    park_state = "TRACK"
+                    continue
+
+                # 벽 탐색
+                if lidar_state == "WALL_SEARCH":
+                    if fm < WALL_SCAN_DIST:
+                        l = side_dist(scan, "L")
+                        r = side_dist(scan, "R")
+                        follow_side = "L" if l <= r else "R"
+                        lidar_state = "WALL_APPROACH"
+                    else:
+                        send_cmd(0.0, WALL_SEARCH_W)
+
+                # 벽으로 접근
+                elif lidar_state == "WALL_APPROACH":
+                    sd = side_dist(scan, follow_side)
+                    if sd <= WALL_TARGET * 1.3:
+                        lidar_state = "WALL_FOLLOW"
+                    else:
+                        sign = 1 if follow_side == "L" else -1
+                        if fm < THRESH_STOP:
+                            v, w = 0.08, adir * 1.0
+                        elif fm < THRESH_TURN:
+                            v, w = WALL_APPROACH_V * 0.6, adir * 0.7
+                        else:
+                            v, w = WALL_APPROACH_V, sign * 0.3
+                        send_cmd(v, w)
+
+                # 벽 따라 이동
+                elif lidar_state == "WALL_FOLLOW":
+                    v, w = wall_follow(scan, fm, adir, follow_side)
+                    send_cmd(v, w)
+
+            # ─────────────────────────────────────────────
+            # PARK 모드
+            # 목표 색을 추적해서 주차하는 단계
+            # ─────────────────────────────────────────────
+            elif mode == "PARK":
+                # 1) 도착 후 전진
+                if park_state == "FORWARD":
+                    elapsed = time.time() - park_t
+                    if elapsed >= ARRIVE_FORWARD_SEC:
+                        stop_robot()
+                        park_state = "PARKING"
+                        park_t = time.time()
+                    else:
+                        send_cmd(*last_cmd)
+
+                # 2) 주차 정지 유지
+                elif park_state == "PARKING":
+                    stop_robot()
+                    elapsed = time.time() - park_t
+                    if elapsed >= PARK_SEC:
+                        mission_idx += 1
+                        arrive_count = 0
+                        detect_count = 0
+                        if mission_idx < len(MISSION):
+                            park_state = "WALL_SEARCH"
+                        continue
+
+                # 3) 벽 탐색
+                elif park_state == "WALL_SEARCH":
+                    if found:
+                        detect_count += 1
+                        if detect_count >= DETECT_CONFIRM:
+                            detect_count = 0
+                            park_state = "TRACK"
+                            continue
+                    else:
+                        detect_count = 0
+
+                    if fm < WALL_SCAN_DIST:
+                        l = side_dist(scan, "L")
+                        r = side_dist(scan, "R")
+                        follow_side = "L" if l <= r else "R"
+                        park_state = "WALL_APPROACH"
+                        continue
+
+                    send_cmd(0.0, WALL_SEARCH_W)
+
+                # 4) 벽 접근
+                elif park_state == "WALL_APPROACH":
+                    if found:
+                        detect_count += 1
+                        if detect_count >= DETECT_CONFIRM:
+                            detect_count = 0
+                            park_state = "TRACK"
+                            continue
+                    else:
+                        detect_count = 0
+
+                    sd = side_dist(scan, follow_side)
+                    if sd <= WALL_TARGET * 1.3:
+                        park_state = "WALL_FOLLOW"
+                        continue
+
+                    sign = 1 if follow_side == "L" else -1
+                    if fm < THRESH_STOP:
+                        v, w = 0.08, adir * 1.0
+                    elif fm < THRESH_TURN:
+                        v, w = WALL_APPROACH_V * 0.6, adir * 0.7
+                    else:
+                        v, w = WALL_APPROACH_V, sign * 0.3
+                    send_cmd(v, w)
+
+                # 5) 벽 따라 이동
+                elif park_state == "WALL_FOLLOW":
+                    if found:
+                        detect_count += 1
+                        if detect_count >= DETECT_CONFIRM:
+                            detect_count = 0
+                            park_state = "TRACK"
+                            continue
+                    else:
+                        detect_count = 0
+
+                    v, w = wall_follow(scan, fm, adir, follow_side)
+                    send_cmd(v, w)
+
+                # 6) 색지 추적
+                elif found:
+                    # 도착 영역 안에 색 중심이 들어오면 arrive_count 증가
+                    arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
+
+                    # 충분히 안정적으로 들어오면 전진 상태로 전환
+                    if arrive_count >= ARRIVE_CONFIRM:
+                        arrive_count = 0
+                        park_state = "FORWARD"
+                        park_t = time.time()
+                        last_cmd = (ARRIVE_FORWARD_V, 0.0)
+                        send_cmd(ARRIVE_FORWARD_V, 0.0)
+                        continue
+
+                    # 화면 중심 기준 색지 좌우 오차
+                    err_x = cx_obj - cx_mid
+
+                    # 목표가 한쪽으로 크게 치우치면 속도를 줄임
+                    err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
+                    reduced_v = APPROACH_V * (1.0 - err_ratio)
+
+                    # 카메라 기준 회전 제어
+                    if fm >= THRESH_SLOW:
+                        v = reduced_v
+                        w = cam_w(err_x)
+                    else:
+                        # 앞이 막히면 LIDAR 회피를 섞어서 움직임
+                        w_cam = cam_w(err_x)
+                        w_lid = adir * 0.7
+                        if fm < THRESH_STOP:
+                            v, w = 0.09, w_lid
+                        elif fm < THRESH_TURN:
+                            v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
+                        else:
+                            v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
+
+                    last_cmd = (v, w)
+                    send_cmd(v, w)
+
+                # 7) 색지를 놓쳤을 때 검색
+                else:
+                    # ROT: 제자리 회전
+                    if search_state == "ROT":
+                        if search_t is None:
+                            search_t = time.time()
+                        if time.time() - search_t < SEARCH_ROT_SEC:
+                            send_cmd(0.0, search_dir * SEARCH_ROT_W)
+                        else:
+                            search_state = "FWD"
+                            search_t = time.time()
+
+                    # FWD: 짧게 직진
+                    elif search_state == "FWD":
+                        if time.time() - search_t < SEARCH_FWD_SEC:
+                            send_cmd(SEARCH_FWD_V, 0.0)
+                        else:
+                            search_try += 1
+                            search_dir *= -1
+                            search_state = "ROT"
+                            search_t = time.time()
+
+                    # 너무 오래 찾으면 다시 벽 탐색으로 복귀
+                    if search_try >= SEARCH_MAX_TRY:
+                        search_try = 0
+                        search_state = "ROT"
+                        park_state = "WALL_SEARCH"
+
+        # 화면 출력
+        cv2.imshow("f", frame)
+        if cv2.waitKey(1) & 0xFF == 27:
+            break
+
+except KeyboardInterrupt:
+    print("STOP")
+finally:
+    stop_robot()
+    cap.release()
+    lidar_ser.write(bytes([0xA5, 0x25]))
+    cv2.destroyAllWindows()
