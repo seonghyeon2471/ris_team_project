@@ -119,12 +119,16 @@ def wall_follow(scan, fm, adir, follow_side):
             _last_avoid_t["R"] = time.time()
         return (WALL_V * 0.7,  0.7)
 
+    # ②.5 회피 직후 재탐색 구간 → sd 값과 무관하게 강하게 꺾어 복귀
+    #     (회피 한 프레임 후 left_close/right_close가 곧바로 THRESH_STOP을
+    #      넘어버려 ②를 빠져나오는 경우가 많으므로, sd 조건에 기대지 않고
+    #      회피 이력만으로 부스트된 회전을 강제한다)
+    if (time.time() - _last_avoid_t[follow_side]) < WALL_REACQUIRE_WINDOW:
+        return (WALL_V * 0.7, sign * WALL_LOST_W * WALL_REACQUIRE_BOOST)
+
     # ③ 따라가는 쪽 장애물 없음 → 그쪽으로 돌아서 찾기
     if sd > WALL_TARGET * 2.0:
-        boost = 1.0
-        if (time.time() - _last_avoid_t[follow_side]) < WALL_REACQUIRE_WINDOW:
-            boost = WALL_REACQUIRE_BOOST
-        return (WALL_V * 0.7, sign * WALL_LOST_W * boost)
+        return (WALL_V * 0.7, sign * WALL_LOST_W)
 
     # ④ 정상 wall-following
     err = sd - WALL_TARGET
