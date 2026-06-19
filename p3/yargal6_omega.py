@@ -1,3 +1,4 @@
+# 노,파 추적 강화
 import cv2
 import serial
 import numpy as np
