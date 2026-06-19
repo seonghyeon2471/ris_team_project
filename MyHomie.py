@@ -30,7 +30,7 @@ print("LIDAR START")
 # ── LIDAR PARAMETERS ──────────────────────────────────────────────────
 MAX_SPEED = 0.22
 MIN_SPEED = 0.09
-MAX_W = 1.8
+MAX_W = 0.9
 
 THRESH_30 = 32.0
 THRESH_20 = 22.0
@@ -208,9 +208,9 @@ ARRIVE_FORWARD_V = 0.15
 ARRIVE_CONFIRM = 8
 
 FULL_CIRCLE_RAD = 2 * math.pi * 0.4   # 0.85 → 0.4바퀴: 더 빨리 순환 감지
-ESCAPE_RAD = math.pi * 0.6
+ESCAPE_RAD = math.pi * 0.2   # 0.6 → 0.2 (108도 → 36도): 반대로 꺾는 양 대폭 축소
 ESCAPE_V = 0.13
-ESCAPE_W = 1.70
+ESCAPE_W = 1.20              # 1.70 → 1.20: 꺾는 속도도 완만하게
 
 # ── SPIN_SEARCH 파라미터 ──────────────────────────────────────────────
 SPIN_W          = 1.8               # 제자리 회전 각속도
@@ -231,6 +231,7 @@ last_cmd = (0.0, 0.0)
 wf_angle_accum = 0.0
 wf_last_t = None
 esc_angle_accum = 0.0
+esc_dir = -1
 ws_start_t = None
 
 spin_angle_accum = 0.0   # SPIN_SEARCH 누적 각도
@@ -496,10 +497,13 @@ try:
                 v, w = wall_follow(scan, fm, adir)
                 send_cmd(v, w)
 
-                wf_angle_accum += abs(w) * dt
+                # 부호 있는 누적: 한쪽으로 계속 같은 방향으로 돌 때만 빠르게 쌓이고,
+                # 좌우로 번갈아 흔들리는 정상 추종은 서로 상쇄되어 오탐 방지
+                wf_angle_accum += w * dt
 
-                if wf_angle_accum >= FULL_CIRCLE_RAD:
+                if abs(wf_angle_accum) >= FULL_CIRCLE_RAD:
                     park_state = "WALL_ESCAPE"
+                    esc_dir = 1 if wf_angle_accum > 0 else -1   # 돌던 방향의 반대로 탈출
                     esc_angle_accum = 0.0
                     wf_angle_accum = 0.0
                     wf_last_t = None
@@ -516,7 +520,7 @@ try:
                 dt = now - wf_last_t if wf_last_t else 0.0
                 wf_last_t = now
 
-                send_cmd(ESCAPE_V, -ESCAPE_W)
+                send_cmd(ESCAPE_V, esc_dir * -ESCAPE_W)
                 esc_angle_accum += ESCAPE_W * dt
 
                 if esc_angle_accum >= ESCAPE_RAD:
