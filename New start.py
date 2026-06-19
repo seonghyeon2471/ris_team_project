@@ -237,12 +237,21 @@ WALL_TURN_V = 0.10
 WALL_LOST_W = 0.5
 WALL_SEARCH_W = 1.1
 
-# SEARCH 상태 파라미터
-SEARCH_ROT_SEC = 1.0
-SEARCH_FWD_SEC = 0.22
-SEARCH_ROT_W = 0.9
-SEARCH_FWD_V = 0.10
-SEARCH_MAX_TRY = 3
+# ─────────────────────────────────────────────────────────────
+# SEARCH 상태 파라미터 (나선형 탐색)
+# 제자리 회전(ROT) + 짧은 직진(FWD) 반복 대신,
+# 회전속도(w)는 고정하고 전진속도(v)를 시간에 따라 점점 키워서
+# 같은 자리를 빙글빙글 도는 게 아니라 반경이 점점 커지는
+# 나선(스파이럴) 경로로 움직이며 색지를 찾는다.
+# v/w 비율이 곧 회전 반경이므로, w 고정 + v 증가 = 반경 증가.
+# ─────────────────────────────────────────────────────────────
+SEARCH_SPIRAL_W       = 0.85   # 나선 회전 각속도 (고정)
+SEARCH_SPIRAL_V_START = 0.05   # 첫 번째 나선의 시작 속도
+SEARCH_SPIRAL_V_STEP  = 0.03   # 시도(try)가 늘어날 때마다 시작 속도를 키워서, 다음 나선은 더 바깥쪽부터 시작
+SEARCH_SPIRAL_V_GROWTH = 0.05  # 한 나선이 진행되는 동안 시간에 따라 속도가 늘어나는 비율 (m/s per sec)
+SEARCH_SPIRAL_V_MAX    = 0.22  # 전진 속도 상한
+SEARCH_SPIRAL_SEC      = 2.2   # 한 나선을 진행하는 최대 시간(초). 지나면 방향을 반전하고 다음(더 큰) 나선으로
+SEARCH_MAX_TRY         = 3     # 나선을 이만큼 반복해도 못 찾으면 WALL_SEARCH로 복귀
 
 # 경계 안전 파라미터
 BOUNDARY_MODE = "LINE_ON_DARK"
@@ -261,7 +270,7 @@ BOUNDARY_TURN_W = 0.9
 # mode: LIDAR / PARK
 # park_state: 현재 주차 상태
 # safe_state: 경계 안전 상태
-# search_state: 객체 놓쳤을 때 탐색 상태
+# search_state: 객체 놓쳤을 때 탐색 상태 (나선형 탐색의 단일 상태)
 # ─────────────────────────────────────────────────────────────
 mode = "LIDAR"
 mission_idx = 0
@@ -278,10 +287,11 @@ safe_state = "OK"   # OK | BACK | TURN
 safe_t = None
 boundary_count = 0
 
-search_state = "ROT"   # ROT | FWD
-search_t = None
-search_dir = 1
-search_try = 0
+search_state = "SPIRAL"     # 나선형 탐색 단일 상태
+search_t = None             # 현재 나선이 시작된 시각
+search_dir = 1               # 회전 방향 (+1 / -1), 나선이 끝날 때마다 반전
+search_try = 0                # 몇 번째 나선인지 (커질수록 더 바깥쪽부터 시작)
+search_v_base = SEARCH_SPIRAL_V_START  # 현재 나선의 시작 속도
 
 print(f"START | MISSION: {MISSION}")
 
@@ -595,32 +605,35 @@ try:
                     last_cmd = (v, w)
                     send_cmd(v, w)
 
-                # 7) 색지를 놓쳤을 때 검색
+                # 7) 색지를 놓쳤을 때 검색 (나선형 탐색)
+                #    제자리 회전이 아니라, w는 고정하고 v를 점점 키워서
+                #    바깥쪽으로 점점 퍼지는 나선 경로를 그리며 찾는다.
                 else:
-                    # ROT: 제자리 회전
-                    if search_state == "ROT":
+                    if search_state == "SPIRAL":
                         if search_t is None:
+                            # 새 나선 시작: try가 늘어날수록 더 큰 속도(=더 바깥쪽)부터 시작
                             search_t = time.time()
-                        if time.time() - search_t < SEARCH_ROT_SEC:
-                            send_cmd(0.0, search_dir * SEARCH_ROT_W)
-                        else:
-                            search_state = "FWD"
-                            search_t = time.time()
+                            search_v_base = SEARCH_SPIRAL_V_START + search_try * SEARCH_SPIRAL_V_STEP
 
-                    # FWD: 짧게 직진
-                    elif search_state == "FWD":
-                        if time.time() - search_t < SEARCH_FWD_SEC:
-                            send_cmd(SEARCH_FWD_V, 0.0)
-                        else:
+                        elapsed = time.time() - search_t
+                        v = min(search_v_base + SEARCH_SPIRAL_V_GROWTH * elapsed, SEARCH_SPIRAL_V_MAX)
+                        w = search_dir * SEARCH_SPIRAL_W
+                        send_cmd(v, w)
+
+                        cv2.putText(frame, f"SPIRAL try{search_try} v={v:.2f} w={w:.2f}", (10, 85),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+
+                        # 한 나선이 끝나면 방향을 반전하고 다음 나선(더 큰 반경) 준비
+                        if elapsed >= SEARCH_SPIRAL_SEC:
                             search_try += 1
                             search_dir *= -1
-                            search_state = "ROT"
-                            search_t = time.time()
+                            search_t = None
 
-                    # 너무 오래 찾으면 다시 벽 탐색으로 복귀
+                    # 나선을 충분히 반복해도 못 찾으면 벽 탐색으로 복귀
                     if search_try >= SEARCH_MAX_TRY:
                         search_try = 0
-                        search_state = "ROT"
+                        search_t = None
+                        search_state = "SPIRAL"
                         park_state = "WALL_SEARCH"
 
         # 화면 출력
