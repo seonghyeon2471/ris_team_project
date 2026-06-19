@@ -30,7 +30,7 @@ print("LIDAR START")
 # ── LIDAR PARAMETERS ──────────────────────────────────────────────────
 MAX_SPEED = 0.22
 MIN_SPEED = 0.09
-MAX_W = 0.9
+MAX_W = 1.8
 
 THRESH_30 = 32.0
 THRESH_20 = 22.0
@@ -207,13 +207,13 @@ ARRIVE_FORWARD_SEC = 0.7
 ARRIVE_FORWARD_V = 0.15
 ARRIVE_CONFIRM = 8
 
-FULL_CIRCLE_RAD = 2 * math.pi * 0.85
+FULL_CIRCLE_RAD = 2 * math.pi * 0.4   # 0.85 → 0.4바퀴: 더 빨리 순환 감지
 ESCAPE_RAD = math.pi * 0.6
 ESCAPE_V = 0.13
 ESCAPE_W = 1.70
 
 # ── SPIN_SEARCH 파라미터 ──────────────────────────────────────────────
-SPIN_W          = 1.6               # 제자리 회전 각속도
+SPIN_W          = 1.8               # 제자리 회전 각속도
 SPIN_TARGET_RAD = 2 * 2 * math.pi  # 2바퀴
 
 # ── STATE ─────────────────────────────────────────────────────────────
