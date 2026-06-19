@@ -1,3 +1,4 @@
+# 테오도로스의 나선 방식의 벽 찾기
 import cv2
 import serial
 import numpy as np
