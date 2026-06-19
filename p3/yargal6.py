@@ -196,7 +196,7 @@ WALL_KP        = 0.012
 WALL_V         = 0.22
 WALL_TURN_V    = 0.10
 WALL_LOST_W    = 0.4
-WALL_SEARCH_W  = 1.1
+WALL_SEARCH_W  = 1.4   # 제자리 탐색 회전 속도 (높을수록 빠름, 최대 1.6)
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
@@ -265,10 +265,11 @@ try:
                     cy_obj >= ARRIVE_Y_TOP)
 
         # ══════════════════════════════════════════════════════════════
-        # ★ LIDAR 우선순위 체크 (FORWARD/PARKING 상태는 예외)
-        #   - FORWARD/PARKING은 이미 목표 도달 이후이므로 LIDAR 무시
+        # ★ LIDAR 우선순위 체크 — 아래 상태는 override 제외
+        #   FORWARD/PARKING : 목표 도달 후 처리
+        #   WALL_SEARCH     : 제자리 회전이 목적 — fm이 낮아도 방해하면 안 됨
         # ══════════════════════════════════════════════════════════════
-        _skip_states = {"FORWARD", "PARKING"}
+        _skip_states = {"FORWARD", "PARKING", "WALL_SEARCH"}
         _cur_state   = lidar_state if mode == "LIDAR" else park_state
         lidar_override, lo_v, lo_w, lo_label = lidar_priority(scan, fm, adir)
 
