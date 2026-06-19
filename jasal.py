@@ -28,9 +28,9 @@ print("LIDAR OK")
 # ── LIDAR ─────────────────────────────────────────────────────────────
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
-FRONT_RANGE  = 95   # 정면 감지 범위 (±100도 = 총 200도)
+FRONT_RANGE  = 90   # 정면 감지 범위 (±90도 = 총 180도)
 THRESH_SLOW  = 55.0
-THRESH_TURN  = 35.0
+THRESH_TURN  = 30.0
 THRESH_STOP  = 18.0
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
@@ -90,62 +90,22 @@ def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
 
-# ── [수정 1] 측면 비상감지: 폭을 좁히고 디바운스 추가 ──────────────────
-# 기존엔 ±30도 폭의 최솟값을 단일 프레임으로 바로 트리거했음.
-# 벽을 정상 추종 중에도 헤딩이 살짝 틀어지면 끝단 빔이 벽에 비스듬히 맞아
-# 순간적으로 짧은 거리가 찍히는데, 그걸 그대로 비상회피로 오인하던 부분.
-SIDE_EMERGENCY_HALF    = 15   # ±15도 (기존 ±30도 → 폭 절반으로 축소)
-SIDE_EMERGENCY_CONFIRM = 3    # 연속 3프레임 유지돼야 진짜 비상으로 인정
-
-_side_emerg_cnt = {"L": 0, "R": 0}
-
-def side_min_narrow(scan, side):
-    c = 90 if side == "L" else 270
-    idx = np.arange(c - SIDE_EMERGENCY_HALF, c + SIDE_EMERGENCY_HALF + 1) % 360
-    return float(np.min(scan[idx]))
-
-def side_emergency(scan):
-    lc = side_min_narrow(scan, "L")
-    rc = side_min_narrow(scan, "R")
-    _side_emerg_cnt["L"] = _side_emerg_cnt["L"] + 1 if lc < THRESH_STOP else 0
-    _side_emerg_cnt["R"] = _side_emerg_cnt["R"] + 1 if rc < THRESH_STOP else 0
-    return (_side_emerg_cnt["L"] >= SIDE_EMERGENCY_CONFIRM,
-            _side_emerg_cnt["R"] >= SIDE_EMERGENCY_CONFIRM)
-
-def reset_side_emergency():
-    _side_emerg_cnt["L"] = 0
-    _side_emerg_cnt["R"] = 0
-
-# ── [수정 2] 정면 회피 방향이 follow_side와 충돌하지 않도록 보정 ────────
-# 기존 avoid_dir()는 follow_side를 모른 채 좌/우 반구 평균만 비교했음.
-# 따라가던 벽 쪽에 틈/모서리가 생기면 그 반구 평균이 커져서 adir이
-# "벽 쪽"을 가리킬 수 있었고, 그 상태로 정면이 막히면 벽 쪽으로 꺾는
-# 상황이 발생할 수 있었음. → 기본은 벽 반대쪽으로 피하고, 그쪽도
-# 막혀 있을 때만(코너 등) 기존 전역비교(avoid_dir)로 대체.
-def safe_avoid_dir(scan, follow_side):
-    sign = 1 if follow_side == "L" else -1
-    away = -sign
-    away_idx = np.arange(1, 90) % 360 if away == 1 else np.arange(271, 360) % 360
-    if np.mean(scan[away_idx]) > THRESH_TURN:
-        return away
-    return avoid_dir(scan)
-
 def wall_follow(scan, fm, adir, follow_side):
-    sd        = side_dist(scan, follow_side)
-    sign      = 1 if follow_side == "L" else -1
-    adir_safe = safe_avoid_dir(scan, follow_side)   # [수정 2] 적용
+    sd          = side_dist(scan, follow_side)
+    left_close  = side_min(scan, 60, 120)
+    right_close = side_min(scan, 240, 300)
+    sign = 1 if follow_side == "L" else -1
 
-    # ① 정면 위험 → follow_side와 충돌하지 않는 방향으로 긴급 회피
+    # ① 정면 위험 → adir 긴급 회피
     if fm < THRESH_STOP:
-        return (0.08, adir_safe * 1.1)
+        return (0.08, adir * 1.1)
     if fm < THRESH_TURN:
-        return (WALL_TURN_V, adir_safe * 0.85)
+        return (WALL_TURN_V, adir * 0.85)
 
-    # ② 측면 너무 가까움 (디바운스 적용) → 반대쪽으로   [수정 1] 적용
-    left_trig, right_trig = side_emergency(scan)
-    if left_trig:
+    # ② 측면 너무 가까움 → 반대쪽으로
+    if left_close < THRESH_STOP:
         return (WALL_V * 0.7, -0.7)
-    if right_trig:
+    if right_close < THRESH_STOP:
         return (WALL_V * 0.7,  0.7)
 
     # ③ 따라가는 쪽 장애물 없음 → 그쪽으로 돌아서 찾기
@@ -157,7 +117,7 @@ def wall_follow(scan, fm, adir, follow_side):
     w   = sign * WALL_KP * err
     if fm < THRESH_SLOW:
         blend = float(np.clip((THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
-        w = (1 - blend) * w + blend * adir_safe * 0.5   # [수정 2] 적용
+        w = (1 - blend) * w + blend * adir * 0.5
         v = WALL_V * (1.0 - 0.4 * blend)
     else:
         v = WALL_V
@@ -199,26 +159,26 @@ def make_mask(frame, hsv, name):
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
 KP_ROT         = 0.030
-W_MIN          = 0.25
+W_MIN          = 0.20
 APPROACH_V     = 0.17
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 
 # 도착 판정 영역
 ARRIVE_Y_TOP    = int(240 * 0.85)
-ARRIVE_X_MARGIN = 40
-ARRIVE_FORWARD_SEC = 0.7
+ARRIVE_X_MARGIN = 30
+ARRIVE_FORWARD_SEC = 0.8
 ARRIVE_FORWARD_V   = 0.15
 ARRIVE_CONFIRM     = 8
 
 # wall-following
 WALL_TARGET   = 20.0
-WALL_SCAN_DIST = 80.0  # 회전 중 정면(fm) 기준 벽 탐색 감지 거리 (cm)
+WALL_SCAN_DIST = 150.0  # 회전 중 정면(fm) 기준 벽 탐색 감지 거리 (cm)
 WALL_APPROACH_V = 0.20  # 벽으로 접근할 때 속도
-WALL_KP       = 0.012
+WALL_KP       = 0.02
 WALL_V        = 0.22
-WALL_TURN_V   = 0.07
-WALL_LOST_W   = 0.4
+WALL_TURN_V   = 0.10
+WALL_LOST_W   = 0.5
 WALL_SEARCH_W = 1.1     # 벽 탐색 제자리 회전 각속도
 
 # ── STATE ─────────────────────────────────────────────────────────────
@@ -326,15 +286,13 @@ try:
 
                 if sd <= WALL_TARGET * 1.3:
                     lidar_state = "WALL_FOLLOW"
-                    reset_side_emergency()
                     print(f"[LIDAR] 벽 도달 {follow_side}:{sd:.0f}cm → wall-following 시작")
                 else:
                     sign = 1 if follow_side == "L" else -1
-                    adir_safe = safe_avoid_dir(scan, follow_side)   # [수정 2] 적용
                     if fm < THRESH_STOP:
-                        v, w = 0.08, adir_safe * 1.0
+                        v, w = 0.08, adir * 1.0
                     elif fm < THRESH_TURN:
-                        v, w = WALL_APPROACH_V * 0.6, adir_safe * 0.7
+                        v, w = WALL_APPROACH_V * 0.6, adir * 0.7
                     else:
                         v, w = WALL_APPROACH_V, sign * 0.3
                     send_cmd(v, w)
@@ -423,17 +381,15 @@ try:
                 # follow_side 거리가 WALL_TARGET에 도달 → wall-following 시작
                 if sd <= WALL_TARGET * 1.3:
                     park_state = "WALL_FOLLOW"
-                    reset_side_emergency()
                     print(f"벽 도달 {follow_side}:{sd:.0f}cm → wall-following 시작")
                     continue
 
-                # 정면 막히면 follow_side와 충돌하지 않는 방향으로 회피, 아니면 follow_side 쪽으로 틀며 전진
+                # 정면 막히면 adir 회피하며 접근, 아니면 follow_side 쪽으로 틀며 전진
                 sign = 1 if follow_side == "L" else -1
-                adir_safe = safe_avoid_dir(scan, follow_side)   # [수정 2] 적용
                 if fm < THRESH_STOP:
-                    v, w = 0.08, adir_safe * 1.0
+                    v, w = 0.08, adir * 1.0
                 elif fm < THRESH_TURN:
-                    v, w = WALL_APPROACH_V * 0.6, adir_safe * 0.7
+                    v, w = WALL_APPROACH_V * 0.6, adir * 0.7
                 else:
                     v, w = WALL_APPROACH_V, sign * 0.3
                 send_cmd(v, w)
