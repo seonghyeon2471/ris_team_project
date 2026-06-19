@@ -77,7 +77,6 @@ def side_dist(scan, side):
     idx = np.arange(85, 96) % 360 if side == "L" else np.arange(265, 276) % 360
     return float(np.mean(scan[idx]))
 
-# [수정: 노이즈 필터링을 위한 median 적용]
 def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.median(scan[idx])) 
@@ -117,7 +116,6 @@ COLOR_CFG = {
 }
 MISSION = ["red", "yellow", "blue"]
 
-# [수정: ROI 적용을 위해 frame과 hsv 인자로 받음]
 def make_mask(frame, hsv, name):
     cfg = COLOR_CFG[name]
     lo1, hi1 = np.array(cfg["hsv1"][0]), np.array(cfg["hsv1"][1])
@@ -126,16 +124,31 @@ def make_mask(frame, hsv, name):
     return cv2.bitwise_and(m, bm)
 
 # ── PARAMS ────────────────────────────────────────────────────────────
-MIN_AREA, KP_ROT, W_MIN, APPROACH_V = 400, 0.030, 0.20, 0.17
-PARK_SEC, DETECT_CONFIRM = 1.2, 6
-ARRIVE_Y_TOP, ARRIVE_X_MARGIN, ARRIVE_FORWARD_SEC, ARRIVE_FORWARD_V, ARRIVE_CONFIRM = int(240 * 0.85), 30, 0.8, 0.15, 8
-WALL_TARGET, WALL_SCAN_DIST, WALL_KP, WALL_V, WALL_TURN_V, WALL_LOST_W, WALL_SEARCH_W = 20.0, 150.0, 0.012, 0.22, 0.10, 0.5, 1.1
+MIN_AREA           = 400
+KP_ROT             = 0.030
+W_MIN              = 0.20
+APPROACH_V         = 0.17
+PARK_SEC           = 1.2
+DETECT_CONFIRM     = 6
+ARRIVE_Y_TOP       = int(240 * 0.85)
+ARRIVE_X_MARGIN    = 30
+ARRIVE_FORWARD_SEC = 0.8
+ARRIVE_FORWARD_V   = 0.15
+ARRIVE_CONFIRM     = 8
+WALL_TARGET        = 20.0
+WALL_SCAN_DIST     = 150.0
+WALL_APPROACH_V    = 0.20
+WALL_KP            = 0.012
+WALL_V             = 0.22
+WALL_TURN_V        = 0.10
+WALL_LOST_W        = 0.5
+WALL_SEARCH_W      = 1.1
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode, mission_idx, detect_count, arrive_count = "PARK", 0, 0, 0
 follow_side = "L"
 park_state = "WALL_SEARCH"
-last_seen_x, park_t, last_cmd = 160, None, (0.0, 0.0)
+last_seen_x, park_t = 160, None
 
 # ── MAIN LOOP ─────────────────────────────────────────────────────────
 try:
@@ -145,7 +158,6 @@ try:
         frame = cv2.flip(frame, 1)
         H, W = frame.shape[:2]
         
-        # [수정: 카메라 ROI (하단 70%)]
         roi_start = int(H * 0.3)
         frame_roi = frame[roi_start:H, :]
         hsv_roi = cv2.cvtColor(frame_roi, cv2.COLOR_BGR2HSV)
@@ -158,9 +170,6 @@ try:
             stop_robot(); cv2.imshow("f", frame); cv2.waitKey(1); continue
 
         target = MISSION[mission_idx]
-        draw = COLOR_CFG[target]["draw"]
-
-        # [수정: 마스크 생성 시 ROI 전달]
         mask = make_mask(frame_roi, hsv_roi, target)
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         big = max(cnts, key=cv2.contourArea) if cnts and cv2.contourArea(max(cnts, key=cv2.contourArea)) > MIN_AREA else None
@@ -171,11 +180,9 @@ try:
             cx_obj = int(M["m10"] / M["m00"])
             last_seen_x = cx_obj
 
-        # ══ PARK 모드 ════════════════════════════════════════════
         if park_state == "PARKING":
             stop_robot()
             if time.time() - park_t >= PARK_SEC:
-                # [수정: 탐색 방향 반전]
                 follow_side = "R" if follow_side == "L" else "L"
                 mission_idx += 1
                 park_state = "WALL_SEARCH"
@@ -186,7 +193,6 @@ try:
             else: detect_count = 0
             if detect_count >= DETECT_CONFIRM: park_state = "TRACK"
             
-            # [수정: 공간 이탈 방지]
             sd_l = np.mean(scan[60:120])
             sd_r = np.mean(scan[240:300])
             if fm < WALL_SCAN_DIST and (sd_l < 100 or sd_r < 100):
