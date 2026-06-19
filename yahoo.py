@@ -55,7 +55,7 @@ try:
         frame = cv2.flip(frame, 1)
         H, W = frame.shape[:2]
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        scan = get_scan()
+        scan = get.scan()
         fm = front_min(scan)
         adir = avoid_dir(scan)
 
