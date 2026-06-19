@@ -176,13 +176,12 @@ def make_mask(frame, hsv, name):
 
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
-KP_ROT         = 0.030
-W_MIN          = 0.25
-APPROACH_V     = 0.17
+KP_ROT         = 0.035  # 0.030 → 0.035 (카메라 추적 회전 감도 ↑)
+W_MIN          = 0.35   # 0.25  → 0.35  (최소 회전속도 ↑)
+APPROACH_V     = 0.22   # 0.17  → 0.22  (색상 추적 전진속도 ↑)
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 
-# 도착 판정 영역
 ARRIVE_Y_TOP    = int(240 * 0.85)
 ARRIVE_X_MARGIN = 30
 ARRIVE_FORWARD_SEC = 0.8
@@ -192,12 +191,12 @@ ARRIVE_CONFIRM     = 8
 # wall-following
 WALL_TARGET    = 30.0
 WALL_SCAN_DIST = 130.0
-WALL_APPROACH_V = 0.20
-WALL_KP        = 0.012
-WALL_V         = 0.22
-WALL_TURN_V    = 0.10
-WALL_LOST_W    = 0.4
-WALL_SEARCH_W  = 1.4   # 제자리 탐색 회전 속도 (높을수록 빠름, 최대 1.6)
+WALL_APPROACH_V = 0.26  # 0.20 → 0.26 (벽 접근속도 ↑)
+WALL_KP        = 0.016  # 0.012 → 0.016 (벽 추종 보정 감도 ↑)
+WALL_V         = 0.28   # 0.22 → 0.28  (wall-following 전진속도 ↑)
+WALL_TURN_V    = 0.13   # 0.10 → 0.13  (장애물 회피 중 전진속도 ↑)
+WALL_LOST_W    = 0.55   # 0.4  → 0.55  (벽 놓쳤을 때 회전속도 ↑)
+WALL_SEARCH_W  = 1.6    # 1.4  → 1.6   (제자리 탐색 회전속도 최대)
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
