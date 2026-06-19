@@ -176,7 +176,7 @@ def make_mask(frame, hsv, name):
 
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
-KP_ROT         = 0.035  # 0.030 → 0.035 (카메라 추적 회전 감도 ↑)
+KP_ROT         = 0.040
 W_MIN          = 0.35   # 0.25  → 0.35  (최소 회전속도 ↑)
 APPROACH_V     = 0.22   # 0.17  → 0.22  (색상 추적 전진속도 ↑)
 PARK_SEC       = 1.2
@@ -184,7 +184,7 @@ DETECT_CONFIRM = 6
 
 ARRIVE_Y_TOP    = int(240 * 0.85)
 ARRIVE_X_MARGIN = 30
-ARRIVE_FORWARD_SEC = 0.8
+ARRIVE_FORWARD_SEC = 0.10
 ARRIVE_FORWARD_V   = 0.15
 ARRIVE_CONFIRM     = 8
 
@@ -197,19 +197,13 @@ WALL_V         = 0.28   # 0.22 → 0.28  (wall-following 전진속도 ↑)
 WALL_TURN_V    = 0.13   # 0.10 → 0.13  (장애물 회피 중 전진속도 ↑)
 WALL_LOST_W    = 0.55   # 0.4  → 0.55  (벽 놓쳤을 때 회전속도 ↑)
 WALL_SEARCH_W  = 1.6    # 1.4  → 1.6   (제자리 탐색 회전속도 최대)
+WALL_CONFIRM_SEC = 0.15 # fm 감지 후 정지하고 L/R 재측정하는 대기시간
 
-# ── SPIRAL SEARCH (제자리 회전 → 점점 반경이 커지는 나선형 탐색) ───────
-# WALL_SEARCH 상태에 진입한 뒤 프레임이 지날수록 전진속도(v)를 서서히
-# 키워서, "같은 자리에서 빙빙" 도는 게 아니라 안쪽 작은 원 → 바깥쪽 큰
-# 원으로 점점 퍼져나가는 나선(spiral)을 그리며 회전·탐색하도록 함.
-# 회전각속도(w)는 WALL_SEARCH_W로 고정, v만 키우므로 반경 r = v/w 가
-# 점점 커지는 구조. v가 SPIRAL_V_MAX에 도달하면 그 이후로는 반경이
-# 고정된 큰 원을 그리며 계속 탐색(= 바운드된 최대 탐색 범위).
-SPIRAL_V_MAX     = 0.12    # 나선 탐색 중 도달 가능한 최대 전진속도
-SPIRAL_STEP_GAIN = 0.0008  # 프레임 1회당 전진속도 증가량 (작을수록 천천히 퍼짐)
-
-def spiral_v(step):
-    return min(SPIRAL_V_MAX, SPIRAL_STEP_GAIN * step)
+# 동일 장애물 주위로 계속 도는 것을 방지
+WALL_LOOP_LIMIT = 2                          # 같은 장애물 기준 허용 최대 바퀴 수
+WALL_LOOP_RAD   = WALL_LOOP_LIMIT * 2 * math.pi  # 누적 회전각 임계값(rad) = 2바퀴
+ESCAPE_SEC      = 0.6                        # 탈출 기동 지속 시간
+ESCAPE_V        = 0.22                       # 탈출 기동 전진속도
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
@@ -222,16 +216,23 @@ park_state    = "TRACK"
 last_seen_x   = 160
 last_bottom_y = 0
 park_t        = None
+wall_confirm_t = None
+wall_heading_accum = 0.0
+escape_t       = None
 last_cmd      = (0.0, 0.0)
-search_step   = 0   # WALL_SEARCH 진입 후 경과한 "유효 프레임" 수 (나선 반경 계산용, 상태 진입 시 0으로 리셋)
 
 print(f"START | MISSION: {MISSION}")
+_prev_t = time.time()
 
 # ── MAIN LOOP ─────────────────────────────────────────────────────────
 try:
     while True:
         ret, frame = cap.read()
         if not ret: continue
+
+        now_t = time.time()
+        dt = min(now_t - _prev_t, 0.5)   # 멈춤/지연 시 과도한 누적 방지
+        _prev_t = now_t
 
         frame  = cv2.flip(frame, 1)
         H, W   = frame.shape[:2]
@@ -281,11 +282,10 @@ try:
         # ══════════════════════════════════════════════════════════════
         # ★ LIDAR 우선순위 체크 — 아래 상태는 override 제외
         #   FORWARD/PARKING : 목표 도달 후 처리
-        #   WALL_SEARCH는 이제 v=0이 아니라 나선형으로 전진하므로
-        #   더 이상 예외(skip) 대상이 아님 — fm이 낮으면 그대로
-        #   비상정지/회피 override가 적용되어야 안전함.
+        #   WALL_SEARCH     : 제자리 회전이 목적 — fm이 낮아도 방해하면 안 됨
+        #   WALL_SEARCH_CONFIRM : 정지 후 L/R 재측정 중 — 방해하면 안 됨
         # ══════════════════════════════════════════════════════════════
-        _skip_states = {"FORWARD", "PARKING"}
+        _skip_states = {"FORWARD", "PARKING", "WALL_SEARCH", "WALL_SEARCH_CONFIRM"}
         _cur_state   = lidar_state if mode == "LIDAR" else park_state
         lidar_override, lo_v, lo_w, lo_label = lidar_priority(scan, fm, adir)
 
@@ -293,7 +293,6 @@ try:
             send_cmd(lo_v, lo_w)
             cv2.putText(frame, lo_label, (10, 65), 0, 0.55, (0, 0, 255), 2)
             # detect_count는 초기화하지 않음 (장애물 회피 후 다시 이어서 감지)
-            # search_step도 초기화하지 않음 → 회피가 끝나면 나선 진행도를 이어서 재개
             cv2.imshow("f", frame)
             if cv2.waitKey(1) & 0xFF == 27: break
             continue   # ← 이 아래 카메라/wall 로직 전부 건너뜀
@@ -313,27 +312,42 @@ try:
                 print(f"[{target}] 발견 → 추적 시작")
                 continue
 
-            # ── A. 나선형으로 퍼지며 탐색 (WALL_SEARCH) ───────────
+            # ── A. 벽 탐색 중 제자리 회전 (WALL_SEARCH) ──────────
             if lidar_state == "WALL_SEARCH":
                 if fm < WALL_SCAN_DIST:
+                    # 회전 중 순간 측정값은 진입 방향(edge)에 편향되므로
+                    # 바로 판단하지 않고 일단 정지 → CONFIRM 상태에서 재측정
+                    stop_robot()
+                    wall_confirm_t = time.time()
+                    lidar_state = "WALL_SEARCH_CONFIRM"
+                    print(f"[LIDAR] 벽 감지 fm:{fm:.0f}cm → 정지 후 L/R 재측정")
+                else:
+                    send_cmd(0.0, WALL_SEARCH_W)
+                    cv2.putText(frame, f"LIDAR-WALL-SEARCH fm:{fm:.0f}",
+                                (10, 25), 0, 0.5, (0, 255, 0), 1)
+
+            # ── A-2. 정지 후 L/R 재측정 (WALL_SEARCH_CONFIRM) ────
+            elif lidar_state == "WALL_SEARCH_CONFIRM":
+                stop_robot()
+                if fm >= WALL_SCAN_DIST:
+                    # 정지하는 사이 벽이 더 멀어짐(오감지) → 다시 탐색 회전
+                    lidar_state = "WALL_SEARCH"
+                elif time.time() - wall_confirm_t >= WALL_CONFIRM_SEC:
                     l = side_dist(scan, "L")
                     r = side_dist(scan, "R")
                     follow_side = "L" if l <= r else "R"
                     lidar_state = "WALL_APPROACH"
-                    search_step = 0
-                    print(f"[LIDAR] 나선 탐색 중 벽 감지 fm:{fm:.0f}cm, follow_side={follow_side} → 접근 시작")
+                    print(f"[LIDAR] 재측정 완료 L:{l:.0f} R:{r:.0f} → follow_side={follow_side}")
                 else:
-                    search_step += 1
-                    v = spiral_v(search_step)
-                    send_cmd(v, WALL_SEARCH_W)
-                    cv2.putText(frame, f"LIDAR-SPIRAL-SEARCH fm:{fm:.0f} v:{v:.2f}",
-                                (10, 25), 0, 0.5, (0, 255, 0), 1)
+                    cv2.putText(frame, f"LIDAR-WALL-CONFIRM fm:{fm:.0f}",
+                                (10, 25), 0, 0.5, (0, 255, 255), 1)
 
             # ── B. 벽으로 접근 중 (WALL_APPROACH) ─────────────────
             elif lidar_state == "WALL_APPROACH":
                 sd = side_dist(scan, follow_side)
                 if sd <= WALL_TARGET * 1.3:
                     lidar_state = "WALL_FOLLOW"
+                    wall_heading_accum = 0.0
                     print(f"[LIDAR] 벽 도달 {follow_side}:{sd:.0f}cm → wall-following 시작")
                 else:
                     sign = 1 if follow_side == "L" else -1
@@ -353,10 +367,28 @@ try:
             # ── C. wall-following으로 탐색 (WALL_FOLLOW) ─────────
             elif lidar_state == "WALL_FOLLOW":
                 v, w = wall_follow(scan, fm, adir, follow_side)
+                wall_heading_accum += w * dt
+                if abs(wall_heading_accum) >= WALL_LOOP_RAD:
+                    print(f"[LIDAR] 동일 장애물 {WALL_LOOP_LIMIT}바퀴 회전 감지 "
+                          f"({math.degrees(wall_heading_accum):.0f}°) → 탈출 후 다른 장애물 탐색")
+                    lidar_state = "WALL_ESCAPE"
+                    escape_t = time.time()
+                    wall_heading_accum = 0.0
+                    continue
                 send_cmd(v, w)
                 sd_disp = side_dist(scan, follow_side)
-                cv2.putText(frame, f"LIDAR-WALL-FOLLOW {follow_side}:{sd_disp:.0f}cm",
+                cv2.putText(frame, f"LIDAR-WALL-FOLLOW {follow_side}:{sd_disp:.0f}cm "
+                            f"loop:{math.degrees(wall_heading_accum):.0f}deg",
                             (10, 25), 0, 0.5, (0, 255, 0), 1)
+
+            # ── D. 동일 장애물 탈출 기동 (WALL_ESCAPE) ────────────
+            elif lidar_state == "WALL_ESCAPE":
+                sign = 1 if follow_side == "L" else -1
+                send_cmd(ESCAPE_V, -sign * 0.5)   # 추종 방향과 반대로 틀며 전진 → 거리 확보
+                if time.time() - escape_t >= ESCAPE_SEC:
+                    lidar_state = "WALL_SEARCH"
+                    print("[LIDAR] 탈출 기동 완료 → 새 장애물 탐색 재시작")
+                cv2.putText(frame, "LIDAR-WALL-ESCAPE", (10, 25), 0, 0.5, (255, 0, 255), 1)
 
             cv2.putText(frame, "MODE: LIDAR", (10, 45), 0, 0.5, (255, 255, 255), 1)
 
@@ -385,38 +417,59 @@ try:
                     detect_count = 0
                     if mission_idx < len(MISSION):
                         park_state = "WALL_SEARCH"
-                        search_step = 0
-                        print(f"다음 미션 [{MISSION[mission_idx]}] 나선형 탐색 시작")
+                        print(f"다음 미션 [{MISSION[mission_idx]}] wall-following 탐색 시작")
                     continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
 
-            # ── 3-A. 나선형으로 퍼지며 탐색 (WALL_SEARCH) ─────────
+            # ── 3-A. 벽 탐색 중 제자리 회전 (WALL_SEARCH) ────────
             elif park_state == "WALL_SEARCH":
                 if found:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
                         detect_count = 0
                         park_state = "TRACK"
-                        search_step = 0
                         print(f"[{target}] 탐색 중 발견 → 추적 시작")
                         continue
                 else:
                     detect_count = 0
 
                 if fm < WALL_SCAN_DIST:
+                    # 회전 중 순간 측정값은 진입 방향(edge)에 편향되므로
+                    # 바로 판단하지 않고 일단 정지 → CONFIRM 상태에서 재측정
+                    stop_robot()
+                    wall_confirm_t = time.time()
+                    park_state = "WALL_SEARCH_CONFIRM"
+                    print(f"벽 감지 fm:{fm:.0f}cm → 정지 후 L/R 재측정")
+                    continue
+
+                send_cmd(0.0, WALL_SEARCH_W)
+                cv2.putText(frame, f"WALL-SEARCH [{target}] 회전 중 fm:{fm:.0f}",
+                            (10, 25), 0, 0.5, (0, 255, 0), 1)
+
+            # ── 3-A-2. 정지 후 L/R 재측정 (WALL_SEARCH_CONFIRM) ──
+            elif park_state == "WALL_SEARCH_CONFIRM":
+                stop_robot()
+                if found:
+                    detect_count += 1
+                    if detect_count >= DETECT_CONFIRM:
+                        detect_count = 0
+                        park_state = "TRACK"
+                        print(f"[{target}] 재측정 중 발견 → 추적 시작")
+                        continue
+                else:
+                    detect_count = 0
+
+                if fm >= WALL_SCAN_DIST:
+                    park_state = "WALL_SEARCH"
+                elif time.time() - wall_confirm_t >= WALL_CONFIRM_SEC:
                     l = side_dist(scan, "L")
                     r = side_dist(scan, "R")
                     follow_side = "L" if l <= r else "R"
                     park_state = "WALL_APPROACH"
-                    search_step = 0
-                    print(f"나선 탐색 중 벽 감지 fm:{fm:.0f}cm, follow_side={follow_side} → 접근 시작")
-                    continue
-
-                search_step += 1
-                v = spiral_v(search_step)
-                send_cmd(v, WALL_SEARCH_W)
-                cv2.putText(frame, f"SPIRAL-SEARCH [{target}] fm:{fm:.0f} v:{v:.2f}",
-                            (10, 25), 0, 0.5, (0, 255, 0), 1)
+                    print(f"재측정 완료 L:{l:.0f} R:{r:.0f} → follow_side={follow_side}")
+                else:
+                    cv2.putText(frame, f"WALL-CONFIRM [{target}] fm:{fm:.0f}",
+                                (10, 25), 0, 0.5, (0, 255, 255), 1)
 
             # ── 3-B. 벽으로 접근 중 (WALL_APPROACH) ───────────────
             elif park_state == "WALL_APPROACH":
@@ -433,6 +486,7 @@ try:
                 sd = side_dist(scan, follow_side)
                 if sd <= WALL_TARGET * 1.3:
                     park_state = "WALL_FOLLOW"
+                    wall_heading_accum = 0.0
                     print(f"벽 도달 {follow_side}:{sd:.0f}cm → wall-following 시작")
                     continue
 
@@ -462,10 +516,38 @@ try:
                     detect_count = 0
 
                 v, w = wall_follow(scan, fm, adir, follow_side)
+                wall_heading_accum += w * dt
+                if abs(wall_heading_accum) >= WALL_LOOP_RAD:
+                    print(f"[{target}] 동일 장애물 {WALL_LOOP_LIMIT}바퀴 회전 감지 "
+                          f"({math.degrees(wall_heading_accum):.0f}°) → 탈출 후 다른 장애물 탐색")
+                    park_state = "WALL_ESCAPE"
+                    escape_t = time.time()
+                    wall_heading_accum = 0.0
+                    continue
                 send_cmd(v, w)
                 sd_disp = side_dist(scan, follow_side)
-                cv2.putText(frame, f"WALL-FOLLOW [{target}] {follow_side}:{sd_disp:.0f}cm",
+                cv2.putText(frame, f"WALL-FOLLOW [{target}] {follow_side}:{sd_disp:.0f}cm "
+                            f"loop:{math.degrees(wall_heading_accum):.0f}deg",
                             (10, 25), 0, 0.5, (0, 255, 0), 1)
+
+            # ── 3-D. 동일 장애물 탈출 기동 (WALL_ESCAPE) ───────────
+            elif park_state == "WALL_ESCAPE":
+                if found:
+                    detect_count += 1
+                    if detect_count >= DETECT_CONFIRM:
+                        detect_count = 0
+                        park_state = "TRACK"
+                        print(f"[{target}] 탈출 중 발견 → 추적 시작")
+                        continue
+                else:
+                    detect_count = 0
+
+                sign = 1 if follow_side == "L" else -1
+                send_cmd(ESCAPE_V, -sign * 0.5)   # 추종 방향과 반대로 틀며 전진 → 거리 확보
+                if time.time() - escape_t >= ESCAPE_SEC:
+                    park_state = "WALL_SEARCH"
+                    print(f"[{target}] 탈출 기동 완료 → 새 장애물 탐색 재시작")
+                cv2.putText(frame, f"WALL-ESCAPE [{target}]", (10, 25), 0, 0.5, (255, 0, 255), 1)
 
             # ── 4. 객체 추적 중 (TRACK) ────────────────────────────
             elif found:
