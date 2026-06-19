@@ -2,22 +2,27 @@ import cv2
 import serial
 import numpy as np
 import time
-import math
 import threading
 
 # ── SERIAL ────────────────────────────────────────────────────────────
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
 lidar_ser   = serial.Serial("/dev/ttyUSB0",  460800, timeout=0.1)
 
-# ── CONTROL SMOOTHING (LPF) ──────────────────────────────────────────
+# ── CAMERA ────────────────────────────────────────────────────────────
+cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+
+# ── LIDAR & CONTROL INITIALIZATION ────────────────────────────────────
+# [이곳에 기존 Lidar Thread, get_scan, front_min, avoid_dir, wall_follow 등 함수 정의들을 삽입하세요]
+
 prev_v, prev_w = 0.0, 0.0
-ALPHA_CMD = 0.4  # 제어값 평활화 가중치
+ALPHA_CMD = 0.4 
 
 def send_cmd_smooth(v, w):
     global prev_v, prev_w
     v = np.clip(v, -0.4, 0.4)
     w = np.clip(w, -1.6, 1.6)
-    # LPF (Low Pass Filter) 적용
     v = (1 - ALPHA_CMD) * prev_v + ALPHA_CMD * v
     w = (1 - ALPHA_CMD) * prev_w + ALPHA_CMD * w
     prev_v, prev_w = v, w
@@ -28,22 +33,12 @@ def stop_robot():
     prev_v, prev_w = 0.0, 0.0
     arduino_ser.write(b"0.000,0.000\n")
 
-# ── CAMERA & LIDAR INITIALIZATION ─────────────────────────────────────
-# (생략: 기존 초기화 코드 사용)
-cap = cv2.VideoCapture(0)
-# ... (설정값 동일)
-
-# ── LIDAR THREAD ──────────────────────────────────────────────────────
-# (생략: 기존 Lidar Thread 로직 유지)
-
 # ── PARAMS & STATE ────────────────────────────────────────────────────
-WALL_CONFIRM = 5 
-DETECT_CONFIRM = 6
-wall_state_count = 0
-detect_count = 0
+MISSION = ["red", "yellow", "blue"]
+WALL_CONFIRM, DETECT_CONFIRM = 5, 6
+wall_state_count, detect_count = 0, 0
 mode, lidar_state, park_state = "LIDAR", "WALL_SEARCH", "TRACK"
-mission_idx = 0
-follow_side = "L"
+mission_idx, follow_side = 0, "L"
 
 # ── MAIN LOOP ─────────────────────────────────────────────────────────
 try:
@@ -53,18 +48,17 @@ try:
         if not ret: continue
 
         frame = cv2.flip(frame, 1)
-        H, W = frame.shape[:2]
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        scan = get.scan()
+        
+        # [수정 완료] get_scan() 함수 호출
+        scan = get_scan() 
         fm = front_min(scan)
         adir = avoid_dir(scan)
 
-        # 미션 종료 처리
         if mission_idx >= len(MISSION):
             stop_robot()
             continue
 
-        # 비전 처리
         target = MISSION[mission_idx]
         mask = make_mask(frame, hsv, target)
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -102,14 +96,11 @@ try:
 
         # ══ PARK 모드 ════════════════════════════════════════════════
         elif mode == "PARK":
-            # (각 상태머신 내 기존 send_cmd를 모두 send_cmd_smooth로 교체)
-            # 예: TRACK 상태
             if park_state == "TRACK" and found:
-                # ... 기존 로직 수행 ...
+                # ... (로직 수행) ...
                 send_cmd_smooth(v, w)
-            # ... 나머지 상태 동일 적용 ...
 
-        # ── 루프 주기 고정 (50Hz = 0.02초) ──────────────────────────
+        # ── 루프 주기 고정 (50Hz) ────────────────────────────────────
         cv2.imshow("f", frame)
         if cv2.waitKey(1) & 0xFF == 27: break
         
