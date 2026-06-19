@@ -19,20 +19,22 @@ cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
 cap.set(cv2.CAP_PROP_AUTO_WB, 0)
 
 # ── LIDAR BOOT ────────────────────────────────────────────────────────
-lidar_ser.write(bytes([0xA5, 0x40])); time.sleep(2)
+lidar_ser.write(bytes([0xA5, 0x40]))
+time.sleep(2)
 lidar_ser.reset_input_buffer()
-lidar_ser.write(bytes([0xA5, 0x20])); lidar_ser.read(7)
+lidar_ser.write(bytes([0xA5, 0x20]))
+lidar_ser.read(7)
 print("LIDAR OK")
 
 # ── LIDAR ─────────────────────────────────────────────────────────────
-EMA_ALPHA = 0.35
-MEDIAN_K  = 2
+EMA_ALPHA   = 0.35
+MEDIAN_K    = 2
 FRONT_RANGE = 90
 THRESH_SLOW = 55.0
-THRESH_TURN = 35.0
+THRESH_TURN = 30.0
 THRESH_STOP = 18.0
 
-_scan = np.full(360, 150.0, dtype=np.float32)
+_scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
 scan_lock = threading.Lock()
 
@@ -89,36 +91,6 @@ def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
 
-def wall_follow(scan, fm, adir, follow_side):
-    sd = side_dist(scan, follow_side)
-    left_close = side_min(scan, 60, 120)
-    right_close = side_min(scan, 240, 300)
-    sign = 1 if follow_side == "L" else -1
-
-    if fm < THRESH_STOP:
-        return (0.08, adir * 1.1)
-    if fm < THRESH_TURN:
-        return (WALL_TURN_V, adir * 0.85)
-
-    if left_close < THRESH_STOP:
-        return (WALL_V * 0.7, -0.7)
-    if right_close < THRESH_STOP:
-        return (WALL_V * 0.7, 0.7)
-
-    if sd > WALL_TARGET * 2.0:
-        return (WALL_V * 0.7, sign * WALL_LOST_W)
-
-    err = sd - WALL_TARGET
-    w = sign * WALL_KP * err
-    if fm < THRESH_SLOW:
-        blend = float(np.clip((THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
-        w = (1 - blend) * w + blend * adir * 0.5
-        v = WALL_V * (1.0 - 0.4 * blend)
-    else:
-        v = WALL_V
-    w = float(np.clip(w, -0.9, 0.9))
-    return (v, w)
-
 # ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
     v = np.clip(v, -0.4, 0.4)
@@ -164,14 +136,14 @@ def make_mask(frame, hsv, name):
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA = 400
 KP_ROT = 0.030
-W_MIN = 0.25
+W_MIN = 0.20
 APPROACH_V = 0.17
 PARK_SEC = 1.2
 DETECT_CONFIRM = 6
 
 ARRIVE_Y_TOP = int(240 * 0.85)
-ARRIVE_X_MARGIN = 40
-ARRIVE_FORWARD_SEC = 0.7
+ARRIVE_X_MARGIN = 30
+ARRIVE_FORWARD_SEC = 0.8
 ARRIVE_FORWARD_V = 0.15
 ARRIVE_CONFIRM = 8
 
@@ -180,18 +152,22 @@ WALL_SCAN_DIST = 150.0
 WALL_APPROACH_V = 0.20
 WALL_KP = 0.012
 WALL_V = 0.22
-WALL_TURN_V = 0.08
+WALL_TURN_V = 0.10
 WALL_LOST_W = 0.5
 WALL_SEARCH_W = 1.1
 
-# 경계 안전
-BOUNDARY_MODE = "LINE_ON_DARK"   # 또는 "LINE_ON_LIGHT"
+SEARCH_ROT_SEC = 1.0
+SEARCH_FWD_SEC = 0.22
+SEARCH_ROT_W = 0.9
+SEARCH_FWD_V = 0.10
+SEARCH_MAX_TRY = 3
+
+BOUNDARY_MODE = "LINE_ON_DARK"
 BOUNDARY_ROI_Y1 = 170
 BOUNDARY_ROI_Y2 = 239
 BOUNDARY_ROI_X1 = 0
 BOUNDARY_ROI_X2 = 319
 BOUNDARY_CONFIRM = 3
-BOUNDARY_STOP_FRAMES = 6
 BOUNDARY_BACK_SEC = 0.35
 BOUNDARY_TURN_SEC = 0.45
 BOUNDARY_BACK_V = -0.12
@@ -209,9 +185,14 @@ last_seen_x = 160
 park_t = None
 last_cmd = (0.0, 0.0)
 
-safe_state = "OK"      # OK | BACK | TURN
+safe_state = "OK"   # OK | BACK | TURN
 safe_t = None
 boundary_count = 0
+
+search_state = "ROT"   # ROT | FWD
+search_t = None
+search_dir = 1
+search_try = 0
 
 print(f"START | MISSION: {MISSION}")
 
@@ -219,6 +200,7 @@ def boundary_check(frame):
     roi = frame[BOUNDARY_ROI_Y1:BOUNDARY_ROI_Y2 + 1, BOUNDARY_ROI_X1:BOUNDARY_ROI_X2 + 1]
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
     if BOUNDARY_MODE == "LINE_ON_DARK":
         m1 = cv2.inRange(gray, 180, 255)
         m2 = cv2.inRange(hsv, np.array([0, 0, 170]), np.array([179, 80, 255]))
@@ -231,7 +213,13 @@ def boundary_check(frame):
     mask = cv2.medianBlur(mask, 5)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     ratio = float(np.count_nonzero(mask)) / float(mask.size + 1e-6)
-    return ratio, mask
+    return ratio
+
+def cam_w(ex):
+    raw = -KP_ROT * ex
+    if abs(raw) < W_MIN and ex != 0:
+        return -W_MIN if ex > 0 else W_MIN
+    return raw
 
 try:
     while True:
@@ -249,7 +237,8 @@ try:
 
         if mission_idx >= len(MISSION):
             stop_robot()
-            cv2.putText(frame, "ALL MISSIONS DONE", (30, H // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            cv2.putText(frame, "ALL MISSIONS DONE", (30, H // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             cv2.imshow("f", frame)
             if cv2.waitKey(1) & 0xFF == 27:
                 break
@@ -281,15 +270,15 @@ try:
         def centroid_in_arrive_zone():
             return (cx_obj >= arrive_x1 and cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
 
-        boundary_ratio, boundary_mask = boundary_check(frame)
-        cv2.putText(frame, f"BOUNDARY ratio:{boundary_ratio:.2f} state:{safe_state}", (10, 65), 0, 0.5, (0, 255, 255), 1)
+        boundary_ratio = boundary_check(frame)
+        cv2.putText(frame, f"BOUNDARY {boundary_ratio:.2f} SAFE:{safe_state}", (10, 65),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
         if safe_state == "OK":
             if boundary_ratio > 0.12:
                 boundary_count += 1
             else:
                 boundary_count = 0
-
             if boundary_count >= BOUNDARY_CONFIRM:
                 safe_state = "BACK"
                 safe_t = time.time()
@@ -439,12 +428,6 @@ try:
                     err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
                     reduced_v = APPROACH_V * (1.0 - err_ratio)
 
-                    def cam_w(ex):
-                        raw = -KP_ROT * ex
-                        if abs(raw) < W_MIN and ex != 0:
-                            return -W_MIN if ex > 0 else W_MIN
-                        return raw
-
                     if fm >= THRESH_SLOW:
                         v = reduced_v
                         w = cam_w(err_x)
@@ -462,11 +445,28 @@ try:
                     send_cmd(v, w)
 
                 else:
-                    park_state = "SEARCH"
-                    arrive_count = 0
-                    v = 0.0
-                    w = (-1.0 if last_seen_x > cx_mid else 1.0)
-                    send_cmd(v, w)
+                    if search_state == "ROT":
+                        if search_t is None:
+                            search_t = time.time()
+                        if time.time() - search_t < SEARCH_ROT_SEC:
+                            send_cmd(0.0, search_dir * SEARCH_ROT_W)
+                        else:
+                            search_state = "FWD"
+                            search_t = time.time()
+
+                    elif search_state == "FWD":
+                        if time.time() - search_t < SEARCH_FWD_SEC:
+                            send_cmd(SEARCH_FWD_V, 0.0)
+                        else:
+                            search_try += 1
+                            search_dir *= -1
+                            search_state = "ROT"
+                            search_t = time.time()
+
+                    if search_try >= SEARCH_MAX_TRY:
+                        search_try = 0
+                        search_state = "ROT"
+                        park_state = "WALL_SEARCH"
 
         cv2.imshow("f", frame)
         if cv2.waitKey(1) & 0xFF == 27:
