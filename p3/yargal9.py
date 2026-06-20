@@ -19,7 +19,6 @@ cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 time.sleep(1.0)
 cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
 cap.set(cv2.CAP_PROP_AUTO_WB, 0)
-cap.set(cv2.CAP_PROP_BRIGHTNESS, -10)   # v4l2 기준값 0 대비 살짝 낮춤 (더 낮추려면 -20 등으로 조정)
 
 # ── LIDAR BOOT ────────────────────────────────────────────────────────
 lidar_ser.write(bytes([0xA5, 0x40])); time.sleep(2)
