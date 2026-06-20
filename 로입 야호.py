@@ -172,14 +172,14 @@ ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
 # wall-following
-WALL_TARGET   = 20.0
-WALL_SCAN_DIST = 70.0  # 회전 중 정면(fm) 기준 벽 탐색 감지 거리 (cm)
+WALL_TARGET    = 20.0
+WALL_SCAN_DIST = 150.0  # 회전 중 정면(fm) 기준 벽 탐색 감지 거리 (cm)
 WALL_APPROACH_V = 0.20  # 벽으로 접근할 때 속도
-WALL_KP       = 0.012
-WALL_V        = 0.22
-WALL_TURN_V   = 0.10
-WALL_LOST_W   = 0.5
-WALL_SEARCH_W = 1.1     # 벽 탐색 제자리 회전 각속도
+WALL_KP        = 0.012
+WALL_V         = 0.22
+WALL_TURN_V    = 0.10
+WALL_LOST_W    = 0.5
+WALL_SEARCH_W  = 1.1     # 벽 탐색 제자리 회전 각속도
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"   # LIDAR | PARK
@@ -198,6 +198,7 @@ park_state    = "TRACK"   # TRACK | WALL_SEARCH | WALL_APPROACH | WALL_FOLLOW | 
 last_seen_x   = 160
 last_bottom_y = 0
 park_t        = None
+search_t      = None      # ★ 탐색 타이머 변수 추가
 last_cmd      = (0.0, 0.0)
 
 print(f"START | MISSION: {MISSION}")
@@ -454,12 +455,27 @@ try:
 
             # ── 5. 객체 놓침 / 제자리 탐색 (SEARCH) ───────────────
             else:
-                park_state = "SEARCH"
-                arrive_count = 0
-                v = 0.0
-                w = (-1.0 if last_seen_x > cx_mid else 1.0)
-                send_cmd(v, w)
-                cv2.putText(frame, f"SEARCHING: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
+                # 방금 막 객체를 놓쳐서 SEARCH 모드로 진입한 경우 시간 기록
+                if park_state != "SEARCH":
+                    park_state = "SEARCH"
+                    search_t = time.time()
+                    arrive_count = 0
+
+                elapsed_search = time.time() - search_t
+
+                # 제자리 회전 시간이 5초를 초과했다면? -> 벽 타기로 복귀!
+                if elapsed_search > 5.0:
+                    print(f"[{target}] 5초 초과! 완전 놓침 → 벽 타며(WALL_SEARCH) 다시 탐색")
+                    park_state = "WALL_SEARCH"
+                    
+                # 5초가 안 지났다면? -> 마지막 본 방향으로 제자리 회전하며 두리번거리기
+                else:
+                    v = 0.0
+                    w = (-1.0 if last_seen_x > cx_mid else 1.0)
+                    send_cmd(v, w)
+                    # 화면에 몇 초째 찾고 있는지(elapsed_search) 표시
+                    cv2.putText(frame, f"SEARCHING: {target} ({elapsed_search:.1f}s)", 
+                                (10, 25), 0, 0.6, (0, 255, 255), 1)
 
         cv2.imshow("f", frame)
         if cv2.waitKey(1) & 0xFF == 27: break
