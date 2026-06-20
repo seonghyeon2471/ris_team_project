@@ -160,7 +160,7 @@ def make_mask(frame, hsv, name):
 MIN_AREA       = 400
 KP_ROT         = 0.030
 W_MIN          = 0.20
-APPROACH_V     = 0.17
+APPROACH_V     = 0.13
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 
@@ -227,7 +227,7 @@ try:
 
         mask = make_mask(frame, hsv, target)
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        big   = max(cnts, key=cv2.contourArea) if cnts else None
+        big    = max(cnts, key=cv2.contourArea) if cnts else None
         found = big is not None and cv2.contourArea(big) > MIN_AREA
 
         cx_obj, cy_obj = -1, -1
@@ -270,11 +270,9 @@ try:
             # ── A. 벽 탐색 중 제자리 회전 (WALL_SEARCH) ──────────
             if lidar_state == "WALL_SEARCH":
                 if fm < WALL_SCAN_DIST:
-                    l = side_dist(scan, "L")
-                    r = side_dist(scan, "R")
-                    follow_side = "L" if l <= r else "R"
+                    follow_side = "L"
                     lidar_state = "WALL_APPROACH"
-                    print(f"[LIDAR] 회전 중 벽 감지 fm:{fm:.0f}cm, follow_side={follow_side} → 접근 시작")
+                    print(f"[LIDAR] 회전 중 벽 감지 fm:{fm:.0f}cm, 무조건 왼쪽(L) 접근 시작")
                 else:
                     send_cmd(0.0, WALL_SEARCH_W)
                     cv2.putText(frame, f"LIDAR-WALL-SEARCH fm:{fm:.0f}",
@@ -352,11 +350,9 @@ try:
 
                 # 회전하면서 정면(front_min) 기준으로 멀리 있는 벽 감지
                 if fm < WALL_SCAN_DIST:
-                    l = side_dist(scan, "L")
-                    r = side_dist(scan, "R")
-                    follow_side = "L" if l <= r else "R"
+                    follow_side = "L"
                     park_state = "WALL_APPROACH"
-                    print(f"회전 중 벽 감지 fm:{fm:.0f}cm, follow_side={follow_side} → 접근 시작")
+                    print(f"회전 중 벽 감지 fm:{fm:.0f}cm, 무조건 왼쪽(L) 접근 시작")
                     continue
 
                 # 아직 아무것도 없음 → 제자리 좌회전으로 탐색
