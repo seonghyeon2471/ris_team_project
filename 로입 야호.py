@@ -58,6 +58,9 @@ def wall_follow(scan, fm, adir, side):
     v = 0.22 if fm > 55.0 else 0.15
     return (v, w)
 
+def side_dist_avg(scan, side):
+    return np.mean(scan[np.arange(85, 96) % 360 if side == "L" else np.arange(265, 276) % 360])
+
 # ── [4] 설정 및 변수 ────────────────────────────────────────────────────
 MISSION = ["red", "yellow", "blue"]
 COLOR_CFG = {
@@ -69,6 +72,9 @@ COLOR_CFG = {
 mission_idx, mode, park_state = 0, "LIDAR", "TRACK"
 lidar_state, arrive_count, detect_count, follow_side = "WALL_SEARCH", 0, 0, "L"
 t_start = 0
+
+# 주차 직후 상태를 판별하는 플래그 추가
+just_parked = False
 
 # ── [5] 메인 루프 ──────────────────────────────────────────────────────
 try:
@@ -103,7 +109,14 @@ try:
             if detect_count >= 6: mode = "PARK"; park_state = "TRACK"
             else:
                 if lidar_state == "WALL_SEARCH":
-                    if fm < 150: follow_side = "L" if np.mean(scan[85:96]) <= np.mean(scan[265:276]) else "R"; lidar_state = "WALL_APPROACH"
+                    if fm < 150:
+                        # 주차 직후면 가까운 쪽(<=), 평상시면 좀 떨어져 있는 넓은 쪽(>)으로 이동
+                        if just_parked:
+                            follow_side = "L" if np.mean(scan[85:96]) <= np.mean(scan[265:276]) else "R"
+                            just_parked = False
+                        else:
+                            follow_side = "L" if np.mean(scan[85:96]) > np.mean(scan[265:276]) else "R"
+                        lidar_state = "WALL_APPROACH"
                     else: send_cmd(0, 1.1)
                 elif lidar_state == "WALL_APPROACH":
                     if np.mean(scan[85:96] if follow_side == "L" else scan[265:276]) < 26: lidar_state = "WALL_FOLLOW"
@@ -131,7 +144,9 @@ try:
                 stop_robot()
                 if time.time() - t_stop > 2.0:
                     if MISSION[mission_idx] == "yellow": park_state = "SCAN_360"; t_start = time.time()
-                    else: mission_idx += 1; mode = "LIDAR"; lidar_state = "WALL_SEARCH"
+                    else: 
+                        mission_idx += 1; mode = "LIDAR"; lidar_state = "WALL_SEARCH"
+                        just_parked = True # 주차 완료 후 LIDAR 모드 복귀 시 플래그 ON
             elif park_state == "SCAN_360":
                 send_cmd(0.0, 0.5)
                 if time.time() - t_start > 3.0:
@@ -144,7 +159,14 @@ try:
                 if detect_count >= 6: park_state = "TRACK"
                 else:
                     if park_state == "WALL_SEARCH":
-                        if fm < 150: follow_side = "L" if np.mean(scan[85:96]) <= np.mean(scan[265:276]) else "R"; park_state = "WALL_APPROACH"
+                        if fm < 150: 
+                            # 여기서도 동일하게 just_parked 로직 적용
+                            if just_parked:
+                                follow_side = "L" if np.mean(scan[85:96]) <= np.mean(scan[265:276]) else "R"
+                                just_parked = False
+                            else:
+                                follow_side = "L" if np.mean(scan[85:96]) > np.mean(scan[265:276]) else "R"
+                            park_state = "WALL_APPROACH"
                         else: send_cmd(0, 1.1)
                     elif park_state == "WALL_APPROACH":
                         if side_dist_avg(scan, follow_side) < 26: park_state = "WALL_FOLLOW"
@@ -157,6 +179,3 @@ try:
         if cv2.waitKey(1) & 0xFF == 27: break
 except: pass
 finally: stop_robot(); cap.release(); cv2.destroyAllWindows()
-
-def side_dist_avg(scan, side):
-    return np.mean(scan[np.arange(85, 96) % 360 if side == "L" else np.arange(265, 276) % 360])
