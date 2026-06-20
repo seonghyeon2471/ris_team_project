@@ -173,7 +173,7 @@ ARRIVE_CONFIRM     = 8
 
 # wall-following
 WALL_TARGET   = 20.0
-WALL_SCAN_DIST = 150.0  # 회전 중 정면(fm) 기준 벽 탐색 감지 거리 (cm)
+WALL_SCAN_DIST = 70.0  # 회전 중 정면(fm) 기준 벽 탐색 감지 거리 (cm)
 WALL_APPROACH_V = 0.20  # 벽으로 접근할 때 속도
 WALL_KP       = 0.012
 WALL_V        = 0.22
