@@ -77,10 +77,10 @@ def avoid_dir(scan):
 
 def side_dist(scan, side):
     if side == "L":
-        idx = np.arange(85, 96) % 360
+        idx = np.arange(65, 96) % 360
     else:
-        idx = np.arange(265, 276) % 360
-    return float(np.mean(scan[idx]))
+        idx = np.arange(265, 296) % 360
+    return float(np.min(scan[idx]))
 
 def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
@@ -103,7 +103,7 @@ def wall_follow(scan, fm, adir, follow_side):
         return (WALL_V * 0.7,  0.7)
 
     if sd > WALL_TARGET * 2.0:
-        return (WALL_V * 0.7, sign * WALL_LOST_W)
+        return (0.05, sign * WALL_LOST_W)
 
     err = sd - WALL_TARGET
     w   = sign * WALL_KP * err
@@ -162,17 +162,16 @@ WALL_APPROACH_V = 0.20
 WALL_KP        = 0.012
 WALL_V         = 0.22
 WALL_TURN_V    = 0.10
-WALL_LOST_W    = 0.5
+WALL_LOST_W    = 1.3     
 WALL_SEARCH_W  = 1.1     
-
-MISSION_TIMEOUT_SEC = 10.0  # ★ 10초 타임아웃 적용 완료!
+MISSION_TIMEOUT_SEC = 10.0  
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"   
 mission_idx   = 0
 detect_count  = 0
 arrive_count  = 0
-follow_side   = "L"   # ★ 왼쪽 벽 추종 무조건 고정
+follow_side   = "L"   
 lidar_state   = "WALL_SEARCH"
 
 park_state    = "TRACK"   
@@ -208,22 +207,20 @@ try:
         target = MISSION[mission_idx]
         draw   = COLOR_CFG[target]["draw"]
 
-        # ──────────────────────────────────────────────────────────────────────
-        # 🚨 무한 뺑뺑이 방지 감시자 (10초 타임아웃)
-        # ──────────────────────────────────────────────────────────────────────
+        # ★ 화면 왼쪽 상단에 현재 추적 중인 색상 표시 (예: "TARGET: RED")
+        # 해당 색상 고유의 BGR 색상으로 글씨가 나타납니다.
+        cv2.putText(frame, f"TARGET: {target.upper()}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, draw, 2)
+
         is_searching = (mode == "LIDAR") or (mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH"])
         
         if is_searching:
             if time.time() - mission_start_t > MISSION_TIMEOUT_SEC:
-                # 10초 만료 시 바로 도약(SAFE_HOP)으로 진입
-                print(f"🚨🚨 [{target}] {MISSION_TIMEOUT_SEC}초 경과! 다른 장애물로 건너뜁니다.")
                 mode = "PARK"
                 park_state = "SAFE_HOP"
                 hop_start_t = time.time()
                 detect_count = 0
                 continue
         elif park_state not in ["SAFE_HOP"]:
-            # 찾고 있거나 도약 중이 아닐 때는 타이머 리셋
             mission_start_t = time.time()
 
         mask = make_mask(frame, hsv, target)
@@ -283,12 +280,10 @@ try:
         # ══ PARK 모드 ═════════════════════════════════════════════════════
         elif mode == "PARK":
 
-            # ── 🚨 맵 이탈 방지용 안전 도약 (SAFE_HOP) ──
             if park_state == "SAFE_HOP":
                 if found:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
-                        print(f"[{target}] 도약 중 타겟 발견! 추적 시작")
                         detect_count = 0
                         park_state = "TRACK"
                         mission_start_t = time.time()
@@ -297,23 +292,14 @@ try:
 
                 elapsed_hop = time.time() - hop_start_t
                 
-                # 단계 1: 처음 2초간은 제자리 회전하여 기존 벽 외면하기
                 if elapsed_hop < 2.0:
                     send_cmd(0.0, 1.2)
-                    cv2.putText(frame, "HOP: TURNING AWAY", (10, 45), 0, 0.5, (0, 0, 255), 2)
-                
-                # 단계 2: 새로운 장애물 찾아서 건너가기
                 else:
                     if fm > 130.0:
-                        # 허공/맵 밖 구역이면 나가지 말고 회전 유지
                         send_cmd(0.0, 1.0)
-                        cv2.putText(frame, "HOP: SCANNING MAP INWARD", (10, 45), 0, 0.5, (0, 150, 255), 2)
-                    elif fm > 50.0:  # ★ 조건 완화: 50cm 초과 거리일 때 직진 전진
+                    elif fm > 50.0:
                         send_cmd(WALL_V, 0.0)
-                        cv2.putText(frame, f"HOP: MOVING TO NEW ({fm:.0f}cm)", (10, 45), 0, 0.5, (0, 255, 0), 2)
                     else:
-                        # ★ 조건 만족: 50cm 이하의 새로운 장애물 전방 도착!
-                        print("   → 새로운 장애물 무사 도착! 다시 왼쪽 벽 탐색 시작")
                         park_state = "WALL_APPROACH"
                         mission_start_t = time.time()
                         continue
@@ -414,12 +400,6 @@ try:
                 else:
                     v = 0.0; w = (-1.0 if last_seen_x > cx_mid else 1.0)
                     send_cmd(v, w)
-
-        # 디버깅 정보 출력
-        search_time_left = MISSION_TIMEOUT_SEC - (time.time() - mission_start_t)
-        if is_searching and search_time_left > 0:
-            cv2.putText(frame, f"Time: {search_time_left:.1f}s | Side: {follow_side}", 
-                        (10, 20), 0, 0.55, (255, 150, 0), 2)
 
         cv2.imshow("f", frame)
         if cv2.waitKey(1) & 0xFF == 27: break
