@@ -19,6 +19,7 @@ cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 time.sleep(1.0)
 cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
 cap.set(cv2.CAP_PROP_AUTO_WB, 0)
+cap.set(cv2.CAP_PROP_BRIGHTNESS, -10)   # v4l2 기준값 0 대비 살짝 낮춤 (더 낮추려면 -20 등으로 조정)
 
 # ── LIDAR BOOT ────────────────────────────────────────────────────────
 lidar_ser.write(bytes([0xA5, 0x40])); time.sleep(2)
@@ -75,7 +76,19 @@ def front_min(scan):
     return float(np.min(scan[idx]))
 
 def avoid_dir(scan):
-    return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
+    """
+    정면 좌/우(±90도) 중 가장 가까운 장애물 지점이 어느 쪽에 있는지 찾아
+    그 반대쪽으로 회피하도록 방향을 정한다.
+    (기존: 좌/우 평균 거리를 비교해 더 열린 쪽 선택 → 변경: 최근접점 반대쪽 선택)
+    scan[1:90]   : 왼쪽 (인덱스 1~89)
+    scan[271:360]: 오른쪽 (인덱스 271~359)
+    """
+    left_idx  = np.arange(1, 90)
+    right_idx = np.arange(271, 360)
+    left_min  = float(np.min(scan[left_idx]))
+    right_min = float(np.min(scan[right_idx]))
+    # 더 가까운 쪽(=장애물이 있는 쪽)의 반대 방향으로 회피
+    return -1 if left_min <= right_min else 1
 
 # ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
