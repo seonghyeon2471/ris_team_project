@@ -77,18 +77,6 @@ def front_min(scan):
 def avoid_dir(scan):
     return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
 
-def side_min_dist(scan):
-    """좌(1~89도)/우(271~359도) 각각의 최근접 장애물 거리를 반환."""
-    left_idx  = np.arange(1, 90)
-    right_idx = np.arange(271, 360)
-    left_min  = float(np.min(scan[left_idx]))
-    right_min = float(np.min(scan[right_idx]))
-    return left_min, right_min
-
-# 좌/우 둘 다 이 거리 안쪽에 장애물이 있으면 "좁은 통로"로 판단해
-# 한쪽으로 계속 꺾이지 않고 통로 중앙을 보며 직진 통과한다.
-NARROW_GAP_DIST = THRESH_SLOW
-
 # ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
     v = np.clip(v, -0.4, 0.4)
@@ -167,11 +155,6 @@ last_bottom_y = 0
 last_cmd      = (0.0, 0.0)
 
 # ── 지그재그 상태 변수 ────────────────────────────────────────────────
-# zigzag_sign : 현재 좌(+1)/우(-1) 중 어느 쪽으로 틀고 있는지 (시간 기반 토글)
-# zigzag_bias : 장애물 회피 이후 "원래 돌아가야 할 방향" 보정값 (+1 또는 -1)
-#               회피 시 장애물 반대방향(adir)으로 피했다면, 그 다음부터는
-#               장애물이 있던 방향(=피한 반대, 즉 -adir)을 기준으로 지그재그가
-#               흔들리도록 bias를 -adir로 갱신한다. 다음 장애물을 만나면 다시 갱신.
 zigzag_sign      = 1
 zigzag_bias      = 1
 zigzag_next_t    = time.time() + random.uniform(ZIGZAG_MIN_SEC, ZIGZAG_MAX_SEC)
@@ -189,42 +172,21 @@ def zigzag_update_and_dir():
     return zigzag_sign * zigzag_bias
 
 # ── 직진(지그재그) + 라이다 단순 회피 ────────────────────────────────
-def go_straight_cmd(fm, adir, scan):
+def go_straight_cmd(fm, adir):
     """
     장애물이 없으면 좌앞/우앞을 번갈아가며 완만하게 지그재그 전진.
+    장애물을 만나면 adir(더 가까운 쪽 반대방향)으로 즉시 피한다.
+    adir은 매 프레임 새로 계산되므로, 한쪽으로 피하는 도중 반대쪽 장애물이
+    더 가까워지면 그 즉시 회전 방향이 반대로 뒤집혀 따라간다
+    (예: 왼쪽 장애물 피해 오른쪽으로 틀다가, 오른쪽 장애물이 더 가까워지면
+    바로 왼쪽으로 다시 트는 식 — (장애물)(좁은통로)(장애물) 통과용).
 
-    좌우 한쪽에만 장애물이 있을 때는 기존처럼 adir 반대방향(장애물 반대쪽)으로 피한다.
-
-    좌우 양쪽 모두 가까운 거리에 장애물이 있을 때(= 좁은 통로 상황)는
-    "더 가까운 쪽 반대로 계속 꺾기"를 하면 (장애물)(좁은 통로)(장애물) 같은
-    구간에서 양쪽 벽에 번갈아 낚여 통로 진입 직전에 다시 돌아나가는 진동이
-    생기므로, 이 경우엔 한쪽으로 꺾지 않고 좌우 거리차만큼만 살짝 보정하며
-    통로 중앙을 보고 직진 통과한다.
-
-    회피(또는 통로 보정)가 끝나는 순간 zigzag_bias를 갱신해 이후 지그재그가
+    회피가 끝나는 순간 zigzag_bias를 갱신해 이후 지그재그가
     장애물이 있던 방향 쪽으로 다시 틀어지도록 만든다.
     """
     global zigzag_bias, was_avoiding
 
-    left_min, right_min = side_min_dist(scan)
     avoiding_now = fm < THRESH_SLOW
-    narrow_gap   = (left_min < NARROW_GAP_DIST) and (right_min < NARROW_GAP_DIST)
-
-    if avoiding_now and narrow_gap:
-        # 좁은 통로: 한쪽으로 꺾지 않고, 더 먼 쪽으로 살짝만 보정하며 직진 통과
-        was_avoiding = True
-        gap_dir = 1 if left_min >= right_min else -1   # 더 먼(=더 안전한) 쪽
-        diff = abs(left_min - right_min)
-        # 거리차가 클수록 살짝 더 보정, 비슷하면 거의 직진
-        correction = float(np.clip(diff / NARROW_GAP_DIST, 0.0, 1.0))
-        if fm < THRESH_STOP:
-            v = 0.10
-        elif fm < THRESH_TURN:
-            v = WALL_TURN_V
-        else:
-            v = GO_V * 0.7
-        w = gap_dir * 0.35 * correction
-        return (v, w)
 
     if avoiding_now:
         was_avoiding = True
@@ -309,7 +271,7 @@ try:
                 print(f"[{target}] 발견 → 추적 시작")
                 continue
 
-            v, w = go_straight_cmd(fm, adir, scan)
+            v, w = go_straight_cmd(fm, adir)
             send_cmd(v, w)
             cv2.putText(frame, f"GO-STRAIGHT(ZIGZAG) [{target}] fm:{fm:.0f}",
                         (10, 25), 0, 0.5, (0, 255, 0), 1)
