@@ -96,6 +96,47 @@ def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
 
+# ── WALL PARALLEL (평행 유지용 미분 상태) ────────────────────────────
+# side_dist 1개 지점의 시간당 변화율(slope)로 벽에 대한 로봇의 각도를 추정.
+# slope > 0 → 거리가 점점 멀어지는 중 → 로봇 앞쪽이 벽에서 벌어지는 방향(비스듬)
+# slope < 0 → 거리가 점점 가까워지는 중 → 로봇 앞쪽이 벽 쪽으로 파고드는 방향
+# slope ≈ 0 → 거리 변화 없음 → 벽과 평행하게 주행 중
+WALL_KD        = 0.018   # 평행도(slope) 보정 게인 — 클수록 평행 정렬을 강하게 함
+SLOPE_ALPHA    = 0.4     # slope 값 EMA 스무딩 계수 (라이다 노이즈 완화)
+SLOPE_MAX      = 8.0     # cm/s, 이상치 클램프
+
+_sd_prev       = {"L": None, "R": None}
+_slope_ema     = {"L": 0.0, "R": 0.0}
+_sd_t_prev     = {"L": None, "R": None}
+
+def _update_wall_slope(sd, follow_side):
+    """side_dist 변화율을 시간 정규화 + EMA 스무딩해서 반환 (cm/s)."""
+    now = time.time()
+    prev_sd = _sd_prev[follow_side]
+    prev_t  = _sd_t_prev[follow_side]
+
+    if prev_sd is not None and prev_t is not None:
+        dt = now - prev_t
+        if dt > 1e-3:
+            raw_slope = (sd - prev_sd) / dt
+            raw_slope = float(np.clip(raw_slope, -SLOPE_MAX, SLOPE_MAX))
+            _slope_ema[follow_side] = (
+                (1 - SLOPE_ALPHA) * _slope_ema[follow_side] + SLOPE_ALPHA * raw_slope
+            )
+
+    _sd_prev[follow_side]   = sd
+    _sd_t_prev[follow_side] = now
+    return _slope_ema[follow_side]
+
+def reset_wall_slope(side=None):
+    """WALL_SEARCH/WALL_APPROACH로 돌아가거나 follow_side가 바뀔 때 호출해서
+    오래된 미분 상태(다른 위치/시점의 거리값)가 다음 추종에 섞이지 않게 함."""
+    sides = [side] if side else ["L", "R"]
+    for s in sides:
+        _sd_prev[s]   = None
+        _slope_ema[s] = 0.0
+        _sd_t_prev[s] = None
+
 def wall_follow(scan, fm, adir, follow_side):
     sd          = side_dist(scan, follow_side)
     left_close  = side_min(scan, 60, 120)
@@ -134,9 +175,12 @@ def wall_follow(scan, fm, adir, follow_side):
     if sd > WALL_TARGET * 2.0:
         return (WALL_V * 0.7, sign * WALL_LOST_W)
 
-    # ⑥ 정상 wall-following
-    err = sd - WALL_TARGET
-    w   = sign * WALL_KP * err
+    # ⑥ 정상 wall-following — 거리 유지(P) + 평행 유지(D, slope) 동시 제어
+    #    err   : 목표 거리와의 차이 → 가깝거나 멀면 보정 (P항)
+    #    slope : side_dist 변화율 → 0이 아니면 벽에 대해 비스듬한 상태 → 평행하게 보정 (D항)
+    err   = sd - WALL_TARGET
+    slope = _update_wall_slope(sd, follow_side)
+    w     = sign * (WALL_KP * err + WALL_KD * slope)
     if fm < THRESH_SLOW:
         blend = float(np.clip((THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
         w = (1 - blend) * w + blend * adir * 0.5
@@ -307,6 +351,7 @@ try:
 
                 if sd <= WALL_TARGET * 1.3:
                     lidar_state = "WALL_FOLLOW"
+                    reset_wall_slope(follow_side)
                     print(f"[LIDAR] 벽 도달 {follow_side}:{sd:.0f}cm → wall-following 시작")
                 else:
                     sign = 1 if follow_side == "L" else -1
@@ -400,6 +445,7 @@ try:
                 # follow_side 거리가 WALL_TARGET에 도달 → wall-following 시작
                 if sd <= WALL_TARGET * 1.3:
                     park_state = "WALL_FOLLOW"
+                    reset_wall_slope(follow_side)
                     print(f"벽 도달 {follow_side}:{sd:.0f}cm → wall-following 시작")
                     continue
 
