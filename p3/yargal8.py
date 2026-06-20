@@ -102,17 +102,18 @@ def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
 
-def wall_follow(scan, fm, adir, follow_side):
+def wall_follow(scan, fm, follow_side):
     sd          = side_dist(scan, follow_side)
     left_close  = side_min(scan, 60, 120)
     right_close = side_min(scan, 240, 300)
     sign = 1 if follow_side == "L" else -1
 
-    # ① 정면 위험 → adir 긴급 회피
+    # ① 정면 위험 → follow_side 반대쪽(벽에서 멀어지는 쪽)으로 회전하며 코너를 돌아나감.
+    #    전역 adir 대신 항상 follow_side 기준으로 돌아야 코너에서도 "그 벽"을 계속 의식하며 감아 돈다.
     if fm < THRESH_STOP:
-        return (0.08, adir * 1.1)
+        return (0.08, -sign * 1.1)
     if fm < THRESH_TURN:
-        return (WALL_TURN_V, adir * 0.85)
+        return (WALL_TURN_V, -sign * 0.85)
 
     # ② 측면 너무 가까움 → 반대쪽으로
     if left_close < THRESH_STOP:
@@ -129,7 +130,7 @@ def wall_follow(scan, fm, adir, follow_side):
     w   = sign * WALL_KP * err
     if fm < THRESH_SLOW:
         blend = float(np.clip((THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
-        w = (1 - blend) * w + blend * adir * 0.5
+        w = (1 - blend) * w + blend * (-sign * 0.5)
         v = WALL_V * (1.0 - 0.4 * blend)
     else:
         v = WALL_V
@@ -188,17 +189,17 @@ GO_V = 0.20             # 직진 속도
 
 # wall-following (장애물 외벽 추종 — yellow/blue 미션에서만 사용)
 WALL_TARGET     = 20.0
-WALL_APPROACH_V = 0.20  # 벽으로 접근할 때 속도
 WALL_KP         = 0.012
 WALL_V          = 0.22
 WALL_TURN_V     = 0.10
-WALL_LOST_W     = 0.5
+WALL_LOST_W     = 0.7
 
 # ── STATE ─────────────────────────────────────────────────────────────
 # state 종류:
+# state 종류:
 #   GO_STRAIGHT  : 직진하며 목표 색지 탐색 (라이다 단순 회피만 적용)
-#   WALL_APPROACH: 정면 장애물 감지 → 그 장애물 벽으로 접근 (yellow/blue 전용)
-#   WALL_FOLLOW  : 장애물 외벽을 따라가며 탐색 (yellow/blue 전용)
+#   WALL_FOLLOW  : 정면 장애물 감지 → 그 장애물 외벽을 따라가며 탐색 (yellow/blue 전용)
+#                  (멀면 다가가고, 가까우면 추종, 너무 가까우면 코너를 돌아나가는 동작까지 한 함수에서 처리)
 #   TRACK        : 카메라로 색지를 추적
 #   SEARCH       : 추적 중 색지를 놓쳐서 제자리 탐색
 #   FORWARD      : 도착 판정 후 일정 시간 직진
@@ -313,12 +314,12 @@ try:
                     print(f"[{target}] 발견 (정면 클리어) → 추적 시작")
                     continue
 
-                # 정면에 장애물 인식 → 그 장애물 외벽 추종 시작
+                # 정면에 장애물 인식 → 그 장애물 외벽 추종 시작 (접근까지 wall_follow가 처리)
                 if narrow_blocked:
                     l = side_dist(scan, "L")
                     r = side_dist(scan, "R")
                     follow_side = "L" if l <= r else "R"
-                    state = "WALL_APPROACH"
+                    state = "WALL_FOLLOW"
                     print(f"[{target}] 탐색 중 정면 장애물 감지 → {follow_side}벽 추종 시작")
                     continue
 
@@ -326,36 +327,6 @@ try:
                 send_cmd(v, w)
                 cv2.putText(frame, f"GO-STRAIGHT [{target}] fm:{fm:.0f}",
                             (10, 25), 0, 0.5, (0, 255, 0), 1)
-
-        # ══ WALL_APPROACH: 장애물 벽으로 접근 (yellow/blue 전용) ═════
-        elif state == "WALL_APPROACH":
-            if found:
-                detect_count += 1
-            else:
-                detect_count = 0
-
-            if detect_count >= DETECT_CONFIRM and not narrow_blocked:
-                detect_count = 0
-                state = "TRACK"
-                print(f"[{target}] 벽 접근 중 발견 (정면 클리어) → 추적 시작")
-                continue
-
-            sd = side_dist(scan, follow_side)
-            if sd <= WALL_TARGET * 1.3:
-                state = "WALL_FOLLOW"
-                print(f"벽 도달 {follow_side}:{sd:.0f}cm → wall-following 시작")
-                continue
-
-            sign = 1 if follow_side == "L" else -1
-            if fm < THRESH_STOP:
-                v, w = 0.08, adir * 1.0
-            elif fm < THRESH_TURN:
-                v, w = WALL_APPROACH_V * 0.6, adir * 0.7
-            else:
-                v, w = WALL_APPROACH_V, sign * 0.3
-            send_cmd(v, w)
-            cv2.putText(frame, f"WALL-APPROACH [{target}] {follow_side}:{sd:.0f}cm",
-                        (10, 25), 0, 0.5, (0, 200, 0), 1)
 
         # ══ WALL_FOLLOW: 장애물 외벽을 따라가며 탐색 (yellow/blue 전용) ═
         elif state == "WALL_FOLLOW":
@@ -372,7 +343,7 @@ try:
             # 색지가 보여도 정면에 장애물이 남아있으면 카메라 인식을 무시하고
             # 계속 외벽을 따라간다 (위 조건의 not narrow_blocked 에서 자동 처리됨).
 
-            v, w = wall_follow(scan, fm, adir, follow_side)
+            v, w = wall_follow(scan, fm, follow_side)
             send_cmd(v, w)
             sd_disp = side_dist(scan, follow_side)
             cv2.putText(frame, f"WALL-FOLLOW [{target}] {follow_side}:{sd_disp:.0f}cm",
