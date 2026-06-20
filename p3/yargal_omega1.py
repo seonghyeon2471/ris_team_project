@@ -89,6 +89,9 @@ def side_min(scan, start, end):
 
 # ══════════════════════════════════════════════════════════════════════
 #  논문 알고리즘: Right Triangle + Triangle Bisection 혼합 모드
+#  [FIX] 아래 두 함수(_linear_regression_wall, _triangle_bisection_w)와
+#        _corner_recognition, wall_follow 의 PID 리셋 로직을 수정함.
+#        수정 내역은 각 위치에 [FIX] 주석으로 표시.
 # ══════════════════════════════════════════════════════════════════════
 
 # ── 파라미터 ──────────────────────────────────────────────────────────
@@ -133,12 +136,17 @@ def _scan_to_xy(scan, a_start, a_end):
 def _linear_regression_wall(scan, follow_side):
     """
     선형회귀로 근사 벽면을 구한다 (논문 3.1절, 식 3~5).
-    follow_side="R" → 0~45도 구간 사용
-    follow_side="L" → 135~180도 구간 사용 (왼쪽 벽)
+    follow_side="L" → 135~180도 구간 사용 (왼쪽 벽, sin>=0)
+    follow_side="R" → 180~225도 구간 사용 (오른쪽 벽, sin<=0)
+
+    [FIX] 기존 코드는 R 구간으로 (0,45)를 사용했는데, 이 구간도
+    sin(0~45)>=0 이라서 L 구간과 같은 쪽(왼쪽)을 가리키고 있었음.
+    즉 오른쪽 벽을 따라갈 때도 왼쪽 데이터로 회귀선을 만드는 버그였음.
+    L 구간 (135,180)을 전진축(x축) 기준으로 대칭시킨 (180,225)로 교체.
     반환: (slope, intercept) 또는 None
     """
     if follow_side == "R":
-        xs, ys = _scan_to_xy(scan, 0, 45)
+        xs, ys = _scan_to_xy(scan, 180, 225)   # [FIX] (0,45) → (180,225)
     else:
         xs, ys = _scan_to_xy(scan, 135, 180)
 
@@ -185,6 +193,12 @@ def _corner_recognition(scan):
     정면 기준 왼쪽(CORNER_SCAN_L)·오른쪽(CORNER_SCAN_R) 구간에서
     최대거리 데이터와 인접 데이터 비율이 CORNER_RATIO 초과 시 불연속으로 판정.
 
+    [FIX] 기존 코드는 max 지점의 이웃을 "로컬 윈도우 배열 안에서"
+    %len(dists)로 wrap 했기 때문에, 최대값이 윈도우 경계(0번 또는 마지막)에
+    걸리면 실제로 물리적으로 인접하지 않은 반대편 끝 데이터를 이웃으로
+    비교하는 버그가 있었음. 전역 360도 scan 배열을 기준으로 실제
+    이웃 각도(±1도)를 참조하도록 수정.
+
     반환: ("L"|"R"|None, d_max, d_corner_coord)
       - "L"/"R": 코너가 감지된 방향
       - None   : 코너 없음
@@ -196,17 +210,17 @@ def _corner_recognition(scan):
         max_pos   = int(np.argmax(dists))
         d_max     = float(dists[max_pos])
 
-        # 인접 데이터: max_pos ±1 중 더 작은 쪽
+        # [FIX] 로컬 인덱스가 아니라 전역 절대각 기준으로 실제 이웃을 조회
+        abs_max_angle = int(idx_range[max_pos])
         neighbor_vals = []
-        for offset in [-1, 1]:
-            ni = (max_pos + offset) % len(dists)
-            neighbor_vals.append(float(dists[ni]))
+        for offset in (-1, 1):
+            ni = (abs_max_angle + offset) % 360
+            neighbor_vals.append(float(scan[ni]))
         d_neighbor = min(neighbor_vals)
 
         if d_neighbor > 0 and (d_max / d_neighbor) > CORNER_RATIO:
             # 불연속 감지 → 코너 존재
-            abs_angle = (a0 + max_pos) % 360
-            results[side] = (d_max, abs_angle)
+            results[side] = (d_max, abs_max_angle)
 
     if "L" in results:
         return "L", results["L"]
@@ -219,6 +233,12 @@ def _triangle_bisection_w(scan):
     """
     삼각형 이등분 방식 목표경로 각도오차 계산 (논문 4.2절, 식 9~13).
     왼쪽 최대거리 좌표 P_L, 오른쪽 최대거리 좌표 P_R의 중점 방향으로 조향.
+
+    [FIX] 기존 코드는 w = -TB_KP * degrees(theta_err) 로, 코드 전체에서
+    일관되게 쓰이는 부호 규약(+y=왼쪽 방향으로 가고 싶으면 w는 +,
+    avoid_dir / wall_follow 측면회피 로직 참고)과 반대로 동작했음.
+    중점이 왼쪽(yM>0, theta_err>0)에 있으면 왼쪽으로 돌아야(w>0) 하는데
+    마이너스 부호 때문에 반대(빈 공간이 아닌 쪽)로 돌고 있었음. 부호 제거.
     반환: w (angular velocity)
     """
     # 왼쪽 최대거리
@@ -245,16 +265,17 @@ def _triangle_bisection_w(scan):
     xM  = (xL + xR) / 2.0
     yM  = (yL + yR) / 2.0
 
-    # 목표경로 각도오차 (식 13): θ_err = atan2(yM, xM) - atan2(yL, xL) 근사
-    # 논문에서는 로봇 전진 방향(x축)과 목표경로 사이 각도
+    # 목표경로 각도오차 (식 13): 로봇 전진 방향(x축)과 목표경로(중점) 사이 각도
     theta_err = math.atan2(yM, xM)   # x축 기준 중점 방향 각도
-    w = float(np.clip(-TB_KP * math.degrees(theta_err), -0.9, 0.9))
+    # [FIX] 마이너스 부호 제거 — 다른 코드의 부호 규약과 일치시킴
+    w = float(np.clip(TB_KP * math.degrees(theta_err), -0.9, 0.9))
     return w
 
 
 # PID 상태 (면적오차용)
-_rt_prev_err = 0.0
-_rt_prev_t   = time.time()
+_rt_prev_err  = 0.0
+_rt_prev_t    = time.time()
+_prev_corner  = False  # [FIX] 직전 호출이 코너(삼각형 이등분) 모드였는지 추적
 
 def wall_follow(scan, fm, adir, follow_side):
     """
@@ -263,8 +284,13 @@ def wall_follow(scan, fm, adir, follow_side):
     1) 코너 인식 → 삼각형 이등분 방식
     2) 코너 없음 → 직각삼각형 방식 (선형회귀 + 면적오차 PID)
     3) 정면 위험 → 긴급 회피
+
+    [FIX] 코너 모드 ↔ 직선(RT) 모드를 오갈 때 _rt_prev_err/_rt_prev_t가
+    오래된 값으로 남아있어 RT 모드 복귀 직후 미분항(D)이 부정확하게
+    튀던 문제를 수정. 코너 모드에서 돌아온 첫 호출에서는 미분항을 0으로
+    리셋한다.
     """
-    global _rt_prev_err, _rt_prev_t
+    global _rt_prev_err, _rt_prev_t, _prev_corner
 
     left_close  = side_min(scan, 60, 120)
     right_close = side_min(scan, 240, 300)
@@ -286,6 +312,7 @@ def wall_follow(scan, fm, adir, follow_side):
 
     if corner_side is not None:
         # ── 삼각형 이등분 방식 (논문 4.2절) ────────────────────────
+        _prev_corner = True   # [FIX] 코너 모드 진입 표시
         w = _triangle_bisection_w(scan)
         v = TB_V
         if fm < THRESH_SLOW:
@@ -309,7 +336,14 @@ def wall_follow(scan, fm, adir, follow_side):
     S_err, dist_err, angle_err = _area_error(slope, intercept, WALL_TARGET)
 
     # PID (면적오차 → 조향각)
-    now  = time.time()
+    now = time.time()
+    if _prev_corner:
+        # [FIX] 코너 모드에서 막 돌아온 첫 사이클: 미분항 튐 방지를 위해
+        # prev_err를 현재값으로 맞춰서 dS=0이 되도록 리셋
+        _rt_prev_err = S_err
+        _rt_prev_t   = now
+        _prev_corner = False
+
     dt   = max(now - _rt_prev_t, 1e-3)
     dS   = (S_err - _rt_prev_err) / dt
     _rt_prev_err = S_err
