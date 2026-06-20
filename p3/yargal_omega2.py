@@ -4,7 +4,30 @@ import numpy as np
 import time
 import math
 import threading
-from scipy.signal import savgol_filter
+def savgol_filter(data, window_length, polyorder):
+    """
+    Savitzky-Golay 필터 직접 구현 (scipy 없이).
+    논문 수식 (5): p_k^sg = Σ c_j * p_(k+j, 0~N-1)
+    각 점 주변 window_length 구간에 polyorder 차 다항식을 최소제곱 근사하여
+    노이즈를 제거하면서 원본 경로의 주요 특징을 보존.
+    """
+    half = window_length // 2
+    n = len(data)
+    result = np.empty(n, dtype=np.float64)
+
+    # Vandermonde 행렬로 필터 계수 계산 (최소제곱 다항식 근사)
+    x = np.arange(-half, half + 1, dtype=np.float64)
+    A = np.vstack([x ** i for i in range(polyorder + 1)]).T
+    # (A^T A)^-1 A^T 의 첫 번째 행 = 중심점 추정 계수
+    coeffs = np.linalg.solve(A.T @ A, A.T)[0]
+
+    for i in range(n):
+        acc = 0.0
+        for j, c in enumerate(coeffs):
+            idx = max(0, min(n - 1, i - half + j))  # 경계 클램프
+            acc += c * data[idx]
+        result[i] = acc
+    return result
 
 # ── SERIAL ────────────────────────────────────────────────────────────
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
