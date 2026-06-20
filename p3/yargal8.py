@@ -102,17 +102,18 @@ def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
 
-def wall_follow(scan, fm, follow_side):
+def wall_follow(scan, fm_front, follow_side):
     sd          = side_dist(scan, follow_side)
     left_close  = side_min(scan, 60, 120)
     right_close = side_min(scan, 240, 300)
     sign = 1 if follow_side == "L" else -1
 
-    # ① 정면 위험 → follow_side 반대쪽(벽에서 멀어지는 쪽)으로 회전하며 코너를 돌아나감.
-    #    전역 adir 대신 항상 follow_side 기준으로 돌아야 코너에서도 "그 벽"을 계속 의식하며 감아 돈다.
-    if fm < THRESH_STOP:
+    # ① 정면(협각) 위험 → follow_side 반대쪽(벽에서 멀어지는 쪽)으로 회전하며 코너를 돌아나감.
+    #    fm_front는 협각(±30도)이라 지금 따라가는 옆벽(85~96도)과 안 겹친다 —
+    #    그래서 벽에 제대로 붙어 있는 상태에서는 이 분기가 함부로 끼어들지 않는다.
+    if fm_front < THRESH_STOP:
         return (0.08, -sign * 1.1)
-    if fm < THRESH_TURN:
+    if fm_front < THRESH_TURN:
         return (WALL_TURN_V, -sign * 0.85)
 
     # ② 측면 너무 가까움 → 반대쪽으로
@@ -128,8 +129,8 @@ def wall_follow(scan, fm, follow_side):
     # ④ 정상 wall-following
     err = sd - WALL_TARGET
     w   = sign * WALL_KP * err
-    if fm < THRESH_SLOW:
-        blend = float(np.clip((THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
+    if fm_front < THRESH_SLOW:
+        blend = float(np.clip((THRESH_SLOW - fm_front) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
         w = (1 - blend) * w + blend * (-sign * 0.5)
         v = WALL_V * (1.0 - 0.4 * blend)
     else:
@@ -245,10 +246,9 @@ try:
         cx_mid = W // 2
         hsv    = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         scan   = get_scan()
-        fm     = front_min(scan)
+        fm     = front_min(scan)          # 광각(±90도) — 일반 회피, 충돌 안전용
         adir   = avoid_dir(scan)
-        # "정면에 장애물이 있다"의 판정은 협각 기준 (옆벽 추종 중에도 오작동하지 않도록)
-        narrow_blocked = front_min_narrow(scan) < OBSTACLE_NARROW_DIST
+        fm_narrow = front_min_narrow(scan)  # 협각(±30도) — 옆벽을 빼고 "진짜 정면"만 보는 값
 
         if mission_idx >= len(MISSION):
             stop_robot()
@@ -307,20 +307,22 @@ try:
                 cv2.putText(frame, f"GO-STRAIGHT [{target}] fm:{fm:.0f}",
                             (10, 25), 0, 0.5, (0, 255, 0), 1)
             else:
-                # ② yellow/blue: 색지 발견 + 정면 클리어 → 바로 추적
-                if detect_count >= DETECT_CONFIRM and not narrow_blocked:
+                # ② yellow/blue: 색지 발견 + "진짜 정면(협각)" 클리어 → 추적으로 전환
+                if detect_count >= DETECT_CONFIRM and fm_narrow >= OBSTACLE_NARROW_DIST:
                     detect_count = 0
                     state = "TRACK"
                     print(f"[{target}] 발견 (정면 클리어) → 추적 시작")
                     continue
 
-                # 정면에 장애물 인식 → 그 장애물 외벽 추종 시작 (접근까지 wall_follow가 처리)
-                if narrow_blocked:
+                # 일반 회피가 반응하기 시작하는 그 순간(광각 fm) 바로 외벽 추종으로 커밋.
+                # 협각으로만 판단하면 장애물이 살짝 비스듬할 때 회피가 먼저 채가서
+                # wall-follow로 못 넘어가는 문제가 있었음.
+                if fm < THRESH_SLOW:
                     l = side_dist(scan, "L")
                     r = side_dist(scan, "R")
                     follow_side = "L" if l <= r else "R"
                     state = "WALL_FOLLOW"
-                    print(f"[{target}] 탐색 중 정면 장애물 감지 → {follow_side}벽 추종 시작")
+                    print(f"[{target}] 탐색 중 장애물 감지(fm:{fm:.0f}) → {follow_side}벽 추종 시작")
                     continue
 
                 v, w = go_straight_cmd(fm, adir)
@@ -335,15 +337,15 @@ try:
             else:
                 detect_count = 0
 
-            if detect_count >= DETECT_CONFIRM and not narrow_blocked:
+            if detect_count >= DETECT_CONFIRM and fm_narrow >= OBSTACLE_NARROW_DIST:
                 detect_count = 0
                 state = "TRACK"
                 print(f"[{target}] wall-following 중 발견 (정면 클리어) → 추적 시작")
                 continue
-            # 색지가 보여도 정면에 장애물이 남아있으면 카메라 인식을 무시하고
-            # 계속 외벽을 따라간다 (위 조건의 not narrow_blocked 에서 자동 처리됨).
+            # 색지가 보여도 "진짜 정면(협각)"에 장애물이 남아있으면 카메라 인식을 무시하고
+            # 계속 외벽을 따라간다 (위 조건의 fm_narrow 체크에서 자동 처리됨).
 
-            v, w = wall_follow(scan, fm, follow_side)
+            v, w = wall_follow(scan, fm_narrow, follow_side)
             send_cmd(v, w)
             sd_disp = side_dist(scan, follow_side)
             cv2.putText(frame, f"WALL-FOLLOW [{target}] {follow_side}:{sd_disp:.0f}cm",
