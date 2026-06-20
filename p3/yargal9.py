@@ -130,7 +130,8 @@ GO_V = 0.20             # 직진 속도
 # 지그재그(좌앞/우앞) 탐색 파라미터
 ZIGZAG_MIN_SEC = 1.0     # 좌/우 한 쪽으로 유지하는 최소 시간
 ZIGZAG_MAX_SEC = 2.0     # 좌/우 한 쪽으로 유지하는 최대 시간
-ZIGZAG_W       = 0.65    # 지그재그 회전 강도 (좀 더 뚜렷하게 꺾이는 좌앞/우앞)
+ZIGZAG_W       = 1.1     # 지그재그 회전 강도 (강하게 꺾이는 좌앞/우앞)
+SEARCH_W       = 1.4     # SEARCH 상태 제자리 회전 속도
 
 # 장애물 회피 시 사용하는 회전 속도(직진 v는 그대로, 급커브용 보조값)
 WALL_TURN_V    = 0.10
@@ -321,7 +322,7 @@ try:
                 state = "SEARCH"
                 arrive_count = 0
                 v = 0.0
-                w = (-1.0 if last_seen_x > cx_mid else 1.0)
+                w = (-SEARCH_W if last_seen_x > cx_mid else SEARCH_W)
                 send_cmd(v, w)
                 cv2.putText(frame, f"SEARCHING: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
 
@@ -331,7 +332,7 @@ try:
                 state = "TRACK"
                 continue
             v = 0.0
-            w = (-1.0 if last_seen_x > cx_mid else 1.0)
+            w = (-SEARCH_W if last_seen_x > cx_mid else SEARCH_W)
             send_cmd(v, w)
             cv2.putText(frame, f"SEARCHING: {target}", (10, 25), 0, 0.6, (0, 255, 255), 1)
 
