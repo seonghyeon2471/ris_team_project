@@ -65,6 +65,9 @@ def lidar_loop():
 
 threading.Thread(target=lidar_loop, daemon=True).start()
 
+print("WAITING FOR FIRST SCAN DATA...")
+time.sleep(1.5)
+
 def get_scan():
     with scan_lock: return _scan_pub.copy()
 
@@ -75,11 +78,9 @@ def front_min(scan):
 def avoid_dir(scan):
     return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
 
-# ★ 수정: 객체가 없을 때 넓게 트인 쪽(adir)이 아닌, "반대쪽(벽이 더 가까운 쪽)"을 추종하도록 변경
 def decide_follow_side(adir, found, cx_obj, cx_mid):
     if found and cx_obj >= 0:
         return "L" if cx_obj < cx_mid else "R"
-    # adir == 1 이면 왼쪽이 트인 것이므로 오히려 우벽("R") 추종, 반대면 좌벽("L") 추종
     return "R" if adir == 1 else "L"
 
 def side_dist(scan, side):
@@ -93,38 +94,63 @@ def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
 
-def wall_follow(scan, fm, adir, follow_side):
+# ★ 수정된 wall_follow 함수: found 여부와 카메라 좌표계를 인자로 받아 조향 편향 연산 수행
+def wall_follow(scan, fm, adir, follow_side, found, last_seen_x, cx_mid):
     sd          = side_dist(scan, follow_side)
     left_close  = side_min(scan, 240, 300)   
     right_close = side_min(scan, 60, 120)    
     sign = 1 if follow_side == "L" else -1
 
+    # [안전장치 1] 전방 장애물 극근접 상황 발생 시 편향 무시하고 즉시 충돌 회피
     if fm < THRESH_STOP:
         return (0.08, adir * 1.1)
     if fm < THRESH_TURN:
         return (WALL_TURN_V, adir * 0.85)
 
+    # [안전장치 2] 측면 벽 극근접 상황 발생 시 강제 밀어내기 조향 우선 수행
     if left_close < SIDE_STOP:
         return (WALL_V * 0.7, -0.7)
     if right_close < SIDE_STOP:
         return (WALL_V * 0.7,  0.7)
 
+    # 병목(좁은 통로) 진입 시 중앙 유지 주행
     if left_close < BOTTLENECK_ENTER and right_close < BOTTLENECK_ENTER:
         err_center = left_close - right_close   
         w_center = float(np.clip(CENTER_KP * err_center, -0.9, 0.9))
         return (BOTTLENECK_V, w_center)
 
+    # 추종할 벽을 완전히 놓친 경우 우회 회전
     if sd > WALL_TARGET * 2.0:
         return (0.05, sign * WALL_LOST_W)
 
+    # 기본 벽 추종 연산 (거리 오차 기반 PID 조향)
     err = sd - WALL_TARGET
     w   = sign * WALL_KP * err
+    
+    # 전방 감속 구간 융합 알고리즘
     if fm < THRESH_SLOW:
         blend = float(np.clip((THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
         w = (1 - blend) * w + blend * adir * 0.5
         v = WALL_V * (1.0 - 0.4 * blend)
     else:
         v = WALL_V
+
+    # ─── ★ 장애물 뒤 색상객체 추적을 위한 조향 편향(Bias) 로직 ───
+    if not found:
+        # 마지막으로 관측된 객체 방향 판단 (화면 왼쪽: + 조향, 오른쪽: - 조향)
+        obj_dir = 1.0 if last_seen_x < cx_mid else -1.0
+        
+        # 가고자 하는 편향 방향에 라이다 기준 충돌 위험이 없을 때만 편향 적용
+        is_safe = True
+        if obj_dir > 0 and left_close < (WALL_TARGET * 1.3):  # 왼쪽으로 편향하려는데 왼쪽 벽이 이미 가까운 경우
+            is_safe = False
+        if obj_dir < 0 and right_close < (WALL_TARGET * 1.3): # 오른쪽으로 편향하려는데 오른쪽 벽이 이미 가까운 경우
+            is_safe = False
+            
+        if is_safe:
+            # 기본 벽 추종 조향값에 진행 방향 편향 추가 (0.25 값은 환경에 맞게 0.1~0.4 조절 가능)
+            w += (obj_dir * 0.25)
+
     w = float(np.clip(w, -0.9, 0.9))
     return (v, w)
 
@@ -281,7 +307,6 @@ try:
                     follow_side = decide_follow_side(adir, found, cx_obj, cx_mid)
                     lidar_state = "WALL_APPROACH"
                 else: 
-                    # ★ 수정: 막혀 있는(벽이 더 가까운) 방향 쪽으로 회전하며 서치하도록 변경
                     send_cmd(0.0, -adir * WALL_SEARCH_W)
 
             elif lidar_state == "WALL_APPROACH":
@@ -294,7 +319,8 @@ try:
                     else: send_cmd(WALL_APPROACH_V, sign * 0.3)
 
             elif lidar_state == "WALL_FOLLOW":
-                v, w = wall_follow(scan, fm, adir, follow_side)
+                # ★ 수정: 새로운 wall_follow 호출 방식 (인자 추가)
+                v, w = wall_follow(scan, fm, adir, follow_side, found, last_seen_x, cx_mid)
                 send_cmd(v, w)
 
         # ══ PARK 모드 ═════════════════════════════════════════════════════
@@ -359,7 +385,6 @@ try:
                     follow_side = decide_follow_side(adir, found, cx_obj, cx_mid)
                     park_state = "WALL_APPROACH"
                     continue
-                # ★ 수정: 피드백 일관성을 위해 PARK 내부의 WALL_SEARCH 제자리 서치 방향도 동일하게 변경
                 send_cmd(0.0, -adir * WALL_SEARCH_W)
 
             elif park_state == "WALL_APPROACH":
@@ -385,7 +410,8 @@ try:
                         detect_count = 0; park_state = "TRACK"; continue
                 else: detect_count = 0
 
-                v, w = wall_follow(scan, fm, adir, follow_side)
+                # ★ 수정: 새로운 wall_follow 호출 방식 (인자 추가)
+                v, w = wall_follow(scan, fm, adir, follow_side, found, last_seen_x, cx_mid)
                 send_cmd(v, w)
 
             elif park_state == "TRACK":
