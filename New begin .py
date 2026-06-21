@@ -131,7 +131,7 @@ WALL_APPROACH_V  = 0.20
 WALL_LOST_W      = 0.45
 WALL_SEARCH_W    = 1.1
 LOOKAHEAD_TIME   = 0.35
-MAX_W            = *********.90
+MAX_W            = 0.90
 
 def wall_follow(scan, fm, adir, follow_side, current_v=None):
     if current_v is None:
@@ -249,11 +249,11 @@ SEARCH_W            = 0.85
 SEARCH_FULL_ROT_SEC = float(2 * np.pi / SEARCH_W)
 
 # ========== NEW: 센트로이드 추적 파라미터 ==========
-CENTROID_TRACK_V     = 0.12      # 센트로이드 추적 속도
-CENTROID_KP          = 0.035     # 센트로이드 회전 게인
-CENTROID_MIN_DIST    = 8.0       # 색지 근접 정지 거리 (cm)
-CENTROID_ALIGN_TOL   = 15        # 중심 정렬 허용 오차 (pixel)
-CENTROID_STABLE_CNT  = 10        # 안정화 카운트 (센트로이드 정렬 유지 횟수)
+CENTROID_TRACK_V     = 0.12
+CENTROID_KP          = 0.035
+CENTROID_MIN_DIST    = 8.0
+CENTROID_ALIGN_TOL   = 15
+CENTROID_STABLE_CNT  = 10
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode            = "LIDAR"
@@ -340,35 +340,28 @@ try:
         arrive_x2 = cx_mid + ARRIVE_X_MARGIN
         cv2.rectangle(frame, (arrive_x1, ARRIVE_Y_TOP), (arrive_x2, H - 1), (0, 0, 255), 1)
 
-        # ========== NEW: 센트로이드가 ARRIVE_ZONE 내인지 확인 ==========
         def centroid_in_arrive_zone():
             return (arrive_x1 <= cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
 
-        # ========== NEW: 센트로이드 추적 제어 ==========
         def centroid_track_control(cx_obj, cx_mid, last_bottom_y, ARRIVE_Y_TOP):
             err_x = cx_obj - cx_mid
             err_y = last_bottom_y - ARRIVE_Y_TOP
             
-            # 거리 기반 속도 제어 (색지에 가까우면 감속)
-            if err_y < CENTROID_MIN_DIST * 3:  # 매우 가까움
+            if err_y < CENTROID_MIN_DIST * 3:
                 v = 0.05
-            elif err_y < CENTROID_MIN_DIST * 6:  # 가까움
+            elif err_y < CENTROID_MIN_DIST * 6:
                 v = 0.08
             else:
                 v = CENTROID_TRACK_V
             
-            # 편차 기반 회전 제어
             w = -CENTROID_KP * err_x
             
-            # 최소 회전 게인 적용
             if abs(w) < W_MIN and err_x != 0:
                 w = -W_MIN if err_x > 0 else W_MIN
             
             return v, w, err_x, err_y
 
-        # ── LIDAR 모드 ───────────────────────────────────────────────
         if mode == "LIDAR":
-            # ========== NEW: 센트로이드 추적 모드 추가 ==========
             if found:
                 detect_count += 1
             else:
@@ -376,7 +369,6 @@ try:
 
             if detect_count >= DETECT_CONFIRM:
                 detect_count = 0
-                # ========== WALL_FOLLOW 대신 CENTROID 모드 전환 ==========
                 mode = "CENTROID"
                 arrive_count = 0
                 print(f"[{target}] LIDAR → CENTROID 모드 전환!")
@@ -407,19 +399,16 @@ try:
                     wall_follow_debug(scan, fm, adir, follow_side, WALL_V)
                 send_cmd(v, w)
 
-        # ========== NEW: CENTROID 모드 ───────────────────────────────────
         elif mode == "CENTROID":
             if found:
                 v, w, err_x, err_y = centroid_track_control(cx_obj, cx_mid, last_bottom_y, ARRIVE_Y_TOP)
                 send_cmd(v, w)
                 
-                # 안정화 카운트 (센트로이드 정렬 유지)
                 if abs(err_x) < CENTROID_ALIGN_TOL and err_y < CENTROID_MIN_DIST * 2:
                     arrive_count += 1
                 else:
                     arrive_count = 0
                 
-                # 센트로이드 주차 완료
                 if arrive_count >= CENTROID_STABLE_CNT:
                     print(f"✅ [{target}] 센트로이드 주차 완료! (count={arrive_count})")
                     stop_robot()
@@ -429,11 +418,9 @@ try:
                     continue
             else:
                 detect_count = 0
-                # 타겟 못 찾으면 회전 탐색
                 send_cmd(0.0, WALL_SEARCH_W)
                 cv2.putText(frame, "CENTROID: SEARCHING", (10, 45), 0, 0.5, (255, 0, 0), 2)
 
-        # ── PARK 모드 ───────────────────────────────────────────────
         elif mode == "PARK":
 
             if park_state == "SAFE_HOP":
@@ -492,7 +479,6 @@ try:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
                         detect_count = 0
-                        # ========== NEW: CENTROID_TRACK 상태 전환 ==========
                         park_state = "CENTROID_TRACK"
                         arrive_count = 0
                         print(f"[{target}] PARK → CENTROID_TRACK 상태 전환!")
@@ -510,7 +496,6 @@ try:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
                         detect_count = 0
-                        # ========== NEW: CENTROID_TRACK 상태 전환 ==========
                         park_state = "CENTROID_TRACK"
                         arrive_count = 0
                         continue
@@ -536,7 +521,6 @@ try:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
                         detect_count = 0
-                        # ========== NEW: CENTROID_TRACK 상태 전환 ==========
                         park_state = "CENTROID_TRACK"
                         arrive_count = 0
                         continue
@@ -547,19 +531,16 @@ try:
                     wall_follow_debug(scan, fm, adir, follow_side, WALL_V)
                 send_cmd(v, w)
 
-            # ========== NEW: CENTROID_TRACK 상태 ────────────────────────
             elif park_state == "CENTROID_TRACK":
                 if found:
                     v, w, err_x, err_y = centroid_track_control(cx_obj, cx_mid, last_bottom_y, ARRIVE_Y_TOP)
                     send_cmd(v, w)
                     
-                    # 안정화 카운트
                     if abs(err_x) < CENTROID_ALIGN_TOL and err_y < CENTROID_MIN_DIST * 2:
                         arrive_count += 1
                     else:
                         arrive_count = 0
                     
-                    # 센트로이드 주차 완료
                     if arrive_count >= CENTROID_STABLE_CNT:
                         print(f"✅ [{target}] CENTROID_TRACK 주차 완료! (count={arrive_count})")
                         stop_robot()
@@ -569,7 +550,6 @@ try:
                         continue
                 else:
                     detect_count = 0
-                    # 타겟 잃으면 벽 탐색 재시작
                     park_state = "WALL_SEARCH"
                     print(f"[{target}] 타겟 잃음! WALL_SEARCH 재시작")
 
@@ -618,13 +598,11 @@ try:
                 else:
                     send_cmd(0.0, -SEARCH_W if last_seen_x > cx_mid else SEARCH_W)
 
-        # ── 디버그 오버레이 ───────────────────────────────────────────
         search_time_left = MISSION_TIMEOUT_SEC - (time.time() - mission_start_t)
         if is_searching and search_time_left > 0:
             cv2.putText(frame, f"Timeout: {search_time_left:.1f}s | Side:{follow_side}",
                         (10, 20), 0, 0.50, (255, 150, 0), 2)
 
-        # ========== NEW: 센트로이드 오버레이 ==========
         if mode == "CENTROID" or park_state == "CENTROID_TRACK":
             err_x = cx_obj - cx_mid if found else 0
             err_y = last_bottom_y - ARRIVE_Y_TOP if found else 0
@@ -634,7 +612,6 @@ try:
                 f"CENTROID: dx={err_x:.1f} dy={err_y:.1f} cnt={arrive_count}",
                 (10, 40), 0, 0.45, color, 1)
             
-            # 센트로이드 추적 라인 표시
             if found:
                 cv2.line(frame, (cx_mid, ARRIVE_Y_TOP), (cx_obj, last_bottom_y), (0, 255, 255), 2)
                 cv2.circle(frame, (cx_obj, last_bottom_y), 8, (255, 255, 0), 2)
