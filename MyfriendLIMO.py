@@ -14,6 +14,7 @@ cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+cap.set(cv2.CAP_PROP_FPS, 60)        # [PATCH] FPS 상향 시도 (카메라가 지원하는 한도까지)
 time.sleep(1.0)
 cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
 cap.set(cv2.CAP_PROP_AUTO_WB, 0)
@@ -126,6 +127,10 @@ WALL_SEARCH_W   = 1.1
 MAX_W           = 0.90
 WALL_SCAN_DIST  = 150.0
 
+# [PATCH] 벽 탐색을 제자리 회전 대신 직진 + 약한 회전(나선형)으로 변경
+FIND_WALL_V     = 0.16   # 벽을 찾는 동안 전진 속도
+FIND_WALL_W     = 0.45   # 벽을 찾는 동안 함께 줄 회전 속도 (방향 탐색용)
+
 def wall_follow(scan, fm, adir):
     left_close  = side_min(scan, 60, 120)
     right_close = side_min(scan, 240, 300)
@@ -172,7 +177,7 @@ def make_mask(frame, hsv, name):
     return cv2.bitwise_and(m, bm)
 
 # ── PARAMS ────────────────────────────────────────────────────────────
-MIN_AREA           = 400
+MIN_AREA           = 250
 KP_ROT             = 0.012
 W_MIN              = 0.12
 DEADBAND_PX        = 8
@@ -188,6 +193,17 @@ ARRIVE_FORWARD_SEC = 0.88
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
+# [PATCH] 상태 정체(stuck) 탈출 로직 파라미터
+STUCK_TIMEOUT   = 6.0   # 한 상태에 이 시간(초) 이상 머무르면 탈출 시도
+ESCAPE_W        = 1.2   # 탈출 시 각속도 크기
+ESCAPE_TURN_SEC = None  # 아래에서 180도 기준으로 자동 계산
+
+# [PATCH] 측면으로 색을 놓쳤을 때 마지막 방향으로 재탐색하는 파라미터
+SIDE_LOST_V        = 0.10   # 재탐색 중 전진 속도 (살짝 전진하며 회전)
+SIDE_LOST_W        = 1.0   # 재탐색 중 회전 각속도 크기
+SIDE_LOST_TIMEOUT  = 2.0    # 이 시간(초) 동안 재탐색해도 못 찾으면 FIND_WALL로 폴백
+SIDE_EDGE_MARGIN   = 40     # 화면 가장자리로부터 이 픽셀 이내에서 놓쳤을 때만 "측면 이탈"로 판단
+
 def cam_w(ex):
     if abs(ex) < DEADBAND_PX:
         return 0.0
@@ -195,6 +211,12 @@ def cam_w(ex):
     if abs(raw) < W_MIN:
         return -W_MIN if ex > 0 else W_MIN
     return raw
+
+# [PATCH] 180도 회전에 필요한 시간 추정
+# send_cmd에서 w는 np.clip(-1.6, 1.6) 범위지만 실제 각속도(rad/s) 단위가
+# 시스템마다 다를 수 있어, 우선 "약 180도 = pi(rad)" 기준으로 ESCAPE_W를 각속도(rad/s)로 가정.
+# 실제 로봇에서 각속도 단위가 다르면 ESCAPE_TURN_SEC만 직접 보정하면 됨.
+ESCAPE_TURN_SEC = float(np.pi / ESCAPE_W)  # ≈ 2.62초 (필요시 실측 후 조정)
 
 # ── STATE ─────────────────────────────────────────────────────────────
 # FIND_WALL → APPROACH_WALL → FOLLOW_WALL → (색 검출 시) TRACK → FORWARD → PARKING
@@ -206,6 +228,23 @@ lost_count   = 0
 park_t       = None
 last_cmd     = (0.0, 0.0)
 filtered_cx  = None
+
+# [PATCH] 상태별 정체 감지용 타이머 / 탈출 상태
+state_enter_t   = time.time()
+escaping        = False
+escape_t        = None
+escape_dir      = 1
+state_before_escape = None
+
+# [PATCH] 측면 이탈 재탐색용 상태
+last_seen_side  = 0     # -1: 화면 왼쪽으로 사라짐, +1: 오른쪽으로 사라짐, 0: 정보 없음
+side_lost_t     = None  # 측면 재탐색 시작 시각
+
+def enter_state(new_state):
+    """상태 전환 시 정체 타이머 리셋을 위한 헬퍼"""
+    global state, state_enter_t
+    state = new_state
+    state_enter_t = time.time()
 
 print(f"START | MISSION: {MISSION}")
 
@@ -257,27 +296,57 @@ try:
         def in_arrive_zone():
             return arrive_x1 <= cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP
 
+        # [PATCH] ── 정체(stuck) 탈출 체크 ───────────────────────────
+        # FORWARD/PARKING은 원래 시간 기반으로 짧게 끝나는 상태라 탈출 로직에서 제외.
+        # 그 외 상태(FIND_WALL/APPROACH_WALL/FOLLOW_WALL/TRACK)에서만 정체를 감시.
+        if not escaping and state in ("FIND_WALL", "APPROACH_WALL", "FOLLOW_WALL", "TRACK"):
+            if time.time() - state_enter_t >= STUCK_TIMEOUT:
+                escaping = True
+                escape_t = time.time()
+                state_before_escape = state
+                escape_dir = -adir if adir != 0 else 1  # 현재 빈 공간의 반대쪽(=막힌 방향 반대)으로 회전
+                print(f"[ESCAPE] '{state_before_escape}' 상태 {STUCK_TIMEOUT}s 초과 → 반대방향 180도 회전 탈출")
+
+        if escaping:
+            if time.time() - escape_t < ESCAPE_TURN_SEC:
+                send_cmd(0.0, escape_dir * ESCAPE_W)
+                cv2.imshow("f", frame)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    break
+                continue
+            else:
+                escaping = False
+                detect_count = 0
+                lost_count   = 0
+                arrive_count = 0
+                enter_state("FIND_WALL")
+                cv2.imshow("f", frame)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    break
+                continue
+
         # ── 상태 머신 ─────────────────────────────────────────────
         if state in ("FIND_WALL", "APPROACH_WALL", "FOLLOW_WALL"):
             if found:
                 detect_count += 1
                 if detect_count >= DETECT_CONFIRM:
                     detect_count = 0
-                    state = "TRACK"
+                    enter_state("TRACK")
                     continue
             else:
                 detect_count = 0
 
             if state == "FIND_WALL":
                 if fm < WALL_SCAN_DIST:
-                    state = "APPROACH_WALL"
+                    enter_state("APPROACH_WALL")
                 else:
-                    send_cmd(0.0, WALL_SEARCH_W)
+                    # [PATCH] 제자리 회전 대신 전진하며 살짝 회전(나선형 탐색)
+                    send_cmd(FIND_WALL_V, adir * FIND_WALL_W)
 
             elif state == "APPROACH_WALL":
                 wall_dist, _, valid = estimate_wall(scan)
                 if valid and wall_dist <= WALL_TARGET * 1.4:
-                    state = "FOLLOW_WALL"
+                    enter_state("FOLLOW_WALL")
                 elif fm < THRESH_STOP:
                     send_cmd(0.08, adir * 1.0)
                 elif fm < THRESH_TURN:
@@ -292,11 +361,20 @@ try:
         elif state == "TRACK":
             if found:
                 lost_count = 0
+                side_lost_t = None  # [PATCH] 다시 찾았으니 재탐색 타이머 리셋
+
+                # [PATCH] 화면 가장자리 근처에서 보이고 있다면 "이쪽으로 사라질 가능성"을 미리 기록
+                if cx_obj <= SIDE_EDGE_MARGIN:
+                    last_seen_side = -1   # 왼쪽 가장자리 쪽
+                elif cx_obj >= (W - SIDE_EDGE_MARGIN):
+                    last_seen_side = 1    # 오른쪽 가장자리 쪽
+                # 중앙 근처에 있으면 last_seen_side는 갱신하지 않고 이전 값 유지
+
                 arrive_count = arrive_count + 1 if in_arrive_zone() else 0
 
                 if arrive_count >= ARRIVE_CONFIRM:
                     arrive_count = 0
-                    state = "FORWARD"
+                    enter_state("FORWARD")
                     park_t = time.time()
                     send_cmd(ARRIVE_FORWARD_V, 0.0)
                     continue
@@ -320,10 +398,28 @@ try:
                 send_cmd(v, w)
             else:
                 lost_count += 1
-                if lost_count >= LOST_CONFIRM:
+
+                # [PATCH] 측면으로 사라진 적이 있으면(last_seen_side != 0) 그 방향으로 회전하며 재탐색
+                if last_seen_side != 0:
+                    if side_lost_t is None:
+                        side_lost_t = time.time()
+
+                    if time.time() - side_lost_t < SIDE_LOST_TIMEOUT:
+                        # 오른쪽(+1)으로 사라졌으면 오른쪽으로 회전(+w)하며 따라가 다시 센트로이드 포착
+                        # 왼쪽(-1)으로 사라졌으면 왼쪽으로 회전(-w)
+                        send_cmd(SIDE_LOST_V, last_seen_side * SIDE_LOST_W)
+                    else:
+                        # 재탐색 시간 초과 → 포기하고 벽 추종으로 폴백
+                        lost_count   = 0
+                        arrive_count = 0
+                        last_seen_side = 0
+                        side_lost_t  = None
+                        enter_state("FIND_WALL")
+                elif lost_count >= LOST_CONFIRM:
+                    # 측면 이탈 정보가 없는 일반적인 분실(예: 가까이서 갑자기 가림 등)은 기존처럼 처리
                     lost_count   = 0
                     arrive_count = 0
-                    state = "FIND_WALL"
+                    enter_state("FIND_WALL")
                 else:
                     send_cmd(*last_cmd)
 
@@ -341,7 +437,9 @@ try:
                 mission_idx += 1
                 detect_count = 0
                 arrive_count = 0
-                state = "FIND_WALL"
+                last_seen_side = 0   # [PATCH] 다음 미션을 위해 이전 색의 측면 기억 초기화
+                side_lost_t = None
+                enter_state("FIND_WALL")
 
         cv2.rectangle(frame, (arrive_x1, ARRIVE_Y_TOP), (arrive_x2, H - 1), (0, 0, 255), 1)
         cv2.imshow("f", frame)
