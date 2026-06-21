@@ -133,6 +133,33 @@ WALL_SEARCH_W    = 1.1
 LOOKAHEAD_TIME   = 0.35
 MAX_W            = 0.90
 
+# ── 코너 회전 파라미터 ────────────────────────────────────────────────
+# 직전까지 벽을 잘 따라가던 상태(valid=True, wall_dist가 목표치 근처)에서
+# 갑자기 valid=False가 되는 순간을 "코너 진입"으로 명시적으로 판단해
+# 더 빠르고 확실하게 꺾어 들어가기 위한 전용 모드.
+CORNER_TURN_W       = 0.9     # 코너 전용 회전속도 (WALL_LOST_W=0.45보다 빠름)
+CORNER_TURN_V       = 0.10    # 코너 도는 동안 전진속도 낮춤 (오버슈트 방지)
+CORNER_MAX_SEC      = 2.2     # 약 90~100도 분량 최대 회전 시간 (timeout)
+CORNER_ENTRY_DIST   = WALL_TARGET * 1.6  # 코너 진입 직전 "정상 추종 중"으로 볼 거리 한계
+
+# wall_follow는 순수 함수라 프레임 간 상태를 갖지 않으므로,
+# "직전까지 정상 추종 중이었는가"를 외부(호출부)에서 관리해야 함.
+# 이 클래스가 그 상태를 캡슐화한다.
+class CornerTracker:
+    def __init__(self):
+        self.was_following = False   # 직전 프레임에 valid=True였는지
+        self.in_corner      = False  # 현재 코너 회전 모드인지
+        self.corner_start_t = None
+        self.corner_sign    = 1.0
+        self.last_side       = None  # follow_side가 바뀌면 상태를 새로 시작
+
+    def reset(self):
+        self.was_following = False
+        self.in_corner      = False
+        self.corner_start_t = None
+
+corner_tracker = CornerTracker()
+
 def wall_follow(scan, fm, adir, follow_side, current_v=None):
     if current_v is None:
         current_v = WALL_V
@@ -186,6 +213,74 @@ def wall_follow_cmd(scan, fm, adir, follow_side, current_v=None):
 def wall_follow_debug(scan, fm, adir, follow_side, current_v=None):
     return wall_follow(scan, fm, adir, follow_side, current_v)
 
+# ── 코너 인지 벽 추종 ─────────────────────────────────────────────────
+def wall_follow_with_corner(scan, fm, adir, follow_side, current_v=None, tracker=None):
+    """
+    wall_follow를 감싸서 '코너 진입' 전이를 감지하고,
+    감지되면 CORNER_TURN_W로 빠르게 꺾어 새 벽을 재포착할 때까지
+    전용 회전 모드를 유지한다.
+
+    반환: (v, w), (wall_dist, wall_angle, valid), in_corner
+    """
+    if tracker is None:
+        tracker = corner_tracker
+    if current_v is None:
+        current_v = WALL_V
+
+    # WALL_FOLLOW 상태에 새로 진입했거나(follow_side가 바뀜) 추종 대상이
+    # 바뀌었으면 묵은 코너 상태가 남아있지 않도록 새로 시작한다.
+    if tracker.last_side != follow_side:
+        tracker.reset()
+        tracker.last_side = follow_side
+
+    sign = 1.0 if follow_side == "L" else -1.0
+    wall_dist, wall_angle, valid = estimate_wall(scan, follow_side)
+
+    # ── 이미 코너 회전 중인 경우 ────────────────────────────────────
+    if tracker.in_corner:
+        elapsed = time.time() - tracker.corner_start_t
+
+        # 새 벽을 다시 잡았으면(가까운 거리로 valid) 코너 모드 종료
+        if valid and wall_dist <= CORNER_ENTRY_DIST:
+            tracker.in_corner = False
+            tracker.was_following = True
+            tracker.corner_start_t = None
+            # 코너 종료 직후엔 일반 wall_follow로 바로 넘긴다
+            (v, w), dbg = wall_follow(scan, fm, adir, follow_side, current_v)
+            return (v, w), dbg, False
+
+        # 타임아웃: 90~100도 분량을 다 돌았는데도 못 찾으면
+        # 일반 LOST 폴백(약한 회전)으로 넘겨서 무한 회전 방지
+        if elapsed > CORNER_MAX_SEC:
+            tracker.in_corner = False
+            tracker.corner_start_t = None
+            return (WALL_V * 0.6, tracker.corner_sign * WALL_LOST_W), \
+                   (wall_dist, wall_angle, valid), False
+
+        # 코너 전용 회전 유지: 속도 낮추고 빠르게 꺾기
+        return (CORNER_TURN_V, tracker.corner_sign * CORNER_TURN_W), \
+               (wall_dist, wall_angle, valid), True
+
+    # ── 코너 회전 중이 아닌 경우: 정상 추종 / 코너 진입 판단 ────────
+    (v, w), (wd, wa, wvalid) = wall_follow(scan, fm, adir, follow_side, current_v)
+
+    if wvalid:
+        # 목표치 근처에서 정상 추종 중이면 "코너 진입 가능" 상태로 기록
+        tracker.was_following = wd <= CORNER_ENTRY_DIST
+        return (v, w), (wd, wa, wvalid), False
+
+    # valid=False가 떴다 — 직전까지 정상 추종 중이었다면 코너 진입으로 확정
+    if tracker.was_following:
+        tracker.in_corner = True
+        tracker.corner_start_t = time.time()
+        tracker.corner_sign = sign
+        tracker.was_following = False
+        return (CORNER_TURN_V, sign * CORNER_TURN_W), (wd, wa, wvalid), True
+
+    # 정상 추종 중이 아니었는데 valid=False (예: 시작부터 벽을 못 찾음)
+    # → 기존 동작(약한 LOST 회전) 그대로 유지
+    return (v, w), (wd, wa, wvalid), False
+
 # ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
     v = np.clip(v, -0.4, 0.4)
@@ -232,13 +327,10 @@ def make_mask(frame, hsv, name):
 MIN_AREA       = 400
 
 # [PATCH] 센트로이드 추적 P제어 재조정
-# - KP_ROT를 낮춰 "포화(최대 회전속도)"가 걸리는 지점을 화면 끝쪽으로 밀어냄
-#   (기존 0.030이면 err_x=53px만 되어도 이미 최대 회전 1.6rad/s로 포화되어
-#    "부드럽게 좁혀가는" 비례 구간이 거의 느껴지지 않았음)
-# - DEADBAND_PX: 이 범위 안에서는 회전을 아예 0으로 끊어서 진짜 "직진"이 되게 함
-#   (기존엔 floor만 있고 데드존이 없어서 중앙 근처에서도 노이즈로 계속 까딱거렸음)
-KP_ROT         = 0.012
-W_MIN          = 0.12
+# [PATCH-2] 각속도 전체 30% 증가 (KP_ROT, W_MIN 동시 스케일링하여
+#           데드밴드 직후 점프값과 비례 기울기의 비율을 유지)
+KP_ROT         = 0.0156   # 0.012 * 1.3
+W_MIN          = 0.156    # 0.12  * 1.3
 DEADBAND_PX    = 8
 
 APPROACH_V     = 0.13
@@ -253,7 +345,6 @@ LOST_CONFIRM = 8
 
 ARRIVE_Y_TOP       = int(240 * 0.85)
 ARRIVE_X_MARGIN    = 30
-# 기존 0.8초 → 1cm 더 전진하도록 보정 (ARRIVE_FORWARD_V 기준 0.01m / 0.13m/s ≈ 0.08s 추가)
 ARRIVE_FORWARD_SEC = 0.88
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
@@ -290,6 +381,7 @@ search_dir   = 1.0     # SEARCH 진입 시 고정되는 회전 방향
 dbg_wall_dist  = 0.0
 dbg_wall_angle = 0.0
 dbg_valid      = False
+dbg_in_corner  = False
 
 print(f"START | MISSION: {MISSION}")
 
@@ -400,6 +492,7 @@ try:
                 wall_dist, _, valid = estimate_wall(scan, follow_side)
                 if valid and wall_dist <= WALL_TARGET * 1.4:
                     lidar_state = "WALL_FOLLOW"
+                    corner_tracker.reset()
                 else:
                     sign = 1 if follow_side == "L" else -1
                     if fm < THRESH_STOP:
@@ -410,8 +503,8 @@ try:
                         send_cmd(WALL_APPROACH_V, sign * 0.3)
 
             elif lidar_state == "WALL_FOLLOW":
-                (v, w), (dbg_wall_dist, dbg_wall_angle, dbg_valid) = \
-                    wall_follow_debug(scan, fm, adir, follow_side, WALL_V)
+                (v, w), (dbg_wall_dist, dbg_wall_angle, dbg_valid), dbg_in_corner = \
+                    wall_follow_with_corner(scan, fm, adir, follow_side, WALL_V)
                 send_cmd(v, w)
 
         # ── PARK 모드 ───────────────────────────────────────────────
@@ -496,6 +589,7 @@ try:
                 wall_dist, _, valid = estimate_wall(scan, follow_side)
                 if valid and wall_dist <= WALL_TARGET * 1.4:
                     park_state = "WALL_FOLLOW"
+                    corner_tracker.reset()
                     continue
 
                 sign = 1 if follow_side == "L" else -1
@@ -517,8 +611,8 @@ try:
                 else:
                     detect_count = 0
 
-                (v, w), (dbg_wall_dist, dbg_wall_angle, dbg_valid) = \
-                    wall_follow_debug(scan, fm, adir, follow_side, WALL_V)
+                (v, w), (dbg_wall_dist, dbg_wall_angle, dbg_valid), dbg_in_corner = \
+                    wall_follow_with_corner(scan, fm, adir, follow_side, WALL_V)
                 send_cmd(v, w)
 
             elif park_state == "TRACK":
@@ -536,8 +630,12 @@ try:
                         continue
 
                     err_x = cx_obj - cx_mid
+
+                    # [PATCH-2] 정렬이 덜 된 상태에서 속도가 너무 빨리
+                    # 회복되는 문제 완화: 감쇠 곡선을 선형 → 제곱으로 변경.
+                    # (새 파라미터 추가 없이 기존 cx_mid 스케일 그대로 사용)
                     err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
-                    reduced_v = APPROACH_V * (1.0 - err_ratio)
+                    reduced_v = APPROACH_V * (1.0 - err_ratio) ** 2
 
                     if fm >= THRESH_SLOW:
                         v, w = reduced_v, cam_w(err_x)
@@ -558,22 +656,16 @@ try:
                     # [PATCH] 타겟을 놓친 경우 처리
                     lost_count += 1
                     if lost_count >= LOST_CONFIRM:
-                        # 연속 LOST_CONFIRM 프레임 이상 못 보면 "진짜로 놓쳤다" 판정
                         lost_count = 0
                         arrive_count = 0
-                        # 마지막으로 보였던 위치가 화면 오른쪽이었으면 오른쪽으로,
-                        # 왼쪽이었으면 왼쪽으로 회전하며 재탐색
                         search_dir = -1.0 if last_seen_x > cx_mid else 1.0
                         park_state = "SEARCH"
                         search_t = None
                         continue
                     else:
-                        # 짧은 순간의 미검출(노이즈/블러)은 직전 명령을 유지해서
-                        # 불필요하게 멈추거나 엉뚱한 방향으로 틀지 않게 함
                         send_cmd(*last_cmd)
 
             elif park_state == "SEARCH":
-                # [PATCH] 실제로 동작하는 SEARCH: 놓치기 직전 방향으로 회전 탐색
                 if found:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
@@ -588,7 +680,6 @@ try:
                     search_t = time.time()
 
                 if time.time() - search_t > SEARCH_FULL_ROT_SEC:
-                    # 한 바퀴 돌아도 못 찾으면 벽 탐색으로 폴백
                     park_state = "WALL_SEARCH"
                     search_t = None
                 else:
@@ -613,6 +704,8 @@ try:
             cv2.putText(frame,
                 f"WF dist={dbg_wall_dist:.1f}cm ang={np.rad2deg(dbg_wall_angle):.1f}deg {'OK' if dbg_valid else 'NO'}",
                 (10, H - 10), 0, 0.42, color_v, 1)
+            if dbg_in_corner:
+                cv2.putText(frame, "CORNER TURN", (10, H - 28), 0, 0.5, (0, 255, 255), 2)
 
         cv2.imshow("f", frame)
         if cv2.waitKey(1) & 0xFF == 27:
