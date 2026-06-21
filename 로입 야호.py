@@ -25,13 +25,15 @@ lidar_ser.reset_input_buffer()
 lidar_ser.write(bytes([0xA5, 0x20])); lidar_ser.read(7)
 print("LIDAR OK")
 
-# ── LIDAR ─────────────────────────────────────────────────────────────
+# ── LIDAR PARAMS (20x20 로봇 + 전방 라이다 최적화 세팅) ───────────────────────
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
 FRONT_RANGE  = 90   
-THRESH_SLOW  = 55.0
-THRESH_TURN  = 30.0
-THRESH_STOP  = 18.0
+
+# [수정] 범퍼 기준 실제 거리 체계 반영 (타이트 세팅)
+THRESH_SLOW  = 25.0   # 범퍼 앞 25cm에서 감속 및 블렌딩 조향 시작
+THRESH_TURN  = 15.0   # 범퍼 앞 15cm에서 코너링 시작
+THRESH_STOP  = 8.0    # 범퍼 앞 8cm까지 다가오면 비상 제동 및 강제 회전
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -100,16 +102,19 @@ def wall_follow(scan, fm, adir, follow_side, found, last_seen_x, cx_mid):
     right_close = side_min(scan, 60, 120)    
     sign = 1 if follow_side == "L" else -1
 
+    # [수정] 전방 한계선 이내 진입 시 신속하게 선회 조향력 부여
     if fm < THRESH_STOP:
-        return (0.08, adir * 1.1)
+        return (0.07, adir * 1.3)
     if fm < THRESH_TURN:
-        return (WALL_TURN_V, adir * 0.85)
+        return (WALL_TURN_V, adir * 0.95)
 
+    # [수정] 후미 걸림 방지를 위해 SIDE_STOP 감지 시 조향 반발력 제어 강화
     if left_close < SIDE_STOP:
-        return (WALL_V * 0.7, -0.7)
+        return (WALL_V * 0.6, -0.8)
     if right_close < SIDE_STOP:
-        return (WALL_V * 0.7,  0.7)
+        return (WALL_V * 0.6,  0.8)
 
+    # [수정] 협로 진입 시 콤팩트한 센터링 제어
     if left_close < BOTTLENECK_ENTER and right_close < BOTTLENECK_ENTER:
         err_center = left_close - right_close   
         w_center = float(np.clip(CENTER_KP * err_center, -0.9, 0.9))
@@ -123,7 +128,7 @@ def wall_follow(scan, fm, adir, follow_side, found, last_seen_x, cx_mid):
     
     if fm < THRESH_SLOW:
         blend = float(np.clip((THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
-        w = (1 - blend) * w + blend * adir * 0.5
+        w = (1 - blend) * w + blend * adir * 0.6
         v = WALL_V * (1.0 - 0.4 * blend)
     else:
         v = WALL_V
@@ -137,9 +142,9 @@ def wall_follow(scan, fm, adir, follow_side, found, last_seen_x, cx_mid):
             is_safe = False
             
         if is_safe:
-            w += (obj_dir * 0.25)
+            w += (obj_dir * 0.20)
 
-    w = float(np.clip(w, -0.9, 0.9))
+    w = float(np.clip(w, -1.2, 1.2)) # 최대 조향 한계 살짝 상향 조정
     return (v, w)
 
 # ── MOTOR ─────────────────────────────────────────────────────────────
@@ -168,7 +173,7 @@ def make_mask(frame, hsv, name):
     bm = cv2.inRange(frame, np.array(cfg["bgr"][0]), np.array(cfg["bgr"][1]))
     return cv2.bitwise_and(m, bm)
 
-# ── PARAMS ────────────────────────────────────────────────────────────
+# ── [수정] WALL FOLLOW / PARK 세부 파라미터 최적화 ─────────────────────────────
 MIN_AREA       = 400
 KP_ROT         = 0.030
 W_MIN          = 0.20
@@ -182,18 +187,21 @@ ARRIVE_FORWARD_SEC = 0.8
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
-WALL_TARGET    = 10.0    
-SIDE_STOP      = 6.0     
-BOTTLENECK_ENTER = 25.0  
-CENTER_KP      = 0.030   
-BOTTLENECK_V   = 0.15    
-WALL_SCAN_DIST = 150.0  
-WALL_APPROACH_V = 0.20  
-WALL_KP        = 0.024   
-WALL_V         = 0.22
-WALL_TURN_V    = 0.10
-WALL_LOST_W    = 1.3     
-WALL_SEARCH_W  = 1.1     
+# [수정] 몸집과 라이다 전방 배치를 반영한 콤팩트 튜닝
+WALL_TARGET      = 10.0    # 목표 벽 유지 거리 (10cm)
+SIDE_STOP        = 8.0     # [상향] 제자리 회전 시 로봇 후미가 외벽을 긁는 것을 방지하기 위한 마진 (8cm)
+BOTTLENECK_ENTER = 14.0    # [하향] 좌우 센서 모두 14cm 이하일 때만 중앙 유지 모드 발동
+CENTER_KP        = 0.045   # [상향] 좁은 곳에서 기민하게 복귀하도록 반응성 증가
+BOTTLENECK_V     = 0.12    # 좁은 통로 안전 주행 속도
+WALL_SCAN_DIST   = 80.0    # [하향] 불필요한 원거리 벽 무시 및 빠른 탐색 전환 기준 (80cm)
+SIDE_SCAN_DIST   = 22.0    # [하향] 제자리 회전을 중단할 측면 벽 기준 거리 (22cm)
+
+WALL_APPROACH_V  = 0.18    
+WALL_KP          = 0.028   # [상향] 타이트한 주행을 위한 P-제어 게인 보정
+WALL_V           = 0.20    # 코너 안정성을 위해 기본 주행 속도를 0.22에서 0.20으로 미세 조정
+WALL_TURN_V      = 0.08
+WALL_LOST_W      = 1.3     
+WALL_SEARCH_W    = 1.1     
 MISSION_TIMEOUT_SEC = 10.0  
 
 FULL_LOOP_THRESH   = math.radians(400)   
@@ -214,7 +222,7 @@ last_bottom_y = 0
 park_t        = None
 search_t      = None      
 mission_start_t = time.time() 
-hop_start_t     = None        
+hop_start_t      = None        
 last_cmd      = (0.0, 0.0)
 
 print(f"START | MISSION: {MISSION}")
@@ -291,12 +299,10 @@ try:
                 continue
 
             if lidar_state == "WALL_SEARCH":
-                # ★ 수정: 전방 외에 좌/우 측면 근접 거리 데이터도 함께 산출
                 left_close  = side_min(scan, 240, 300)
                 right_close = side_min(scan, 60, 120)
 
-                # 정면(fm)뿐만 아니라 좌/우 측면에라도 벽이 감지되면 즉시 주행 모드로 진입
-                if fm < WALL_SCAN_DIST or left_close < WALL_SCAN_DIST or right_close < WALL_SCAN_DIST:
+                if fm < WALL_SCAN_DIST or left_close < SIDE_SCAN_DIST or right_close < SIDE_SCAN_DIST:
                     follow_side = decide_follow_side(adir, found, cx_obj, cx_mid)
                     lidar_state = "WALL_APPROACH"
                 else: 
@@ -307,8 +313,8 @@ try:
                 if sd <= WALL_TARGET * 1.3: lidar_state = "WALL_FOLLOW"
                 else:
                     sign = 1 if follow_side == "L" else -1
-                    if fm < THRESH_STOP: send_cmd(0.08, adir * 1.0)
-                    elif fm < THRESH_TURN: send_cmd(WALL_APPROACH_V * 0.6, adir * 0.7)
+                    if fm < THRESH_STOP: send_cmd(0.07, adir * 1.2)
+                    elif fm < THRESH_TURN: send_cmd(WALL_APPROACH_V * 0.6, adir * 0.8)
                     else: send_cmd(WALL_APPROACH_V, sign * 0.3)
 
             elif lidar_state == "WALL_FOLLOW":
@@ -333,9 +339,9 @@ try:
                 if elapsed_hop < 2.0:
                     send_cmd(0.0, 1.2)
                 else:
-                    if fm > 130.0:
+                    if fm > 100.0: # 타이트 스케일에 맞춰 복귀 임계 하향
                         send_cmd(0.0, 1.0)
-                    elif fm > 50.0:
+                    elif fm > 40.0:
                         send_cmd(WALL_V, 0.0)
                     else:
                         follow_side = decide_follow_side(adir, found, cx_obj, cx_mid)
@@ -373,12 +379,10 @@ try:
                         continue
                 else: detect_count = 0
 
-                # ★ 수정: 주차 후 탐색 시에도 측면 근접 데이터를 판별식에 포함
                 left_close  = side_min(scan, 240, 300)
                 right_close = side_min(scan, 60, 120)
 
-                # 전방, 좌측, 우측 중 어느 한 곳이라도 벽이 보이면 바로 APPROACH 모드로 전환하여 주행 시작
-                if fm < WALL_SCAN_DIST or left_close < WALL_SCAN_DIST or right_close < WALL_SCAN_DIST:
+                if fm < WALL_SCAN_DIST or left_close < SIDE_SCAN_DIST or right_close < SIDE_SCAN_DIST:
                     follow_side = decide_follow_side(adir, found, cx_obj, cx_mid)
                     park_state = "WALL_APPROACH"
                     continue
@@ -395,8 +399,8 @@ try:
                 if sd <= WALL_TARGET * 1.3: park_state = "WALL_FOLLOW"; continue
 
                 sign = 1 if follow_side == "L" else -1
-                if fm < THRESH_STOP: v, w = 0.08, adir * 1.0
-                elif fm < THRESH_TURN: v, w = WALL_APPROACH_V * 0.6, adir * 0.7
+                if fm < THRESH_STOP: v, w = 0.07, adir * 1.2
+                elif fm < THRESH_TURN: v, w = WALL_APPROACH_V * 0.6, adir * 0.8
                 else: v, w = WALL_APPROACH_V, sign * 0.3
                 send_cmd(v, w)
 
@@ -411,7 +415,12 @@ try:
                 send_cmd(v, w)
 
             elif park_state == "TRACK":
-                park_state = "TRACK"
+                if not found:
+                    park_state = "SEARCH"
+                    search_t = time.time()
+                    arrive_count = 0
+                    continue
+
                 arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
 
                 if arrive_count >= ARRIVE_CONFIRM:
@@ -437,8 +446,6 @@ try:
                     last_cmd = (v, w); send_cmd(v, w)
 
             elif park_state == "SEARCH":
-                if park_state != "SEARCH":
-                    park_state = "SEARCH"; search_t = time.time(); arrive_count = 0
                 elapsed_search = time.time() - search_t
                 if elapsed_search > 5.0:
                     park_state = "WALL_SEARCH"
