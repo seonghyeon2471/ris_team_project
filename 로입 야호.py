@@ -34,8 +34,9 @@ THRESH_SLOW  = 40.0
 THRESH_TURN  = 24.0   
 THRESH_STOP  = 12.0   
 
-_scan     = np.full(360, 150.0, dtype=np.float32)
-_scan_pub = np.full(360, 150.0, dtype=np.float32)
+# [수정 1] 초기 스캔 배열 값을 150.0에서 50.0으로 변경 (최대 거리 50cm와 동기화)
+_scan     = np.full(360, 50.0, dtype=np.float32)
+_scan_pub = np.full(360, 50.0, dtype=np.float32)
 scan_lock = threading.Lock()
 
 def _ema(a, d):
@@ -59,7 +60,10 @@ def lidar_loop():
             continue
         angle   = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0) % 360
         dist_cm = (raw[3] | (raw[4] << 8)) / 40.0
-        if 3 < dist_cm < 150: _ema(angle, dist_cm)
+        
+        # [수정 2] 유효 탐지 거리를 3 ~ 150에서 3 ~ 50으로 변경
+        if 3 < dist_cm < 50: _ema(angle, dist_cm)
+        
         if sf == 1:
             _median()
             with scan_lock: _scan_pub[:] = _scan
@@ -155,7 +159,6 @@ def send_cmd(v, w):
 def stop_robot(): send_cmd(0.0, 0.0)
 
 # ── COLOR CONFIG ──────────────────────────────────────────────────────
-# 요청하신 설정으로 업데이트
 COLOR_CFG = {
     "red":    {"hsv1": ([169, 136, 114], [179, 220, 255]), "hsv2": None, "bgr":  ([20, 20, 80],  [255, 255, 255]), "draw": (0, 0, 255)},
     "yellow": {"hsv1": ([25, 60, 160], [32, 161, 255]),    "hsv2": None, "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
@@ -183,11 +186,12 @@ DETECT_CONFIRM = 6
 
 ARRIVE_Y_TOP    = int(240 * 0.85)
 ARRIVE_X_MARGIN = 30
-ARRIVE_FORWARD_SEC = 0.8
+ARRIVE_FORWARD_SEC = 1.0  # 기존 0.8에서 1.0으로 수정 (무작정 직진 시간 0.2초 증가)
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
-WALL_TARGET      = 12.0    
+# [수정 3] 벽을 따라 주행할 때 유지하려는 목표 간격을 12.0에서 10.0으로 변경
+WALL_TARGET      = 10.0    
 SIDE_STOP        = 9.5     
 BOTTLENECK_ENTER = 15.0    
 CENTER_KP        = 0.050   
@@ -347,7 +351,6 @@ try:
                 
                 cv2.imshow("f", frame); cv2.waitKey(1); continue
 
-
             if park_state == "FORWARD":
                 elapsed = time.time() - park_t
                 if elapsed >= ARRIVE_FORWARD_SEC:
@@ -407,7 +410,15 @@ try:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
                         detect_count = 0; park_state = "TRACK"; continue
-                else: detect_count = 0
+                else: 
+                    detect_count = 0
+                    
+                    # [추가] 장애물 탈출 감지: 정면이 크게 뚫리고, 측면 장애물도 시야에서 벗어난 경우 탈출로 간주
+                    sd = side_dist(scan, follow_side)
+                    if fm > WALL_SCAN_DIST and sd > SIDE_SCAN_DIST:
+                        park_state = "SEARCH"
+                        search_t = time.time()
+                        continue
 
                 v, w = wall_follow(scan, fm, follow_side, found, last_seen_x, cx_mid)
                 send_cmd(v, w)
@@ -443,6 +454,16 @@ try:
                     last_cmd = (v, w); send_cmd(v, w)
 
             elif park_state == "SEARCH":
+                # [추가] 회전 탐색 중 객체를 다시 발견하면 즉시 TRACK으로 복귀
+                if found and fm > THRESH_SLOW:
+                    detect_count += 1
+                    if detect_count >= DETECT_CONFIRM:
+                        detect_count = 0
+                        park_state = "TRACK"
+                        continue
+                else:
+                    detect_count = 0
+
                 elapsed_search = time.time() - search_t
                 if elapsed_search > 5.0:
                     park_state = "WALL_SEARCH"
