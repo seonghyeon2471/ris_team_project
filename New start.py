@@ -6,42 +6,54 @@ import threading
 import math
 
 # ── SERIAL ────────────────────────────────────────────────────────────
+# 아두이노: 속도/회전 명령 전달
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
-lidar_ser   = serial.Serial("/dev/ttyUSB0",  460800, timeout=0.1)
+# 라이다: 360도 거리 스캔 수신
+lidar_ser   = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)
 
 # ── CAMERA ────────────────────────────────────────────────────────────
+# 카메라 초기화 및 해상도 설정
 cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH,  320)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
+cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 time.sleep(1.0)
 cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
 cap.set(cv2.CAP_PROP_AUTO_WB, 0)
 
 # ── LIDAR BOOT ────────────────────────────────────────────────────────
-lidar_ser.write(bytes([0xA5, 0x40])); time.sleep(2)
+# 라이다 시작 명령
+lidar_ser.write(bytes([0xA5, 0x40]))
+time.sleep(2)
 lidar_ser.reset_input_buffer()
-lidar_ser.write(bytes([0xA5, 0x20])); lidar_ser.read(7)
+lidar_ser.write(bytes([0xA5, 0x20]))
+lidar_ser.read(7)
 print("LIDAR OK")
 
-# ── LIDAR ─────────────────────────────────────────────────────────────
+# ── LIDAR PARAMS ──────────────────────────────────────────────────────
+# 노이즈 완화용 필터 파라미터
 EMA_ALPHA   = 0.35
 MEDIAN_K    = 2
 FRONT_RANGE = 90
+
+# 전방 장애물 회피 기준
 THRESH_SLOW = 55.0
 THRESH_TURN = 30.0
 THRESH_STOP = 18.0
 
+# 라이다 거리 버퍼
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
 scan_lock = threading.Lock()
 
 def _ema(a, d):
+    # 같은 각도 거리값을 부드럽게 갱신
     if d > 0:
         _scan[a] = (1 - EMA_ALPHA) * _scan[a] + EMA_ALPHA * d
 
 def _median():
+    # 5점 중앙값 필터로 순간 노이즈 제거
     k = MEDIAN_K
     buf = np.empty(360, dtype=np.float32)
     for i in range(360):
@@ -50,6 +62,7 @@ def _median():
     _scan[:] = buf
 
 def lidar_loop():
+    # 별도 스레드에서 라이다를 계속 읽음
     while True:
         raw = lidar_ser.read(5)
         if len(raw) != 5:
@@ -73,17 +86,21 @@ def get_scan():
         return _scan_pub.copy()
 
 def front_min(scan):
+    # 전방 ±90도 최단거리
     idx = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     return float(np.min(scan[idx]))
 
 def avoid_dir(scan):
+    # 좌/우 비어 있는 쪽으로 회피 방향 선택
     return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
 
 def side_min(scan, start, end):
+    # 특정 각도 구간 최단거리
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
 
 # ── 벽 직선 추정 ──────────────────────────────────────────────────────
+# 왼쪽/오른쪽 벽을 선형회귀로 추정해 거리와 각도를 얻음
 WALL_SCAN_START_L = 55
 WALL_SCAN_END_L   = 125
 WALL_SCAN_START_R = 235
@@ -100,6 +117,7 @@ def estimate_wall(scan, side):
     angles_rad = np.deg2rad(angles_deg)
     dists = scan[angles_deg % 360].astype(np.float32)
 
+    # 너무 멀거나 이상값은 제외
     valid_mask = (dists > 2.0) & (dists < WALL_MAX_DIST)
     if np.sum(valid_mask) < WALL_MIN_POINTS:
         return 0.0, 0.0, False
@@ -107,9 +125,11 @@ def estimate_wall(scan, side):
     a = angles_rad[valid_mask]
     d = dists[valid_mask]
 
+    # 극좌표 → 직교좌표
     px = d * np.cos(a)
     py = d * np.sin(a)
 
+    # py = m*px + b 형태로 회귀
     A = np.vstack([px, np.ones(len(px))]).T
     try:
         m, b = np.linalg.lstsq(A, py, rcond=None)[0]
@@ -120,7 +140,8 @@ def estimate_wall(scan, side):
     wall_dist = abs(float(b))
     return wall_dist, wall_angle, True
 
-# ── 벽 추종 제어기 ───────────────────────────────────────────────────
+# ── 벽 추종 제어 ───────────────────────────────────────────────────
+# 목표 벽 거리 20cm로 수정
 WALL_TARGET      = 20.0
 WALL_KH          = 1.20
 WALL_KD          = 0.06
@@ -133,6 +154,7 @@ LOOKAHEAD_TIME   = 0.35
 MAX_W            = 0.90
 
 def wall_follow(scan, fm, adir, follow_side, current_v=None):
+    # Stanley 스타일 벽추종
     if current_v is None:
         current_v = WALL_V
 
@@ -140,6 +162,7 @@ def wall_follow(scan, fm, adir, follow_side, current_v=None):
     left_close  = side_min(scan, 60, 120)
     right_close = side_min(scan, 240, 300)
 
+    # 전방 및 측면 충돌 회피 우선
     if fm < THRESH_STOP:
         return (0.08, adir * 1.1), (0.0, 0.0, False)
     if fm < THRESH_TURN:
@@ -150,18 +173,24 @@ def wall_follow(scan, fm, adir, follow_side, current_v=None):
         return (WALL_V * 0.7, 0.7), (0.0, 0.0, False)
 
     wall_dist, wall_angle, valid = estimate_wall(scan, follow_side)
+
     if not valid:
+        # 벽 포인트가 약하면 벽 방향으로 천천히 탐색
         if fm < THRESH_STOP:
             return (0.08, adir * 1.1), (0.0, 0.0, False)
         return (WALL_V * 0.6, sign * WALL_LOST_W), (0.0, 0.0, False)
 
+    # heading error: 벽과 평행하지 않은 정도
     heading_term = -sign * WALL_KH * wall_angle
+
+    # dist error: 목표 거리와 실제 거리 차이
     dist_error = wall_dist - WALL_TARGET
     v_safe = max(abs(current_v), 0.05)
     dist_term = sign * float(np.arctan(WALL_KD * dist_error / v_safe))
 
     w_raw = heading_term + dist_term
 
+    # 선제 보정용 lookahead
     lateral_pred = current_v * LOOKAHEAD_TIME * np.sin(
         np.clip(w_raw * LOOKAHEAD_TIME * 0.5, -1.0, 1.0)
     )
@@ -169,6 +198,7 @@ def wall_follow(scan, fm, adir, follow_side, current_v=None):
         correction = float(np.clip(lateral_pred / (dist_error + 1e-6), 0.0, 0.8))
         w_raw = w_raw * (1.0 - correction * 0.5)
 
+    # 전방이 좁아지면 속도 줄이면서 조향 블렌딩
     if fm < THRESH_SLOW:
         blend = float(np.clip((THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
         w_raw = (1.0 - blend) * w_raw + blend * adir * 0.5
@@ -179,16 +209,13 @@ def wall_follow(scan, fm, adir, follow_side, current_v=None):
     w = float(np.clip(w_raw, -MAX_W, MAX_W))
     return (v, w), (wall_dist, wall_angle, valid)
 
-def wall_follow_cmd(scan, fm, adir, follow_side, current_v=None):
-    result = wall_follow(scan, fm, adir, follow_side, current_v)
-    return result[0]
-
 def wall_follow_debug(scan, fm, adir, follow_side, current_v=None):
-    result = wall_follow(scan, fm, adir, follow_side, current_v)
-    return result
+    # 디버그 정보 포함 반환
+    return wall_follow(scan, fm, adir, follow_side, current_v)
 
 # ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
+    # 아두이노로 속도 전송
     v = np.clip(v, -0.4, 0.4)
     w = np.clip(w, -1.6, 1.6)
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
@@ -246,7 +273,7 @@ ARRIVE_CONFIRM     = 8
 WALL_SCAN_DIST      = 150.0
 MISSION_TIMEOUT_SEC  = 10.0
 
-# 벽 추종 후 30cm 가면 재탐색
+# 벽추종 30cm마다 재탐색
 FOLLOW_LIMIT_CM     = 30.0
 BACK_TURN_SEC       = 0.9
 BACK_V              = -0.10
@@ -269,9 +296,9 @@ mission_start_t = time.time()
 hop_start_t     = None
 last_cmd        = (0.0, 0.0)
 
-# 벽추종 거리 기준용
-wall_follow_start_x = None
-wall_follow_start_y = None
+# 벽추종 거리 누적
+wall_follow_start_t = None
+wall_follow_dist_cm = 0.0
 
 # 디버그용
 dbg_wall_dist  = 0.0
@@ -312,17 +339,18 @@ try:
 
         if is_searching:
             if time.time() - mission_start_t > MISSION_TIMEOUT_SEC:
-                mode        = "PARK"
-                park_state  = "SAFE_HOP"
+                mode = "PARK"
+                park_state = "SAFE_HOP"
                 hop_start_t = time.time()
                 detect_count = 0
                 continue
         elif park_state not in ["SAFE_HOP"]:
             mission_start_t = time.time()
 
+        # 색상 검출
         mask = make_mask(frame, hsv, target)
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        big   = max(cnts, key=cv2.contourArea) if cnts else None
+        big = max(cnts, key=cv2.contourArea) if cnts else None
         found = big is not None and cv2.contourArea(big) > MIN_AREA
 
         cx_obj, cy_obj = -1, -1
@@ -342,8 +370,9 @@ try:
         cv2.rectangle(frame, (arrive_x1, ARRIVE_Y_TOP), (arrive_x2, H - 1), (0, 0, 255), 1)
 
         def centroid_in_arrive_zone():
-            return (cx_obj >= arrive_x1 and cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
+            return (arrive_x1 <= cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
 
+        # ── LIDAR 모드 ────────────────────────────────────────────────
         if mode == "LIDAR":
             if found:
                 detect_count += 1
@@ -369,8 +398,8 @@ try:
                 wall_dist, _, valid = estimate_wall(scan, follow_side)
                 if valid and wall_dist <= WALL_TARGET * 1.4:
                     lidar_state = "WALL_FOLLOW"
-                    wall_follow_start_x = None
-                    wall_follow_start_y = None
+                    wall_follow_start_t = time.time()
+                    wall_follow_dist_cm = 0.0
                 else:
                     sign = 1 if follow_side == "L" else -1
                     if fm < THRESH_STOP:
@@ -381,17 +410,22 @@ try:
                         send_cmd(WALL_APPROACH_V, sign * 0.3)
 
             elif lidar_state == "WALL_FOLLOW":
-                if wall_follow_start_x is None:
-                    wall_follow_start_x = 0.0
-                    wall_follow_start_y = 0.0
+                # 벽추종 시작 시 기준 초기화
+                if wall_follow_start_t is None:
+                    wall_follow_start_t = time.time()
+                    wall_follow_dist_cm = 0.0
 
                 (v, w), (dbg_wall_dist, dbg_wall_angle, dbg_valid) = wall_follow_debug(
                     scan, fm, adir, follow_side, WALL_V
                 )
 
-                # 30cm 도달 시 뒤로 돌아 재탐색
-                wall_follow_start_x += max(v, 0.0) * 100.0 * 0.05
-                if wall_follow_start_x >= FOLLOW_LIMIT_CM:
+                # 전진한 거리 적산: 매 프레임마다 계속 누적됨
+                dt = time.time() - wall_follow_start_t
+                wall_follow_start_t = time.time()
+                wall_follow_dist_cm += max(v, 0.0) * dt * 100.0
+
+                # 30cm 도달 시 재탐색 상태로 전환
+                if wall_follow_dist_cm >= FOLLOW_LIMIT_CM:
                     lidar_state = "WALL_REVERSE_SEARCH"
                     reverse_t = time.time()
                     continue
@@ -399,14 +433,16 @@ try:
                 send_cmd(v, w)
 
             elif lidar_state == "WALL_REVERSE_SEARCH":
+                # 잠깐 후진 + 회전해서 뒤로 돌아 탐색
                 elapsed = time.time() - reverse_t
                 if elapsed < BACK_TURN_SEC:
                     send_cmd(BACK_V, BACK_W)
                 else:
                     lidar_state = "WALL_SEARCH"
-                    wall_follow_start_x = None
-                    wall_follow_start_y = None
+                    wall_follow_start_t = None
+                    wall_follow_dist_cm = 0.0
 
+        # ── PARK 모드 ────────────────────────────────────────────────
         elif mode == "PARK":
             if park_state == "SAFE_HOP":
                 if found:
@@ -489,8 +525,8 @@ try:
                 wall_dist, _, valid = estimate_wall(scan, follow_side)
                 if valid and wall_dist <= WALL_TARGET * 1.4:
                     park_state = "WALL_FOLLOW"
-                    wall_follow_start_x = None
-                    wall_follow_start_y = None
+                    wall_follow_start_t = time.time()
+                    wall_follow_dist_cm = 0.0
                     continue
 
                 sign = 1 if follow_side == "L" else -1
@@ -503,9 +539,10 @@ try:
                 send_cmd(v, w)
 
             elif park_state == "WALL_FOLLOW":
-                if wall_follow_start_x is None:
-                    wall_follow_start_x = 0.0
-                    wall_follow_start_y = 0.0
+                # 벽추종 시작 시 기준 초기화
+                if wall_follow_start_t is None:
+                    wall_follow_start_t = time.time()
+                    wall_follow_dist_cm = 0.0
 
                 if found:
                     detect_count += 1
@@ -520,8 +557,13 @@ try:
                     scan, fm, adir, follow_side, WALL_V
                 )
 
-                wall_follow_start_x += max(v, 0.0) * 100.0 * 0.05
-                if wall_follow_start_x >= FOLLOW_LIMIT_CM:
+                # 전진한 거리 계속 누적
+                dt = time.time() - wall_follow_start_t
+                wall_follow_start_t = time.time()
+                wall_follow_dist_cm += max(v, 0.0) * dt * 100.0
+
+                # 30cm마다 재탐색 반복 적용
+                if wall_follow_dist_cm >= FOLLOW_LIMIT_CM:
                     park_state = "WALL_REVERSE_SEARCH"
                     reverse_t = time.time()
                     continue
@@ -534,8 +576,8 @@ try:
                     send_cmd(BACK_V, BACK_W)
                 else:
                     park_state = "WALL_SEARCH"
-                    wall_follow_start_x = None
-                    wall_follow_start_y = None
+                    wall_follow_start_t = None
+                    wall_follow_dist_cm = 0.0
 
             elif park_state == "TRACK":
                 arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
@@ -546,14 +588,14 @@ try:
                     send_cmd(ARRIVE_FORWARD_V, 0.0)
                     continue
 
-                err_x     = cx_obj - cx_mid
+                err_x = cx_obj - cx_mid
                 err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
                 reduced_v = APPROACH_V * (1.0 - err_ratio)
 
                 def cam_w(ex):
                     raw = -0.030 * ex
-                    if abs(raw) < 0.20 and ex != 0:
-                        return -0.20 if ex > 0 else 0.20
+                    if abs(raw) < W_MIN and ex != 0:
+                        return -W_MIN if ex > 0 else W_MIN
                     return raw
 
                 if fm >= THRESH_SLOW:
@@ -578,6 +620,7 @@ try:
                 else:
                     send_cmd(0.0, -1.0 if last_seen_x > cx_mid else 1.0)
 
+        # ── 디버그 오버레이 ───────────────────────────────────────────
         search_time_left = MISSION_TIMEOUT_SEC - (time.time() - mission_start_t)
         if is_searching and search_time_left > 0:
             cv2.putText(frame, f"Timeout: {search_time_left:.1f}s | Side:{follow_side}",
@@ -585,7 +628,7 @@ try:
 
         in_wall_follow = (
             (mode == "LIDAR" and lidar_state == "WALL_FOLLOW") or
-            (mode == "PARK"  and park_state  == "WALL_FOLLOW")
+            (mode == "PARK" and park_state == "WALL_FOLLOW")
         )
         if in_wall_follow:
             color_v = (0, 255, 100) if dbg_valid else (0, 80, 255)
