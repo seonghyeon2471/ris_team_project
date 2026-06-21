@@ -239,7 +239,7 @@ ARRIVE_CONFIRM     = 8
 WALL_SCAN_DIST      = 150.0
 MISSION_TIMEOUT_SEC = 10.0
 TRACK_LOST_ROT_SEC  = 2.0
-SEARCH_ROT_SEC      = 4.0
+SEARCH_ROT_SEC      = 6.0
 WALL_FOLLOW_MAX_SEC = 6.0
 
 # ── STATE ─────────────────────────────────────────────────────────────
@@ -547,7 +547,7 @@ try:
 
                 elapsed = time.time() - search_t
                 if elapsed < SEARCH_ROT_SEC:
-                    send_cmd(0.0, 1.0 if last_seen_x < cx_mid else -1.0)
+                    send_cmd(0.0, 0.7 if last_seen_x < cx_mid else -0.7)
                 else:
                     park_state = "WALL_SEARCH"
                     search_t = None
