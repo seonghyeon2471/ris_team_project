@@ -30,8 +30,8 @@ print("LIDAR OK")
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
 FRONT_RANGE  = 90
-THRESH_SLOW  = 55.0
-THRESH_TURN  = 30.0
+THRESH_SLOW  = 40.0
+THRESH_TURN  = 25.0
 THRESH_STOP  = 18.0
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
