@@ -118,13 +118,11 @@ def wall_follow(scan, fm, follow_side, found, last_seen_x, cx_mid):
     if right_close < SIDE_STOP:
         return (WALL_V * 0.5,  0.8)  
 
-    # 좁은 통로(중앙돌파 25cm) 진입선 보정
     if left_close < BOTTLENECK_ENTER and right_close < BOTTLENECK_ENTER:
         err_center = left_close - right_close   
         w_center = float(np.clip(CENTER_KP * err_center, -0.6, 0.6))
         return (BOTTLENECK_V, w_center)
 
-    # 🔍 [모서리 이탈 처리 구역] 목표거리의 1.8배(25.2cm)보다 멀어지면 작동
     if sd > WALL_TARGET * 1.8:
         return (0.07, sign * WALL_LOST_W * 0.7)
 
@@ -188,7 +186,7 @@ ARRIVE_FORWARD_SEC = 1.0
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
-# 🛠️ 이격거리 증대 밸런스 파라미터 적용 완료
+# 14cm 기반으로 완벽 세팅된 파라미터 셋
 WALL_TARGET      = 14.0    
 SIDE_STOP        = 9.5     
 BOTTLENECK_ENTER = 14.5    
@@ -216,7 +214,7 @@ park_state    = "TRACK"
 last_seen_x   = 160
 last_bottom_y = 0
 park_t        = None
-search_t      = None      
+escape_t      = None      
 mission_start_t = time.time() 
 hop_start_t      = None        
 last_cmd      = (0.0, 0.0)
@@ -246,7 +244,7 @@ try:
 
         cv2.putText(frame, f"TARGET: {target.upper()}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, draw, 2)
 
-        is_searching = (mode == "LIDAR") or (mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH"])
+        is_searching = (mode == "LIDAR") or (mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "CORNER_ESCAPE"])
         
         if is_searching:
             if time.time() - mission_start_t > MISSION_TIMEOUT_SEC:
@@ -389,7 +387,6 @@ try:
                 send_cmd(v, w)
 
             elif park_state == "WALL_FOLLOW":
-                # 🔍 [주장치 2: 카메라 미감지 시 상태 탈출 체크]
                 if found and fm > THRESH_SLOW:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
@@ -397,18 +394,38 @@ try:
                 else: 
                     detect_count = 0
                     sd = side_dist(scan, follow_side)
-                    # 정면과 추종 측면 벽이 동시에 다 사라지면 탐색(SEARCH) 상태로 천이
+                    # 🛠️ 수정한 곳 1: 모서리를 만나 벽이 사라지면 CORNER_ESCAPE 상태로 확정 이주
                     if fm > WALL_SCAN_DIST and sd > SIDE_SCAN_DIST:
-                        park_state = "SEARCH"
-                        search_t = time.time()
+                        park_state = "CORNER_ESCAPE"
+                        escape_t = time.time()
                         continue
                 v, w = wall_follow(scan, fm, follow_side, found, last_seen_x, cx_mid)
                 send_cmd(v, w)
 
+            # 🛠️ 수정한 곳 2: 뺑뺑이를 막기 위한 모퉁이 전진 탈출 루틴 구현
+            elif park_state == "CORNER_ESCAPE":
+                if found and fm > THRESH_SLOW:
+                    detect_count += 1
+                    if detect_count >= DETECT_CONFIRM:
+                        detect_count = 0; park_state = "TRACK"; continue
+                else: detect_count = 0
+
+                elapsed_escape = time.time() - escape_t
+                
+                # 최소 2.5초 동안은 뒤돌아보지 않고 모퉁이를 타고 넘도록 크루징 회전 기동
+                if elapsed_escape < 2.5:
+                    sign = 1 if follow_side == "L" else -1
+                    v = 0.06                      # 미세 전진력을 주어 회전 축을 앞으로 밀어냄
+                    w = sign * WALL_LOST_W * 0.8  # 추종하던 벽면 내부 방향으로 선회 조향
+                    send_cmd(v, w)
+                else:
+                    # 탈출 시간이 만료되면 다시 새로운 벽을 수색하는 상태로 천이
+                    park_state = "WALL_SEARCH"
+                    continue
+
             elif park_state == "TRACK":
                 if not found:
-                    park_state = "SEARCH"
-                    search_t = time.time()
+                    park_state = "WALL_SEARCH"  # SEARCH 상태가 제거되었으므로 모서리 이탈 대비 초기화 수색 전환
                     arrive_count = 0
                     continue
 
@@ -436,19 +453,6 @@ try:
                 v, w = reduced_v, cam_w(err_x)
                 last_cmd = (v, w)
                 send_cmd(v, w)
-
-            elif park_state == "SEARCH":
-                if found and fm > THRESH_SLOW:
-                    detect_count += 1
-                    if detect_count >= DETECT_CONFIRM:
-                        detect_count = 0; park_state = "TRACK"; continue
-                else: detect_count = 0
-
-                elapsed_search = time.time() - search_t
-                if elapsed_search > 5.0: park_state = "WALL_SEARCH"
-                else:
-                    v = 0.0; w = (-1.0 if last_seen_x > cx_mid else 1.0)
-                    send_cmd(v, w)
 
         cv2.imshow("f", frame)
         if cv2.waitKey(1) & 0xFF == 27: break
