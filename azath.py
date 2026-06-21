@@ -222,6 +222,11 @@ try:
         fm     = front_min(scan)
         adir   = avoid_dir(scan)
 
+        if fm < 45.0:
+            # adir이 1이라는 것은 왼쪽이 더 가까워서 우회전해야 한다는 뜻. 
+            # 즉, 더 가까운 왼쪽(L)을 새로운 추종 벽으로 설정!
+            follow_side = "L" if adir == 1 else "R"
+            
         if mission_idx >= len(MISSION):
             stop_robot()
             cv2.putText(frame, "ALL MISSIONS DONE", (30, H // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
