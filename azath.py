@@ -91,9 +91,9 @@ def decide_follow_side(adir, found, cx_obj, cx_mid):
 
 def side_dist(scan, side):
     if side == "L":
-        idx = np.arange(265, 296) % 360 
+        idx = np.arange(65, 96) % 360     # (수정: 265,296 -> 65,96)
     else:
-        idx = np.arange(65, 96) % 360   
+        idx = np.arange(265, 296) % 360   # (수정: 65,96 -> 265,296)
     return float(np.min(scan[idx]))
 
 def side_min(scan, start, end):
@@ -102,8 +102,8 @@ def side_min(scan, start, end):
 
 def wall_follow(scan, fm, adir, follow_side):
     sd          = side_dist(scan, follow_side)
-    left_close  = side_min(scan, 240, 300) 
-    right_close = side_min(scan, 60, 120)  
+    left_close  = side_min(scan, 60, 120)    # (수정: 240,300 -> 60,120)
+    right_close = side_min(scan, 240, 300)   # (수정: 60,120 -> 240,300)
     sign = 1 if follow_side == "L" else -1
 
     if fm < THRESH_STOP:
@@ -155,7 +155,7 @@ def send_cmd(v, w):
     last_cmd_time = curr_time
     accumulated_yaw += w * dt
 
-    arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())   # ★ 수정: -w -> w (부호 반전 테스트)
+    arduino_ser.write(f"{v:.3f},{w:.3f}\n".encode())   # ★ 수정: -w -> w (부호 반전 테스트)
 
 def stop_robot(): 
     send_cmd(0.0, 0.0)
