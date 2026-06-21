@@ -111,10 +111,6 @@ def estimate_wall(scan, side):
     px = d * np.cos(a)
     py = d * np.sin(a)
 
-    # [수정된 부분 1] 모서리 점군이 너무 뭉쳐있을 경우 최소자승법 발산을 막기 위한 방어 로직
-    if np.ptp(px) < 10.0 and np.ptp(py) < 10.0:
-        return 0.0, 0.0, False
-
     A = np.vstack([px, np.ones(len(px))]).T
     try:
         m, b = np.linalg.lstsq(A, py, rcond=None)[0]
@@ -150,12 +146,9 @@ def wall_follow(scan, fm, adir, follow_side, current_v=None):
         return (0.08, adir * 1.1), (0.0, 0.0, False)
     if fm < THRESH_TURN:
         return (WALL_TURN_V, adir * 0.85), (0.0, 0.0, False)
-
-    # [수정된 부분 2] 전방 마진(19.0) 대신 측면 전용 마진(13.0) 적용
-    SIDE_THRESH_STOP = 13.0
-    if left_close < SIDE_THRESH_STOP:
+    if left_close < THRESH_STOP:
         return (WALL_V * 0.7, -0.7), (0.0, 0.0, False)
-    if right_close < SIDE_THRESH_STOP:
+    if right_close < THRESH_STOP:
         return (WALL_V * 0.7, 0.7), (0.0, 0.0, False)
 
     wall_dist, wall_angle, valid = estimate_wall(scan, follow_side)
@@ -237,14 +230,30 @@ def make_mask(frame, hsv, name):
 
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
-KP_ROT         = 0.030
-W_MIN          = 0.20
+
+# [PATCH] 센트로이드 추적 P제어 재조정
+# - KP_ROT를 낮춰 "포화(최대 회전속도)"가 걸리는 지점을 화면 끝쪽으로 밀어냄
+#   (기존 0.030이면 err_x=53px만 되어도 이미 최대 회전 1.6rad/s로 포화되어
+#    "부드럽게 좁혀가는" 비례 구간이 거의 느껴지지 않았음)
+# - DEADBAND_PX: 이 범위 안에서는 회전을 아예 0으로 끊어서 진짜 "직진"이 되게 함
+#   (기존엔 floor만 있고 데드존이 없어서 중앙 근처에서도 노이즈로 계속 까딱거렸음)
+KP_ROT         = 0.012
+W_MIN          = 0.12
+DEADBAND_PX    = 8
+
 APPROACH_V     = 0.13
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 
+# [PATCH] 센트로이드 노이즈 완화용 EMA 필터
+CENTROID_EMA_ALPHA = 0.4
+
+# [PATCH] TRACK 중 타겟을 연속 몇 프레임 못 보면 "놓쳤다"고 판단할지
+LOST_CONFIRM = 8
+
 ARRIVE_Y_TOP       = int(240 * 0.85)
 ARRIVE_X_MARGIN    = 30
+# 기존 0.8초 → 1cm 더 전진하도록 보정 (ARRIVE_FORWARD_V 기준 0.01m / 0.13m/s ≈ 0.08s 추가)
 ARRIVE_FORWARD_SEC = 0.88
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
@@ -252,8 +261,9 @@ ARRIVE_CONFIRM     = 8
 WALL_SCAN_DIST      = 150.0
 MISSION_TIMEOUT_SEC = 10.0
 
+# SEARCH 서브스테이트: 타겟을 놓쳤을 때 마지막으로 보인 방향으로 360도 회전 탐색
 SEARCH_W            = 0.85
-SEARCH_FULL_ROT_SEC = float(2 * np.pi / SEARCH_W)
+SEARCH_FULL_ROT_SEC = float(2 * np.pi / SEARCH_W)  # ≈ 7.39초
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode            = "LIDAR"
@@ -271,6 +281,11 @@ search_t        = None
 mission_start_t = time.time()
 hop_start_t     = None
 last_cmd        = (0.0, 0.0)
+
+# [PATCH] 추가 상태 변수
+filtered_cx  = None   # 센트로이드 EMA 필터 값
+lost_count   = 0       # TRACK 중 연속 미검출 프레임 카운터
+search_dir   = 1.0     # SEARCH 진입 시 고정되는 회전 방향
 
 dbg_wall_dist  = 0.0
 dbg_wall_angle = 0.0
@@ -329,11 +344,21 @@ try:
             if M_mom["m00"] > 0:
                 cx_obj = int(M_mom["m10"] / M_mom["m00"])
                 cy_obj = int(M_mom["m01"] / M_mom["m00"])
+
+            # [PATCH] 센트로이드 EMA 필터링 (노이즈로 인한 회전 떨림 완화)
+            if cx_obj >= 0:
+                filtered_cx = float(cx_obj) if filtered_cx is None else \
+                    (1 - CENTROID_EMA_ALPHA) * filtered_cx + CENTROID_EMA_ALPHA * cx_obj
+                cx_obj = int(filtered_cx)
+
             bx, by_top, bw, bh = cv2.boundingRect(big)
             last_seen_x   = cx_obj
             last_bottom_y = min(by_top + bh, 239)
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.circle(frame, (cx_obj, cy_obj), 5, (0, 255, 255), -1)
+        else:
+            # 검출 실패 시 필터 상태 리셋 (다음에 다시 잡히면 새로 시작)
+            filtered_cx = None
 
         arrive_x1 = cx_mid - ARRIVE_X_MARGIN
         arrive_x2 = cx_mid + ARRIVE_X_MARGIN
@@ -341,6 +366,15 @@ try:
 
         def centroid_in_arrive_zone():
             return (arrive_x1 <= cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
+
+        # [PATCH] 데드존 적용된 카메라 회전 제어
+        def cam_w(ex):
+            if abs(ex) < DEADBAND_PX:
+                return 0.0
+            raw = -KP_ROT * ex
+            if abs(raw) < W_MIN:
+                return -W_MIN if ex > 0 else W_MIN
+            return raw
 
         # ── LIDAR 모드 ───────────────────────────────────────────────
         if mode == "LIDAR":
@@ -488,55 +522,87 @@ try:
                 send_cmd(v, w)
 
             elif park_state == "TRACK":
-                arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
+                if found:
+                    # [PATCH] 타겟이 다시 보이면 미검출 카운터 리셋
+                    lost_count = 0
 
-                if arrive_count >= ARRIVE_CONFIRM:
-                    arrive_count = 0
-                    park_state = "FORWARD"
-                    park_t = time.time()
-                    send_cmd(ARRIVE_FORWARD_V, 0.0)
-                    continue
+                    arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
 
-                err_x = cx_obj - cx_mid
-                err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
-                reduced_v = APPROACH_V * (1.0 - err_ratio)
+                    if arrive_count >= ARRIVE_CONFIRM:
+                        arrive_count = 0
+                        park_state = "FORWARD"
+                        park_t = time.time()
+                        send_cmd(ARRIVE_FORWARD_V, 0.0)
+                        continue
 
-                def cam_w(ex):
-                    raw = -KP_ROT * ex
-                    if abs(raw) < W_MIN and ex != 0:
-                        return -W_MIN if ex > 0 else W_MIN
-                    return raw
+                    err_x = cx_obj - cx_mid
+                    err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
+                    reduced_v = APPROACH_V * (1.0 - err_ratio)
 
-                if fm >= THRESH_SLOW:
-                    v, w = reduced_v, cam_w(err_x)
-                else:
-                    w_cam = cam_w(err_x)
-                    w_lid = adir * 0.7
-                    if fm < THRESH_STOP:
-                        v, w = 0.09, w_lid
-                    elif fm < THRESH_TURN:
-                        v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
+                    if fm >= THRESH_SLOW:
+                        v, w = reduced_v, cam_w(err_x)
                     else:
-                        v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
+                        w_cam = cam_w(err_x)
+                        w_lid = adir * 0.7
+                        if fm < THRESH_STOP:
+                            v, w = 0.09, w_lid
+                        elif fm < THRESH_TURN:
+                            v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
+                        else:
+                            v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
 
-                last_cmd = (v, w)
-                send_cmd(v, w)
+                    last_cmd = (v, w)
+                    send_cmd(v, w)
+
+                else:
+                    # [PATCH] 타겟을 놓친 경우 처리
+                    lost_count += 1
+                    if lost_count >= LOST_CONFIRM:
+                        # 연속 LOST_CONFIRM 프레임 이상 못 보면 "진짜로 놓쳤다" 판정
+                        lost_count = 0
+                        arrive_count = 0
+                        # 마지막으로 보였던 위치가 화면 오른쪽이었으면 오른쪽으로,
+                        # 왼쪽이었으면 왼쪽으로 회전하며 재탐색
+                        search_dir = -1.0 if last_seen_x > cx_mid else 1.0
+                        park_state = "SEARCH"
+                        search_t = None
+                        continue
+                    else:
+                        # 짧은 순간의 미검출(노이즈/블러)은 직전 명령을 유지해서
+                        # 불필요하게 멈추거나 엉뚱한 방향으로 틀지 않게 함
+                        send_cmd(*last_cmd)
 
             elif park_state == "SEARCH":
+                # [PATCH] 실제로 동작하는 SEARCH: 놓치기 직전 방향으로 회전 탐색
+                if found:
+                    detect_count += 1
+                    if detect_count >= DETECT_CONFIRM:
+                        detect_count = 0
+                        search_t = None
+                        park_state = "TRACK"
+                        continue
+                else:
+                    detect_count = 0
+
                 if search_t is None:
                     search_t = time.time()
-                    arrive_count = 0
+
                 if time.time() - search_t > SEARCH_FULL_ROT_SEC:
+                    # 한 바퀴 돌아도 못 찾으면 벽 탐색으로 폴백
                     park_state = "WALL_SEARCH"
                     search_t = None
                 else:
-                    send_cmd(0.0, -SEARCH_W if last_seen_x > cx_mid else SEARCH_W)
+                    send_cmd(0.0, search_dir * SEARCH_W)
 
         # ── 디버그 오버레이 ───────────────────────────────────────────
         search_time_left = MISSION_TIMEOUT_SEC - (time.time() - mission_start_t)
         if is_searching and search_time_left > 0:
             cv2.putText(frame, f"Timeout: {search_time_left:.1f}s | Side:{follow_side}",
                         (10, 20), 0, 0.50, (255, 150, 0), 2)
+
+        if mode == "PARK" and park_state == "SEARCH":
+            cv2.putText(frame, f"SEARCH dir={'R' if search_dir < 0 else 'L'}",
+                        (10, 35), 0, 0.50, (0, 200, 255), 2)
 
         in_wall_follow = (
             (mode == "LIDAR" and lidar_state == "WALL_FOLLOW") or
