@@ -113,7 +113,7 @@ def obstacle_on_target(scan, target_angle):
                      center + TARGET_CHECK_HALFWIDTH + 1) % 360
     return float(np.min(scan[idx]))
 
-def wall_follow(scan, fm, adir, follow_side, target_bias_sign=0):
+def wall_follow(scan, fm, adir, follow_side):
     sd          = side_dist(scan, follow_side)
     # ★ 수정: side_dist와 동일한 이유로 left_close/right_close 구간도 swap
     left_close  = side_min(scan, 240, 300)   # (수정 전: 60, 120)
@@ -152,13 +152,6 @@ def wall_follow(scan, fm, adir, follow_side, target_bias_sign=0):
         v = WALL_V * (1.0 - 0.4 * blend)
     else:
         v = WALL_V
-
-    # ★ 신규: 마지막으로 본 색지 방향(target_bias_sign: -1=좌, +1=우, 0=없음)으로
-    #   회전각(w)을 강하게 편향. 벽 추종 성분(w)보다 색지 편향 성분이 우세하도록
-    #   TARGET_BIAS_WEIGHT 비율로 블렌딩 -> "벽은 충돌 방지용, 색지 방향을 적극 우선"
-    if target_bias_sign != 0:
-        w_bias_target = target_bias_sign * 0.9   # 편향 성분의 크기(최대 회전각 근처로 강하게)
-        w = (1.0 - TARGET_BIAS_WEIGHT) * w + TARGET_BIAS_WEIGHT * w_bias_target
 
     w = float(np.clip(w, -0.9, 0.9))
     return (v, w)
@@ -223,11 +216,6 @@ TARGET_CHECK_HALFWIDTH = 15     # 색지 방향 기준 ±15도 검사
 CAMERA_HFOV            = 60.0   # 카메라 수평 화각(deg) — 실측 후 보정 필요
 CAM_TO_LIDAR_SIGN      = 1      # 좌우가 반대로 동작하면 -1로 변경
 
-# ★ 신규: 벽 추종 중 "마지막으로 본 색지 방향"으로 회전각(w)을 편향시키는 강도
-#   0.0 = 편향 없음(순수 벽 추종), 1.0 = 색지 방향 부호로 완전히 덮어씀
-#   "강하게" 요청에 따라 벽 추종 성분보다 색지 편향 성분이 우세하도록 설정
-TARGET_BIAS_WEIGHT = 0.65
-
 # ★ 신규: 같은 장애물을 한 바퀴 넘게 도는 것을 감지하기 위한 회전각 누적 임계값/탈출 동작
 FULL_LOOP_THRESH   = math.radians(400)   # 약 400도 누적 회전 -> "한 바퀴 돈 것 같다" 판단 (여유 40도)
 LOOP_ESCAPE_BACK_V = -0.12               # 탈출 시 후진 속도
@@ -249,6 +237,9 @@ search_t      = None
 mission_start_t = time.time() 
 hop_start_t     = None        
 last_cmd      = (0.0, 0.0)
+
+# ★ 신규: 색지가 "보이다가 사라지는 순간"을 감지하기 위한 직전 프레임 found 상태
+was_found     = False
 
 print(f"START | MISSION: {MISSION}")
 
@@ -314,13 +305,13 @@ try:
         def centroid_in_arrive_zone():
             return (cx_obj >= arrive_x1 and cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
 
-        # ★ 신규: 벽 추종 중 마지막으로 본 색지 방향의 부호만 사용 (단순 좌/우 판정)
-        #   last_seen_x가 cx_mid보다 왼쪽이면 -1, 오른쪽이면 +1, 아직 한 번도 못 봤으면 0
-        #   (last_seen_x 기본값은 cx_mid와 같은 160이므로 자연스럽게 0이 됨)
-        def get_target_bias_sign():
-            if last_seen_x < cx_mid: return -1
-            if last_seen_x > cx_mid: return 1
-            return 0
+        # ★ 신규: 색지가 "보이다가 사라지는 순간"을 감지해서 그 직전 위치(last_seen_x) 기준으로
+        #   follow_side를 즉시 갱신. WALL_FOLLOW/WALL_APPROACH 중에만 의미가 있지만,
+        #   다른 상태에서 갱신돼도 무해하므로 매 프레임 체크.
+        #   (사라진 쪽=색지가 마지막으로 보였던 쪽 벽을 그대로 추종 -> 같은 follow_side 로직 재사용)
+        if was_found and not found:
+            follow_side = "L" if last_seen_x < cx_mid else "R"
+        was_found = found
 
         # ══ LIDAR 모드 ═════════════════════════════════════════════════════
         if mode == "LIDAR":
@@ -350,7 +341,7 @@ try:
                     else: send_cmd(WALL_APPROACH_V, sign * 0.3)
 
             elif lidar_state == "WALL_FOLLOW":
-                v, w = wall_follow(scan, fm, adir, follow_side, get_target_bias_sign())
+                v, w = wall_follow(scan, fm, adir, follow_side)
                 send_cmd(v, w)
 
         # ══ PARK 모드 ═════════════════════════════════════════════════════
@@ -434,11 +425,6 @@ try:
                 else:
                     v = WALL_APPROACH_V
                     w = sign * 0.3
-                    # ★ 신규: 벽 접근 중에도 마지막으로 본 색지 방향으로 회전각 편향
-                    tb = get_target_bias_sign()
-                    if tb != 0:
-                        w = (1.0 - TARGET_BIAS_WEIGHT) * w + TARGET_BIAS_WEIGHT * (tb * 0.6)
-                        w = float(np.clip(w, -0.9, 0.9))
                 send_cmd(v, w)
 
             elif park_state == "WALL_FOLLOW":
@@ -448,7 +434,7 @@ try:
                         detect_count = 0; park_state = "TRACK"; continue
                 else: detect_count = 0
 
-                v, w = wall_follow(scan, fm, adir, follow_side, get_target_bias_sign())
+                v, w = wall_follow(scan, fm, adir, follow_side)
                 send_cmd(v, w)
 
             elif park_state == "TRACK":
