@@ -232,15 +232,16 @@ DETECT_CONFIRM = 6
 
 ARRIVE_Y_TOP       = int(240 * 0.85)
 ARRIVE_X_MARGIN    = 30
-ARRIVE_FORWARD_SEC = 0.8
+ARRIVE_FORWARD_SEC = 1.0
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
 WALL_SCAN_DIST      = 150.0
-MISSION_TIMEOUT_SEC = 10.0
+MISSION_TIMEOUT_SEC = 12.0
 TRACK_LOST_ROT_SEC  = 2.0
-SEARCH_ROT_SEC      = 6.0
+SEARCH_ROT_SEC      = 4.0
 WALL_FOLLOW_MAX_SEC = 6.0
+SEARCH_DIR          = 1
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode            = "LIDAR"
@@ -528,8 +529,7 @@ try:
                         track_lost_t = time.time()
                         send_cmd(0.0, 0.0)
                     elif time.time() - track_lost_t < TRACK_LOST_ROT_SEC:
-                        turn_dir = 1.0 if last_seen_x < cx_mid else -1.0
-                        send_cmd(0.0, 0.9 * turn_dir)
+                        send_cmd(0.0, 0.6)
                     else:
                         park_state = "SEARCH"
                         search_t = None
@@ -547,8 +547,9 @@ try:
 
                 elapsed = time.time() - search_t
                 if elapsed < SEARCH_ROT_SEC:
-                    send_cmd(0.0, 0.7 if last_seen_x < cx_mid else -0.7)
+                    send_cmd(0.0, 0.7 * SEARCH_DIR)
                 else:
+                    SEARCH_DIR *= -1
                     park_state = "WALL_SEARCH"
                     search_t = None
 
