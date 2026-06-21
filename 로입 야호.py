@@ -25,15 +25,14 @@ lidar_ser.reset_input_buffer()
 lidar_ser.write(bytes([0xA5, 0x20])); lidar_ser.read(7)
 print("LIDAR OK")
 
-# ── LIDAR PARAMS (정면 외벽 충돌 방지 및 카메라-라이다 동기화 세팅) ────────────
+# ── LIDAR PARAMS ──────────────────────────────────────────────────────
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
 FRONT_RANGE  = 90    
 
-# 외벽 감지 시점 브레이킹 및 급선회 임계값
-THRESH_SLOW  = 40.0   # 40cm 앞 외벽 감지 시점부터 미리 속도 줄이기 시작
-THRESH_TURN  = 24.0   # 24cm 앞에서부터 확실하게 강한 선회 시작
-THRESH_STOP  = 12.0   # 12cm 이하는 즉시 정지 및 초강력 회전
+THRESH_SLOW  = 40.0   # 40cm 앞 외벽 감지 시 브레이킹 시작
+THRESH_TURN  = 24.0   # 24cm 앞 하드 선회 시작
+THRESH_STOP  = 12.0   # 12cm 비상 정지 및 제자리 회전
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -77,13 +76,12 @@ def front_min(scan):
     idx = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     return float(np.min(scan[idx]))
 
-def avoid_dir(scan):
-    return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
+# [삭제] 쥐약 같던 avoid_dir 함수 완전 삭제 폐기
 
-def decide_follow_side(adir, found, cx_obj, cx_mid):
-    if found and cx_obj >= 0:
-        return "L" if cx_obj < cx_mid else "R"
-    return "R" if adir == 1 else "L"
+def decide_follow_side(found, cx_obj, cx_mid, last_seen_x):
+    # 현재 타겟 객체가 보이거나, 마지막 잔상이 중앙보다 왼쪽에 있었다면 좌측 벽 추종, 아니면 우측 벽 추종
+    ref_x = cx_obj if (found and cx_obj >= 0) else last_seen_x
+    return "L" if ref_x < cx_mid else "R"
 
 def side_dist(scan, side):
     if side == "L":
@@ -96,22 +94,21 @@ def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
 
-def wall_follow(scan, fm, adir, follow_side, found, last_seen_x, cx_mid):
+def wall_follow(scan, fm, follow_side, found, last_seen_x, cx_mid):
     sd          = side_dist(scan, follow_side)
     left_close  = side_min(scan, 240, 300)   
     right_close = side_min(scan, 60, 120)    
     sign = 1 if follow_side == "L" else -1
 
-    # [적용] 객체가 안 보일 때 라이다의 허황된 공간탐색(adir)을 카메라 잔상 방향으로 강제 일치
-    if not found:
-        camera_dir = 1.0 if last_seen_x < cx_mid else -1.0
-        adir = camera_dir  
+    # [수정] 오직 카메라 잔상 정보(마지막으로 객체를 본 방향)로만 조향 방향을 결정합니다.
+    # 마지막 보았던 위치가 왼쪽이면 좌회전(1), 오른쪽이면 우회전(-1)
+    turn_dir = 1.0 if last_seen_x < cx_mid else -1.0
 
     # 1. 초근접 위험 구역 처리 (강력 탈출)
     if fm < THRESH_STOP:
-        return (0.02, adir * 1.5)          
+        return (0.02, turn_dir * 1.5)          
     if fm < THRESH_TURN:
-        return (WALL_TURN_V, adir * 1.45)  
+        return (WALL_TURN_V, turn_dir * 1.45)  
 
     # 2. 측면 모서리 긁힘 방지
     if left_close < SIDE_STOP:
@@ -133,10 +130,10 @@ def wall_follow(scan, fm, adir, follow_side, found, last_seen_x, cx_mid):
     err = sd - WALL_TARGET
     w   = sign * WALL_KP * err
     
-    # 6. 전방 외벽 감지 시 브레이크 블렌딩 및 카메라 지향적 방향(adir) 선회
+    # 6. 전방 외벽 감지 시 브레이크 블렌딩 및 카메라 지향적 회전 적용
     if fm < THRESH_SLOW:
         blend = float(np.clip((THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
-        w = (1 - blend) * w + blend * adir * 1.25  # 카메라의 잔상이 지배하는 라이다 탈출 조향
+        w = (1 - blend) * w + blend * turn_dir * 1.25  
         v = WALL_V * (1.0 - 0.70 * blend)          
     else:
         v = WALL_V
@@ -144,10 +141,10 @@ def wall_follow(scan, fm, adir, follow_side, found, last_seen_x, cx_mid):
     # 7. 미세 편향 추가 (외벽 영역 진입 전 일때만 서서히 가중치 부여)
     if not found and fm >= THRESH_SLOW:
         is_safe = True
-        if adir > 0 and left_close < (WALL_TARGET * 1.3): is_safe = False
-        if adir < 0 and right_close < (WALL_TARGET * 1.3): is_safe = False
+        if turn_dir > 0 and left_close < (WALL_TARGET * 1.3): is_safe = False
+        if turn_dir < 0 and right_close < (WALL_TARGET * 1.3): is_safe = False
         if is_safe:
-            w += (adir * 0.20)
+            w += (turn_dir * 0.20)
 
     w = float(np.clip(w, -1.5, 1.5))
     return (v, w)
@@ -204,9 +201,8 @@ WALL_APPROACH_V  = 0.14
 WALL_KP          = 0.030   
 WALL_V           = 0.17    
 
-# 언더스티어 방지용 코너 서행 및 고전력 회전 상수
-WALL_TURN_V      = 0.04    # 코너 선회 전진 속도 최소화
-WALL_LOST_W      = 1.5     # 벽 유실 및 최대 회전 한계선
+WALL_TURN_V      = 0.04    
+WALL_LOST_W      = 1.5     
 WALL_SEARCH_W    = 1.1     
 MISSION_TIMEOUT_SEC = 10.0  
 
@@ -245,7 +241,6 @@ try:
         hsv    = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         scan   = get_scan()
         fm     = front_min(scan)
-        adir   = avoid_dir(scan)
 
         if mission_idx >= len(MISSION):
             stop_robot()
@@ -309,22 +304,24 @@ try:
                 right_close = side_min(scan, 60, 120)
 
                 if fm < WALL_SCAN_DIST or left_close < SIDE_SCAN_DIST or right_close < SIDE_SCAN_DIST:
-                    follow_side = decide_follow_side(adir, found, cx_obj, cx_mid)
+                    follow_side = decide_follow_side(found, cx_obj, cx_mid, last_seen_x)
                     lidar_state = "WALL_APPROACH"
                 else: 
-                    send_cmd(0.0, -adir * WALL_SEARCH_W)
+                    # avoid_dir이 빠졌으므로 기본 탐색 시 제자리 우회전(or 좌회전)으로 일정하게 서칭
+                    send_cmd(0.0, -WALL_SEARCH_W)
 
             elif lidar_state == "WALL_APPROACH":
                 sd = side_dist(scan, follow_side)
                 if sd <= WALL_TARGET * 1.3: lidar_state = "WALL_FOLLOW"
                 else:
                     sign = 1 if follow_side == "L" else -1
-                    if fm < THRESH_STOP: send_cmd(0.02, adir * 1.4)
-                    elif fm < THRESH_TURN: send_cmd(WALL_APPROACH_V * 0.4, adir * 1.1)
+                    turn_dir = 1.0 if last_seen_x < cx_mid else -1.0
+                    if fm < THRESH_STOP: send_cmd(0.02, turn_dir * 1.4)
+                    elif fm < THRESH_TURN: send_cmd(WALL_APPROACH_V * 0.4, turn_dir * 1.1)
                     else: send_cmd(WALL_APPROACH_V, sign * 0.3)
 
             elif lidar_state == "WALL_FOLLOW":
-                v, w = wall_follow(scan, fm, adir, follow_side, found, last_seen_x, cx_mid)
+                v, w = wall_follow(scan, fm, follow_side, found, last_seen_x, cx_mid)
                 send_cmd(v, w)
 
         # ══ PARK 모드 ═════════════════════════════════════════════════════
@@ -350,7 +347,7 @@ try:
                     elif fm > 40.0:
                         send_cmd(WALL_V, 0.0)
                     else:
-                        follow_side = decide_follow_side(adir, found, cx_obj, cx_mid)
+                        follow_side = decide_follow_side(found, cx_obj, cx_mid, last_seen_x)
                         park_state = "WALL_APPROACH"
                         mission_start_t = time.time()
                         continue
@@ -389,10 +386,10 @@ try:
                 right_close = side_min(scan, 60, 120)
 
                 if fm < WALL_SCAN_DIST or left_close < SIDE_SCAN_DIST or right_close < SIDE_SCAN_DIST:
-                    follow_side = decide_follow_side(adir, found, cx_obj, cx_mid)
+                    follow_side = decide_follow_side(found, cx_obj, cx_mid, last_seen_x)
                     park_state = "WALL_APPROACH"
                     continue
-                send_cmd(0.0, -adir * WALL_SEARCH_W)
+                send_cmd(0.0, -WALL_SEARCH_W)
 
             elif park_state == "WALL_APPROACH":
                 if found:
@@ -405,8 +402,9 @@ try:
                 if sd <= WALL_TARGET * 1.3: park_state = "WALL_FOLLOW"; continue
 
                 sign = 1 if follow_side == "L" else -1
-                if fm < THRESH_STOP: v, w = 0.02, adir * 1.4
-                elif fm < THRESH_TURN: v, w = WALL_APPROACH_V * 0.4, adir * 1.1
+                turn_dir = 1.0 if last_seen_x < cx_mid else -1.0
+                if fm < THRESH_STOP: v, w = 0.02, turn_dir * 1.4
+                elif fm < THRESH_TURN: v, w = WALL_APPROACH_V * 0.4, turn_dir * 1.1
                 else: v, w = WALL_APPROACH_V, sign * 0.3
                 send_cmd(v, w)
 
@@ -417,7 +415,7 @@ try:
                         detect_count = 0; park_state = "TRACK"; continue
                 else: detect_count = 0
 
-                v, w = wall_follow(scan, fm, adir, follow_side, found, last_seen_x, cx_mid)
+                v, w = wall_follow(scan, fm, follow_side, found, last_seen_x, cx_mid)
                 send_cmd(v, w)
 
             elif park_state == "TRACK":
@@ -444,7 +442,9 @@ try:
 
                     if fm >= THRESH_SLOW: v, w = reduced_v, cam_w(err_x)
                     else:
-                        w_cam = cam_w(err_x); w_lid = adir * 0.75
+                        w_cam = cam_w(err_x)
+                        turn_dir = 1.0 if last_seen_x < cx_mid else -1.0
+                        w_lid = turn_dir * 0.75
                         if fm < THRESH_STOP: v, w = 0.02, w_lid * 1.5
                         elif fm < THRESH_TURN: v, w = 0.04, 0.8 * (w_lid * 1.45) + 0.2 * w_cam
                         else: v, w = reduced_v, 0.4 * w_lid + 0.6 * w_cam
