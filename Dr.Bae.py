@@ -84,6 +84,17 @@ def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
 
+# ── 좁은 길(끼임 위험) 감지 ───────────────────────────────────────────
+NARROW_SQUEEZE_DIST = 30.0   # 정면/좌/우 모두 이 거리(cm) 이내면 좁은 길에 낀 것으로 판단
+NARROW_FORWARD_V    = 0.10   # 좁은 길에서 회전 대신 조심스럽게 직진하는 속도
+NARROW_MAX_SEC      = 3.0    # 이 시간 이상 끼임 상태로 직진했는데도 안 빠져나가면 정지 (막다른 길로 추정)
+NARROW_HARD_STOP    = 12.0   # 정면이 이 거리(cm)보다 가까워지면 직진 중에도 즉시 정지
+
+def narrow_squeeze(scan, fm):
+    left_close  = side_min(scan, 60, 120)
+    right_close = side_min(scan, 240, 300)
+    return fm < NARROW_SQUEEZE_DIST and left_close < NARROW_SQUEEZE_DIST and right_close < NARROW_SQUEEZE_DIST
+
 # ── 벽 직선 추정 ───────────────────────────────────────────────────────
 WALL_SCAN_START_L = 55
 WALL_SCAN_END_L   = 125
@@ -148,6 +159,11 @@ def wall_follow(scan, fm, adir, follow_side, current_v=None):
     #     CORNER_SEARCH ↔ WALL_APPROACH ↔ WALL_FOLLOW 사이를 무한히 왕복하며
     #     L/R 메시지가 번갈아 출력되고 로봇이 거의 정지하는 문제가 있었음.
     wall_dist, wall_angle, valid = estimate_wall(scan, follow_side)
+
+    # [추가] 정면+좌+우 모두 30cm 이내 → 좁은 길에 낀 상황.
+    #         이때 회전하면 양쪽 벽에 부딫힐 위험이 있으므로 회전 대신 조심히 직진 시도.
+    if fm < NARROW_SQUEEZE_DIST and left_close < NARROW_SQUEEZE_DIST and right_close < NARROW_SQUEEZE_DIST:
+        return (NARROW_FORWARD_V, 0.0), (wall_dist, wall_angle, valid)
 
     if fm < THRESH_STOP:
         return (0.08, adir * 1.1), (wall_dist, wall_angle, valid)
@@ -296,6 +312,9 @@ scan_t          = 0.0
 open_field_since = None   # 전방 OPEN_FIELD_DIST 밖이 비어있기 시작한 시각
 return_turn_t    = 0.0    # RETURN_TURN 상태 시작 시각
 
+# 좁은 길 끼임 관리용 변수
+squeeze_since    = None   # 정면+좌+우가 동시에 NARROW_SQUEEZE_DIST 이내로 들어온 시각
+
 dbg_wall_dist  = 0.0
 dbg_wall_angle = 0.0
 dbg_valid      = False
@@ -316,6 +335,13 @@ try:
         scan   = get_scan()
         fm     = front_min(scan)
         adir   = avoid_dir(scan)
+
+        # 좁은 길 끼임 지속시간 추적 (어떤 상태에서든 매 프레임 갱신)
+        if narrow_squeeze(scan, fm):
+            if squeeze_since is None:
+                squeeze_since = time.time()
+        else:
+            squeeze_since = None
 
         if mission_idx >= len(MISSION):
             stop_robot()
@@ -454,6 +480,9 @@ try:
                 wall_dist, _, valid = estimate_wall(scan, follow_side)
                 if valid and wall_dist <= WALL_TARGET * 1.4:
                     lidar_state = "WALL_FOLLOW"
+                elif narrow_squeeze(scan, fm):
+                    print(f"⚠️ [LIDAR] 좁은 길 끼임 위험! 정면 {fm:.1f}cm 조심히 직진")
+                    send_cmd(NARROW_FORWARD_V, 0.0)
                 else:
                     sign = 1 if follow_side == "L" else -1
                     if fm < THRESH_STOP:
@@ -691,13 +720,17 @@ try:
                     park_state = "WALL_FOLLOW"
                     continue
 
-                sign = 1 if follow_side == "L" else -1
-                if fm < THRESH_STOP:
-                    v, w = 0.08, adir * 1.0
-                elif fm < THRESH_TURN:
-                    v, w = WALL_APPROACH_V * 0.6, adir * 0.7
+                if narrow_squeeze(scan, fm):
+                    print(f"⚠️ [PARK] 좁은 길 끼임 위험! 정면 {fm:.1f}cm 조심히 직진")
+                    v, w = NARROW_FORWARD_V, 0.0
                 else:
-                    v, w = WALL_APPROACH_V, sign * 0.3
+                    sign = 1 if follow_side == "L" else -1
+                    if fm < THRESH_STOP:
+                        v, w = 0.08, adir * 1.0
+                    elif fm < THRESH_TURN:
+                        v, w = WALL_APPROACH_V * 0.6, adir * 0.7
+                    else:
+                        v, w = WALL_APPROACH_V, sign * 0.3
                 send_cmd(v, w)
 
             elif park_state == "WALL_FOLLOW":
