@@ -209,6 +209,10 @@ TARGET_CHECK_HALFWIDTH = 15     # 색지 방향 기준 ±15도 검사
 CAMERA_HFOV            = 60.0   # 카메라 수평 화각(deg) — 실측 후 보정 필요
 CAM_TO_LIDAR_SIGN      = 1      # 좌우가 반대로 동작하면 -1로 변경
 
+# ★ 신규: WALL_FOLLOW/WALL_APPROACH 중 "색지 방향이 뚫렸는지" 재확인하여
+#   빠르게 TRACK으로 복귀하기 위한 연속 확인 카운트 임계값 (오탐 방지)
+REROUTE_CONFIRM = DETECT_CONFIRM
+
 # ★ 신규: 같은 장애물을 한 바퀴 넘게 도는 것을 감지하기 위한 회전각 누적 임계값/탈출 동작
 FULL_LOOP_THRESH   = math.radians(400)   # 약 400도 누적 회전 -> "한 바퀴 돈 것 같다" 판단 (여유 40도)
 LOOP_ESCAPE_BACK_V = -0.12               # 탈출 시 후진 속도
@@ -230,6 +234,9 @@ search_t      = None
 mission_start_t = time.time() 
 hop_start_t     = None        
 last_cmd      = (0.0, 0.0)
+
+# ★ 신규: WALL_FOLLOW/WALL_APPROACH 중 색지 방향이 뚫려있다고 연속으로 확인된 프레임 수
+reroute_clear_count = 0
 
 print(f"START | MISSION: {MISSION}")
 
@@ -294,6 +301,26 @@ try:
 
         def centroid_in_arrive_zone():
             return (cx_obj >= arrive_x1 and cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
+
+        # ★ 신규: 우회(WALL_APPROACH/WALL_FOLLOW) 중 색지 방향이 뚫려있는지 연속 확인 후
+        #   TRACK으로 조기 복귀할지 판단. DETECT_CONFIRM과 동일한 방식으로 오탐 방지.
+        #   반환값 True면 이번 프레임에서 park_state를 "TRACK"으로 전환하고 continue 해야 함.
+        def check_reroute_to_track():
+            global reroute_clear_count
+            if found:
+                target_angle = cx_to_lidar_angle(cx_obj, cx_mid, W)
+                target_clear = obstacle_on_target(scan, target_angle)
+                if target_clear >= TARGET_CLEAR_DIST:
+                    reroute_clear_count += 1
+                else:
+                    reroute_clear_count = 0
+            else:
+                reroute_clear_count = 0
+
+            if reroute_clear_count >= REROUTE_CONFIRM:
+                reroute_clear_count = 0
+                return True
+            return False
 
         # ══ LIDAR 모드 ═════════════════════════════════════════════════════
         if mode == "LIDAR":
@@ -396,6 +423,11 @@ try:
                         detect_count = 0; park_state = "TRACK"; continue
                 else: detect_count = 0
 
+                # ★ 신규: 벽에 붙으러 가는 중에도 색지 방향이 뚫려있으면 조기 복귀
+                if check_reroute_to_track():
+                    park_state = "TRACK"
+                    continue
+
                 sd = side_dist(scan, follow_side)
                 if sd <= WALL_TARGET * 1.3: park_state = "WALL_FOLLOW"; continue
 
@@ -412,6 +444,12 @@ try:
                         detect_count = 0; park_state = "TRACK"; continue
                 else: detect_count = 0
 
+                # ★ 신규: 벽 추종 중에도 색지 방향이 뚫려있으면 조기 복귀
+                #   (DETECT_CONFIRM과 동일한 연속 프레임 확인 방식으로 오탐 방지)
+                if check_reroute_to_track():
+                    park_state = "TRACK"
+                    continue
+
                 v, w = wall_follow(scan, fm, adir, follow_side)
                 send_cmd(v, w)
 
@@ -426,6 +464,7 @@ try:
                     if target_clear < TARGET_CLEAR_DIST:
                         # 색지 방향이 막혀 있음 -> TRACK 중단, 장애물 우회로 전환
                         arrive_count = 0
+                        reroute_clear_count = 0
                         follow_side = decide_follow_side(adir, found, cx_obj, cx_mid)
                         park_state = "WALL_APPROACH"
                         continue
