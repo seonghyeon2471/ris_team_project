@@ -167,14 +167,14 @@ WF_SIDE_RANGE   = 20     # 측면 각도 범위 (90°±20° / 270°±20°)
 WF_KP           = 0.020  # PD 비례 게인
 WF_KD           = 0.008  # PD 미분 게인
 WF_V            = 0.15   # wall-following 전진 속도
-WF_TURN_W       = 1.3    # 코너 회전 속도
+WF_TURN_W       = 0.9    # 코너 회전 속도
 
 # 코너 감지 & 오버슈트 파라미터
 # 측면 벽이 갑자기 사라지면(거리가 크게 늘면) 코너로 판정
 WF_CORNER_SIDE_THRESH = 45.0  # cm — 측면 거리가 이 값 초과 시 코너 감지
 WF_CORNER_FWD_SEC     = 2.0   # 초 — 코너 감지 후 직진 시간 (바퀴 걸림 방지)
 WF_CORNER_FWD_V       = 0.15  # 코너 직진 속도
-WF_CORNER_TURN_W      = 1.2   # 코너 직진 후 회전 속도 (벽 방향으로 꺾기)
+WF_CORNER_TURN_W      = 0.85  # 코너 직진 후 회전 속도 (벽 방향으로 꺾기)
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"   # "LIDAR" | "WALL" | "PARK"
