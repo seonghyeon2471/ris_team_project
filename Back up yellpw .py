@@ -89,7 +89,7 @@ WALL_SCAN_START_L = 55
 WALL_SCAN_END_L   = 125
 WALL_SCAN_START_R = 235
 WALL_SCAN_END_R   = 305
-WALL_MAX_DIST     = 40.0
+WALL_MAX_DIST     = 50.0
 WALL_MIN_POINTS   = 5
 
 def estimate_wall(scan, side):
@@ -242,7 +242,7 @@ ARRIVE_FORWARD_SEC = 0.8
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
-WALL_SCAN_DIST      = 150.0
+WALL_SCAN_DIST      = 80.0
 MISSION_TIMEOUT_SEC = 10.0
 
 # ── STATE ─────────────────────────────────────────────────────────────
