@@ -163,7 +163,7 @@ ARRIVE_FORWARD_V   = 0.13            # 변경: 0.15 → 0.13
 ARRIVE_CONFIRM     = 8
 
 # ── WALL-FOLLOWING PARAMS ─────────────────────────────────────────────
-WF_ENGAGE_DIST  = 65.0   # cm — 전방 이 거리 이내 장애물 감지 시 WALL 진입
+WF_ENGAGE_DIST  = 30.0   # cm — 전방 이 거리 이내 장애물 감지 시 WALL 진입
 WF_TARGET_DIST  = 20.0   # cm — 벽과 유지할 목표 거리 (30 → 20)
 WF_SIDE_RANGE   = 20     # 측면 각도 범위 (90°±20° / 270°±20°)
 WF_KP           = 0.020  # PD 비례 게인
