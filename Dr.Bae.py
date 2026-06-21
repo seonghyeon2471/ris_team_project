@@ -230,30 +230,14 @@ def make_mask(frame, hsv, name):
 
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
-
-# [PATCH] 센트로이드 추적 P제어 재조정
-# - KP_ROT를 낮춰 "포화(최대 회전속도)"가 걸리는 지점을 화면 끝쪽으로 밀어냄
-#   (기존 0.030이면 err_x=53px만 되어도 이미 최대 회전 1.6rad/s로 포화되어
-#    "부드럽게 좁혀가는" 비례 구간이 거의 느껴지지 않았음)
-# - DEADBAND_PX: 이 범위 안에서는 회전을 아예 0으로 끊어서 진짜 "직진"이 되게 함
-#   (기존엔 floor만 있고 데드존이 없어서 중앙 근처에서도 노이즈로 계속 까딱거렸음)
-KP_ROT         = 0.012
-W_MIN          = 0.12
-DEADBAND_PX    = 8
-
+KP_ROT         = 0.030
+W_MIN          = 0.20
 APPROACH_V     = 0.13
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 
-# [PATCH] 센트로이드 노이즈 완화용 EMA 필터
-CENTROID_EMA_ALPHA = 0.4
-
-# [PATCH] TRACK 중 타겟을 연속 몇 프레임 못 보면 "놓쳤다"고 판단할지
-LOST_CONFIRM = 8
-
 ARRIVE_Y_TOP       = int(240 * 0.85)
 ARRIVE_X_MARGIN    = 30
-# 기존 0.8초 → 1cm 더 전진하도록 보정 (ARRIVE_FORWARD_V 기준 0.01m / 0.13m/s ≈ 0.08s 추가)
 ARRIVE_FORWARD_SEC = 0.88
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
@@ -261,9 +245,15 @@ ARRIVE_CONFIRM     = 8
 WALL_SCAN_DIST      = 150.0
 MISSION_TIMEOUT_SEC = 10.0
 
-# SEARCH 서브스테이트: 타겟을 놓쳤을 때 마지막으로 보인 방향으로 360도 회전 탐색
 SEARCH_W            = 0.85
-SEARCH_FULL_ROT_SEC = float(2 * np.pi / SEARCH_W)  # ≈ 7.39초
+SEARCH_FULL_ROT_SEC = float(2 * np.pi / SEARCH_W)
+
+# ========== NEW: 센트로이드 추적 파라미터 ==========
+CENTROID_TRACK_V     = 0.12      # 센트로이드 추적 속도
+CENTROID_KP          = 0.035     # 센트로이드 회전 게인
+CENTROID_MIN_DIST    = 8.0       # 색지 근접 정지 거리 (cm)
+CENTROID_ALIGN_TOL   = 15        # 중심 정렬 허용 오차 (pixel)
+CENTROID_STABLE_CNT  = 10        # 안정화 카운트 (센트로이드 정렬 유지 횟수)
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode            = "LIDAR"
@@ -282,16 +272,12 @@ mission_start_t = time.time()
 hop_start_t     = None
 last_cmd        = (0.0, 0.0)
 
-# [PATCH] 추가 상태 변수
-filtered_cx  = None   # 센트로이드 EMA 필터 값
-lost_count   = 0       # TRACK 중 연속 미검출 프레임 카운터
-search_dir   = 1.0     # SEARCH 진입 시 고정되는 회전 방향
-
 dbg_wall_dist  = 0.0
 dbg_wall_angle = 0.0
 dbg_valid      = False
 
 print(f"START | MISSION: {MISSION}")
+print("========== 센트로이드 우선순위 기반 & 0.8초 직진 마무리 적용 ==========")
 
 try:
     while True:
@@ -319,7 +305,7 @@ try:
         draw   = COLOR_CFG[target]["draw"]
 
         is_searching = (mode == "LIDAR") or (
-            mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH"]
+            mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH", "CENTROID_TRACK"]
         )
 
         if is_searching:
@@ -344,37 +330,41 @@ try:
             if M_mom["m00"] > 0:
                 cx_obj = int(M_mom["m10"] / M_mom["m00"])
                 cy_obj = int(M_mom["m01"] / M_mom["m00"])
-
-            # [PATCH] 센트로이드 EMA 필터링 (노이즈로 인한 회전 떨림 완화)
-            if cx_obj >= 0:
-                filtered_cx = float(cx_obj) if filtered_cx is None else \
-                    (1 - CENTROID_EMA_ALPHA) * filtered_cx + CENTROID_EMA_ALPHA * cx_obj
-                cx_obj = int(filtered_cx)
-
             bx, by_top, bw, bh = cv2.boundingRect(big)
             last_seen_x   = cx_obj
             last_bottom_y = min(by_top + bh, 239)
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.circle(frame, (cx_obj, cy_obj), 5, (0, 255, 255), -1)
-        else:
-            # 검출 실패 시 필터 상태 리셋 (다음에 다시 잡히면 새로 시작)
-            filtered_cx = None
 
         arrive_x1 = cx_mid - ARRIVE_X_MARGIN
         arrive_x2 = cx_mid + ARRIVE_X_MARGIN
         cv2.rectangle(frame, (arrive_x1, ARRIVE_Y_TOP), (arrive_x2, H - 1), (0, 0, 255), 1)
 
+        # ========== 센트로이드가 ARRIVE_ZONE 내인지 확인 ==========
         def centroid_in_arrive_zone():
             return (arrive_x1 <= cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
 
-        # [PATCH] 데드존 적용된 카메라 회전 제어
-        def cam_w(ex):
-            if abs(ex) < DEADBAND_PX:
-                return 0.0
-            raw = -KP_ROT * ex
-            if abs(raw) < W_MIN:
-                return -W_MIN if ex > 0 else W_MIN
-            return raw
+        # ========== 센트로이드 추적 제어 ==========
+        def centroid_track_control(cx_obj, cx_mid, last_bottom_y, ARRIVE_Y_TOP):
+            err_x = cx_obj - cx_mid
+            err_y = last_bottom_y - ARRIVE_Y_TOP
+            
+            # 거리 기반 속도 제어 (색지에 가까우면 감속)
+            if err_y < CENTROID_MIN_DIST * 3:  # 매우 가까움
+                v = 0.05
+            elif err_y < CENTROID_MIN_DIST * 6:  # 가까움
+                v = 0.08
+            else:
+                v = CENTROID_TRACK_V
+            
+            # 편차 기반 회전 제어
+            w = -CENTROID_KP * err_x
+            
+            # 최소 회전 게인 적용
+            if abs(w) < W_MIN and err_x != 0:
+                w = -W_MIN if err_x > 0 else W_MIN
+            
+            return v, w, err_x, err_y
 
         # ── LIDAR 모드 ───────────────────────────────────────────────
         if mode == "LIDAR":
@@ -385,8 +375,9 @@ try:
 
             if detect_count >= DETECT_CONFIRM:
                 detect_count = 0
-                mode = "PARK"
-                park_state = "TRACK"
+                mode = "CENTROID"
+                arrive_count = 0
+                print(f"[{target}] LIDAR → CENTROID 모드 전환!")
                 continue
 
             if lidar_state == "WALL_SEARCH":
@@ -412,11 +403,84 @@ try:
             elif lidar_state == "WALL_FOLLOW":
                 (v, w), (dbg_wall_dist, dbg_wall_angle, dbg_valid) = \
                     wall_follow_debug(scan, fm, adir, follow_side, WALL_V)
+                
+                # 모서리 탐색 로직 적용
+                if not dbg_valid:
+                    print("⚠️ [LIDAR] 모서리 감지! 좌우 스캔 시작")
+                    lidar_state = "CORNER_SEARCH"
+                    continue
                 send_cmd(v, w)
+            
+            elif lidar_state == "CORNER_SEARCH":
+                # 0도 기준 좌(0~70도), 우(-70~0도) 스캔
+                left_dist = side_min(scan, 0, 70)
+                right_dist = side_min(scan, 290, 360)
+                
+                if min(left_dist, right_dist) < 30.0:
+                    follow_side = "L" if left_dist < right_dist else "R"
+                    print(f"[LIDAR] 새 장애물 포착! 추종 방향: {follow_side}")
+                    lidar_state = "WALL_APPROACH"
+                else:
+                    send_cmd(0.0, WALL_SEARCH_W)
+
+        # ── CENTROID 모드 (독립) ─────────────────────────────────────────
+        elif mode == "CENTROID":
+            if found:
+                v, w, err_x, err_y = centroid_track_control(cx_obj, cx_mid, last_bottom_y, ARRIVE_Y_TOP)
+                send_cmd(v, w)
+                
+                if abs(err_x) < CENTROID_ALIGN_TOL and err_y < CENTROID_MIN_DIST * 2:
+                    arrive_count += 1
+                else:
+                    arrive_count = 0
+                
+                if arrive_count >= CENTROID_STABLE_CNT:
+                    print(f"✅ [{target}] 센트로이드 주차 완료! (count={arrive_count})")
+                    stop_robot()
+                    mission_idx += 1
+                    arrive_count = 0
+                    detect_count = 0
+                    mode = "LIDAR"
+                    lidar_state = "WALL_SEARCH"
+                    continue
+            else:
+                # 타겟 잃음 = 카메라 밑으로 들어갔다고 판단, 0.8초 마무리 전진!
+                print(f"👀 [{target}] 타겟이 카메라 밑으로 사라짐! 0.8초 직진 마무리 돌입!")
+                mode = "FINISH_FORWARD"
+                park_t = time.time()
+                continue
+        
+        # ── 마무리 직진 상태 (CENTROID 독립 모드용) ──
+        elif mode == "FINISH_FORWARD":
+            if time.time() - park_t < 0.8:
+                send_cmd(ARRIVE_FORWARD_V, 0.0) # 0.8초 고정 직진
+            else:
+                print(f"🎉 [{target}] 0.8초 직진 완료! 주차 완벽 성공!")
+                stop_robot()
+                mission_idx += 1
+                arrive_count = 0
+                detect_count = 0
+                if mission_idx < len(MISSION):
+                    mode = "LIDAR"
+                    lidar_state = "WALL_SEARCH"
+                else:
+                    mode = "DONE"
+                continue
 
         # ── PARK 모드 ───────────────────────────────────────────────
         elif mode == "PARK":
 
+            # [긴급 생존 1순위] 물리적 장애물 10cm 이내 (주차 및 직진 상태 제외)
+            if park_state not in ["SAFE_HOP", "FORWARD", "FINISH_FORWARD", "PARKING"]:
+                if fm < 10.0:
+                    print("⚠️ [긴급] 충돌 직전 물리적 장애물 감지! 우회 시작")
+                    left_dist = side_min(scan, 0, 90)
+                    right_dist = side_min(scan, 270, 360)
+                    follow_side = "L" if left_dist < right_dist else "R"
+                    park_state = "WALL_APPROACH"
+                    detect_count = 0 
+
+            # PARK 상태 분기
             if park_state == "SAFE_HOP":
                 if found:
                     detect_count += 1
@@ -449,15 +513,27 @@ try:
                 cv2.imshow("f", frame)
                 cv2.waitKey(1)
                 continue
-
-            if park_state == "FORWARD":
+            
+            # [기존 마무리 전진 로직]
+            elif park_state == "FORWARD":
                 if time.time() - park_t >= ARRIVE_FORWARD_SEC:
                     stop_robot()
                     park_state = "PARKING"
                     park_t = time.time()
                 else:
                     send_cmd(*last_cmd)
+            
+            # [새로운 0.8초 마무리 전진 로직]
+            elif park_state == "FINISH_FORWARD":
+                if time.time() - park_t < 0.8:  # 무조건 0.8초 직진
+                    send_cmd(ARRIVE_FORWARD_V, 0.0)
+                else:
+                    print(f"🎉 [{target}] 0.8초 직진 완료! 주차 완벽 성공!")
+                    stop_robot()
+                    park_state = "PARKING"
+                    park_t = time.time()
 
+            # [주차 완료 후 대기 로직]
             elif park_state == "PARKING":
                 stop_robot()
                 if time.time() - park_t >= PARK_SEC:
@@ -473,7 +549,9 @@ try:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
                         detect_count = 0
-                        park_state = "TRACK"
+                        park_state = "CENTROID_TRACK"
+                        arrive_count = 0
+                        print(f"[{target}] PARK → CENTROID_TRACK 상태 전환!")
                         continue
                 else:
                     detect_count = 0
@@ -488,7 +566,8 @@ try:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
                         detect_count = 0
-                        park_state = "TRACK"
+                        park_state = "CENTROID_TRACK"
+                        arrive_count = 0
                         continue
                 else:
                     detect_count = 0
@@ -512,87 +591,109 @@ try:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
                         detect_count = 0
-                        park_state = "TRACK"
+                        park_state = "CENTROID_TRACK"
+                        arrive_count = 0
                         continue
                 else:
                     detect_count = 0
 
                 (v, w), (dbg_wall_dist, dbg_wall_angle, dbg_valid) = \
                     wall_follow_debug(scan, fm, adir, follow_side, WALL_V)
+                
+                # 모서리 탐색 로직 적용
+                if not dbg_valid:
+                    print("⚠️ [PARK] 모서리 감지! 좌우 스캔 시작")
+                    park_state = "CORNER_SEARCH"
+                    continue
                 send_cmd(v, w)
+                
+            elif park_state == "CORNER_SEARCH":
+                left_dist = side_min(scan, 0, 70)
+                right_dist = side_min(scan, 290, 360)
+                
+                if min(left_dist, right_dist) < 30.0:
+                    follow_side = "L" if left_dist < right_dist else "R"
+                    print(f"[PARK] 새 장애물 포착! 추종 방향: {follow_side}")
+                    park_state = "WALL_APPROACH"
+                else:
+                    send_cmd(0.0, WALL_SEARCH_W)
+
+            elif park_state == "CENTROID_TRACK":
+                if found:
+                    v, w, err_x, err_y = centroid_track_control(cx_obj, cx_mid, last_bottom_y, ARRIVE_Y_TOP)
+                    send_cmd(v, w)
+                    
+                    if abs(err_x) < CENTROID_ALIGN_TOL and err_y < CENTROID_MIN_DIST * 2:
+                        arrive_count += 1
+                    else:
+                        arrive_count = 0
+                    
+                    if arrive_count >= CENTROID_STABLE_CNT:
+                        print(f"✅ [{target}] CENTROID_TRACK 주차 완료! (count={arrive_count})")
+                        stop_robot()
+                        mission_idx += 1
+                        arrive_count = 0
+                        detect_count = 0
+                        continue
+                else:
+                    # 타겟 잃음 = 카메라 밑으로 들어갔다고 판단, 0.8초 마무리 전진!
+                    detect_count = 0
+                    print(f"👀 [{target}] 타겟이 카메라 밑으로 사라짐! 0.8초 직진 마무리 돌입!")
+                    park_state = "FINISH_FORWARD"
+                    park_t = time.time()
+                    continue
 
             elif park_state == "TRACK":
-                if found:
-                    # [PATCH] 타겟이 다시 보이면 미검출 카운터 리셋
-                    lost_count = 0
+                if not found:
+                    # TRACK 중 타겟 잃음 = 카메라 밑으로 들어갔다고 판단, 0.8초 마무리 전진!
+                    print(f"👀 [{target}] TRACK 중 시야에서 사라짐! 0.8초 직진 마무리 돌입!")
+                    park_state = "FINISH_FORWARD"
+                    park_t = time.time()
+                    continue
 
-                    arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
+                arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
 
-                    if arrive_count >= ARRIVE_CONFIRM:
-                        arrive_count = 0
-                        park_state = "FORWARD"
-                        park_t = time.time()
-                        send_cmd(ARRIVE_FORWARD_V, 0.0)
-                        continue
+                if arrive_count >= ARRIVE_CONFIRM:
+                    arrive_count = 0
+                    park_state = "FORWARD"
+                    park_t = time.time()
+                    send_cmd(ARRIVE_FORWARD_V, 0.0)
+                    continue
 
-                    err_x = cx_obj - cx_mid
-                    err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
-                    reduced_v = APPROACH_V * (1.0 - err_ratio)
+                err_x = cx_obj - cx_mid
+                err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
+                reduced_v = APPROACH_V * (1.0 - err_ratio)
 
-                    if fm >= THRESH_SLOW:
-                        v, w = reduced_v, cam_w(err_x)
-                    else:
-                        w_cam = cam_w(err_x)
-                        w_lid = adir * 0.7
-                        if fm < THRESH_STOP:
-                            v, w = 0.09, w_lid
-                        elif fm < THRESH_TURN:
-                            v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
-                        else:
-                            v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
+                def cam_w(ex):
+                    raw = -KP_ROT * ex
+                    if abs(raw) < W_MIN and ex != 0:
+                        return -W_MIN if ex > 0 else W_MIN
+                    return raw
 
-                    last_cmd = (v, w)
-                    send_cmd(v, w)
-
+                if fm >= THRESH_SLOW:
+                    v, w = reduced_v, cam_w(err_x)
                 else:
-                    # [PATCH] 타겟을 놓친 경우 처리
-                    lost_count += 1
-                    if lost_count >= LOST_CONFIRM:
-                        # 연속 LOST_CONFIRM 프레임 이상 못 보면 "진짜로 놓쳤다" 판정
-                        lost_count = 0
-                        arrive_count = 0
-                        # 마지막으로 보였던 위치가 화면 오른쪽이었으면 오른쪽으로,
-                        # 왼쪽이었으면 왼쪽으로 회전하며 재탐색
-                        search_dir = -1.0 if last_seen_x > cx_mid else 1.0
-                        park_state = "SEARCH"
-                        search_t = None
-                        continue
+                    w_cam = cam_w(err_x)
+                    w_lid = adir * 0.7
+                    if fm < THRESH_STOP:
+                        v, w = 0.09, w_lid
+                    elif fm < THRESH_TURN:
+                        v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
                     else:
-                        # 짧은 순간의 미검출(노이즈/블러)은 직전 명령을 유지해서
-                        # 불필요하게 멈추거나 엉뚱한 방향으로 틀지 않게 함
-                        send_cmd(*last_cmd)
+                        v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
+
+                last_cmd = (v, w)
+                send_cmd(v, w)
 
             elif park_state == "SEARCH":
-                # [PATCH] 실제로 동작하는 SEARCH: 놓치기 직전 방향으로 회전 탐색
-                if found:
-                    detect_count += 1
-                    if detect_count >= DETECT_CONFIRM:
-                        detect_count = 0
-                        search_t = None
-                        park_state = "TRACK"
-                        continue
-                else:
-                    detect_count = 0
-
                 if search_t is None:
                     search_t = time.time()
-
+                    arrive_count = 0
                 if time.time() - search_t > SEARCH_FULL_ROT_SEC:
-                    # 한 바퀴 돌아도 못 찾으면 벽 탐색으로 폴백
                     park_state = "WALL_SEARCH"
                     search_t = None
                 else:
-                    send_cmd(0.0, search_dir * SEARCH_W)
+                    send_cmd(0.0, -SEARCH_W if last_seen_x > cx_mid else SEARCH_W)
 
         # ── 디버그 오버레이 ───────────────────────────────────────────
         search_time_left = MISSION_TIMEOUT_SEC - (time.time() - mission_start_t)
@@ -600,13 +701,23 @@ try:
             cv2.putText(frame, f"Timeout: {search_time_left:.1f}s | Side:{follow_side}",
                         (10, 20), 0, 0.50, (255, 150, 0), 2)
 
-        if mode == "PARK" and park_state == "SEARCH":
-            cv2.putText(frame, f"SEARCH dir={'R' if search_dir < 0 else 'L'}",
-                        (10, 35), 0, 0.50, (0, 200, 255), 2)
+        # 센트로이드 오버레이
+        if mode in ["CENTROID", "FINISH_FORWARD"] or park_state in ["CENTROID_TRACK", "FINISH_FORWARD"]:
+            err_x = cx_obj - cx_mid if found else 0
+            err_y = last_bottom_y - ARRIVE_Y_TOP if found else 0
+            
+            color = (0, 255, 255) if found else (255, 0, 0)
+            cv2.putText(frame,
+                f"CENTROID: dx={err_x:.1f} dy={err_y:.1f} cnt={arrive_count}",
+                (10, 40), 0, 0.45, color, 1)
+            
+            if found:
+                cv2.line(frame, (cx_mid, ARRIVE_Y_TOP), (cx_obj, last_bottom_y), (0, 255, 255), 2)
+                cv2.circle(frame, (cx_obj, last_bottom_y), 8, (255, 255, 0), 2)
 
         in_wall_follow = (
             (mode == "LIDAR" and lidar_state == "WALL_FOLLOW") or
-            (mode == "PARK" and park_state == "WALL_FOLLOW")
+            (mode == "PARK" and park_state in ["WALL_FOLLOW", "CENTROID_TRACK"])
         )
         if in_wall_follow:
             color_v = (0, 255, 100) if dbg_valid else (0, 80, 255)
