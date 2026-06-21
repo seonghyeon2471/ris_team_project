@@ -3,16 +3,12 @@ import serial
 import numpy as np
 import time
 import threading
-import math
 
 # ── SERIAL ────────────────────────────────────────────────────────────
-# 아두이노: 속도/회전 명령 전달
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
-# 라이다: 360도 거리 스캔 수신
 lidar_ser   = serial.Serial("/dev/ttyUSB0", 460800, timeout=0.1)
 
 # ── CAMERA ────────────────────────────────────────────────────────────
-# 카메라 초기화 및 해상도 설정
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
@@ -23,7 +19,6 @@ cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
 cap.set(cv2.CAP_PROP_AUTO_WB, 0)
 
 # ── LIDAR BOOT ────────────────────────────────────────────────────────
-# 라이다 시작 명령
 lidar_ser.write(bytes([0xA5, 0x40]))
 time.sleep(2)
 lidar_ser.reset_input_buffer()
@@ -31,14 +26,18 @@ lidar_ser.write(bytes([0xA5, 0x20]))
 lidar_ser.read(7)
 print("LIDAR OK")
 
-# ── LIDAR PARAMS ──────────────────────────────────────────────────────
+# ── LIDAR ─────────────────────────────────────────────────────────────
 EMA_ALPHA   = 0.35
 MEDIAN_K    = 2
-FRONT_RANGE = 90
+FRONT_RANGE = 45
 
 THRESH_SLOW = 55.0
 THRESH_TURN = 30.0
 THRESH_STOP = 18.0
+
+OPEN_SPACE_FM      = 120.0
+OPEN_SPACE_TIMEOUT  = 5.0
+WALL_LOST_TIMEOUT  = 1.2
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -64,9 +63,9 @@ def lidar_loop():
         sf = raw[0] & 0x01
         if ((raw[0] & 0x02) >> 1) != (1 - sf) or (raw[1] & 0x01) != 1 or (raw[0] >> 2) < 3:
             continue
-        angle = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0) % 360
+        angle   = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0) % 360
         dist_cm = (raw[3] | (raw[4] << 8)) / 40.0
-        if 3 < dist_cm < 150:
+        if 3 < dist_cm < 200:
             _ema(angle, dist_cm)
         if sf == 1:
             _median()
@@ -83,20 +82,31 @@ def front_min(scan):
     idx = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     return float(np.min(scan[idx]))
 
-def avoid_dir(scan):
-    return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
+def front_mean(scan):
+    idx = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
+    return float(np.mean(scan[idx]))
 
 def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
-    return float(np.min(scan[idx]))
+    d = scan[idx]
+    d = np.where(d > 180.0, 180.0, d)
+    return float(np.min(d))
 
-# ── 벽 직선 추정 ──────────────────────────────────────────────────────
+def avoid_dir(scan):
+    left  = float(np.mean(scan[60:91]))
+    right = float(np.mean(scan[270:301]))
+    diff = abs(left - right)
+    if diff < 10.0:
+        return 0
+    return 1 if left >= right else -1
+
+# ── 벽 직선 추정 ───────────────────────────────────────────────────────
 WALL_SCAN_START_L = 55
 WALL_SCAN_END_L   = 125
 WALL_SCAN_START_R = 235
 WALL_SCAN_END_R   = 305
-WALL_MAX_DIST     = 80.0
-WALL_MIN_POINTS   = 5
+WALL_MAX_DIST     = 60.0
+WALL_MIN_POINTS   = 10
 
 def estimate_wall(scan, side):
     if side == "L":
@@ -127,7 +137,7 @@ def estimate_wall(scan, side):
     wall_dist = abs(float(b))
     return wall_dist, wall_angle, True
 
-# ── 벽 추종 제어 ───────────────────────────────────────────────────
+# ── 벽 추종 제어기 ────────────────────────────────────────────────────
 WALL_TARGET      = 20.0
 WALL_KH          = 1.20
 WALL_KD          = 0.06
@@ -144,6 +154,7 @@ def wall_follow(scan, fm, adir, follow_side, current_v=None):
         current_v = WALL_V
 
     sign = 1.0 if follow_side == "L" else -1.0
+
     left_close  = side_min(scan, 60, 120)
     right_close = side_min(scan, 240, 300)
 
@@ -159,16 +170,16 @@ def wall_follow(scan, fm, adir, follow_side, current_v=None):
     wall_dist, wall_angle, valid = estimate_wall(scan, follow_side)
 
     if not valid:
-        if fm < THRESH_STOP:
-            return (0.08, adir * 1.1), (0.0, 0.0, False)
-        return (WALL_V * 0.6, sign * WALL_LOST_W), (0.0, 0.0, False)
+        return (WALL_V * 0.6, sign * WALL_LOST_W), (wall_dist, wall_angle, False)
+
+    if wall_dist > WALL_TARGET * 2.5:
+        return (WALL_V * 0.5, sign * WALL_SEARCH_W), (wall_dist, wall_angle, True)
 
     heading_term = -sign * WALL_KH * wall_angle
-    dist_error = wall_dist - WALL_TARGET
-    v_safe = max(abs(current_v), 0.05)
-    dist_term = sign * float(np.arctan(WALL_KD * dist_error / v_safe))
-
-    w_raw = heading_term + dist_term
+    dist_error   = wall_dist - WALL_TARGET
+    v_safe       = max(abs(current_v), 0.05)
+    dist_term    = sign * float(np.arctan(WALL_KD * dist_error / v_safe))
+    w_raw        = heading_term + dist_term
 
     lateral_pred = current_v * LOOKAHEAD_TIME * np.sin(
         np.clip(w_raw * LOOKAHEAD_TIME * 0.5, -1.0, 1.0)
@@ -187,6 +198,10 @@ def wall_follow(scan, fm, adir, follow_side, current_v=None):
     w = float(np.clip(w_raw, -MAX_W, MAX_W))
     return (v, w), (wall_dist, wall_angle, valid)
 
+def wall_follow_cmd(scan, fm, adir, follow_side, current_v=None):
+    result = wall_follow(scan, fm, adir, follow_side, current_v)
+    return result[0]
+
 def wall_follow_debug(scan, fm, adir, follow_side, current_v=None):
     return wall_follow(scan, fm, adir, follow_side, current_v)
 
@@ -202,21 +217,21 @@ def stop_robot():
 # ── COLOR CONFIG ──────────────────────────────────────────────────────
 COLOR_CFG = {
     "red": {
-        "hsv1": ([169, 136, 114], [179, 220, 255]),
+        "hsv1": ([160, 120, 90], [180, 255, 255]),
         "hsv2": None,
-        "bgr":  ([20, 20, 80], [255, 255, 255]),
+        "bgr": ([0, 0, 60], [255, 255, 255]),
         "draw": (0, 0, 255)
     },
     "yellow": {
-        "hsv1": ([25, 60, 160], [32, 161, 255]),
+        "hsv1": ([20, 70, 120], [35, 255, 255]),
         "hsv2": None,
-        "bgr":  ([0, 80, 80], [255, 255, 255]),
+        "bgr": ([0, 60, 60], [255, 255, 255]),
         "draw": (0, 200, 255)
     },
     "blue": {
-        "hsv1": ([96, 100, 95], [138, 207, 246]),
+        "hsv1": ([95, 90, 70], [140, 255, 255]),
         "hsv2": None,
-        "bgr":  ([40, 0, 0], [255, 220, 220]),
+        "bgr": ([40, 0, 0], [255, 255, 255]),
         "draw": (255, 80, 0)
     },
 }
@@ -233,12 +248,12 @@ def make_mask(frame, hsv, name):
     return cv2.bitwise_and(m, bm)
 
 # ── PARAMS ────────────────────────────────────────────────────────────
-MIN_AREA       = 400
-KP_ROT         = 0.030
-W_MIN          = 0.20
-APPROACH_V     = 0.13
-PARK_SEC       = 1.2
-DETECT_CONFIRM = 6
+MIN_AREA          = 500
+KP_ROT            = 0.030
+W_MIN             = 0.20
+APPROACH_V        = 0.13
+PARK_SEC          = 1.2
+DETECT_CONFIRM    = 6
 
 ARRIVE_Y_TOP       = int(240 * 0.85)
 ARRIVE_X_MARGIN    = 30
@@ -246,16 +261,10 @@ ARRIVE_FORWARD_SEC = 0.8
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
-WALL_SCAN_DIST      = 150.0
-MISSION_TIMEOUT_SEC = 10.0
-
-# 벽추종 후 30cm마다 다시 spiral 탐색
-FOLLOW_LIMIT_CM     = 30.0
-SPIRAL_SEG_SEC      = 1.0
-SPIRAL_MAX_SEG      = 4
-SPIRAL_V0           = 0.00
-SPIRAL_V_STEP       = 0.03
-SPIRAL_W            = 1.20
+WALL_SCAN_DIST      = 120.0
+MISSION_TIMEOUT_SEC = 12.0
+TARGET_LOCK_DIST    = 120.0
+TARGET_LOCK_CONFIRM  = 4
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode            = "LIDAR"
@@ -264,7 +273,6 @@ detect_count    = 0
 arrive_count    = 0
 follow_side     = "L"
 lidar_state     = "WALL_SEARCH"
-
 park_state      = "TRACK"
 last_seen_x     = 160
 last_bottom_y   = 0
@@ -273,36 +281,30 @@ search_t        = None
 mission_start_t = time.time()
 hop_start_t     = None
 last_cmd        = (0.0, 0.0)
+open_space_t    = None
+wall_lost_t     = None
+target_lock_t   = None
 
-# 벽추종 거리 누적
-wall_follow_start_t = None
-wall_follow_dist_cm = 0.0
-
-# spiral 탐색 단계
-spiral_t         = None
-spiral_seg_idx   = 0
-
-# 디버그용
 dbg_wall_dist  = 0.0
 dbg_wall_angle = 0.0
 dbg_valid      = False
 
 print(f"START | MISSION: {MISSION}")
 
-# ── MAIN LOOP ─────────────────────────────────────────────────────────
 try:
     while True:
         ret, frame = cap.read()
         if not ret:
             continue
 
-        frame  = cv2.flip(frame, 1)
-        H, W   = frame.shape[:2]
+        frame = cv2.flip(frame, 1)
+        H, W = frame.shape[:2]
         cx_mid = W // 2
-        hsv    = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        scan   = get_scan()
-        fm     = front_min(scan)
-        adir   = avoid_dir(scan)
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        scan = get_scan()
+        fm = front_min(scan)
+        fmean = front_mean(scan)
+        adir = avoid_dir(scan)
 
         if mission_idx >= len(MISSION):
             stop_robot()
@@ -313,11 +315,11 @@ try:
             continue
 
         target = MISSION[mission_idx]
-        draw   = COLOR_CFG[target]["draw"]
+        draw = COLOR_CFG[target]["draw"]
 
         is_searching = (mode == "LIDAR") or (
-            mode == "PARK" and park_state in
-            ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH"])
+            mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH"]
+        )
 
         if is_searching:
             if time.time() - mission_start_t > MISSION_TIMEOUT_SEC:
@@ -325,11 +327,12 @@ try:
                 park_state = "SAFE_HOP"
                 hop_start_t = time.time()
                 detect_count = 0
+                open_space_t = None
+                wall_lost_t = None
                 continue
-        elif park_state not in ["SAFE_HOP"]:
+        else:
             mission_start_t = time.time()
 
-        # 색상 검출
         mask = make_mask(frame, hsv, target)
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         big = max(cnts, key=cv2.contourArea) if cnts else None
@@ -342,7 +345,7 @@ try:
                 cx_obj = int(M_mom["m10"] / M_mom["m00"])
                 cy_obj = int(M_mom["m01"] / M_mom["m00"])
             bx, by_top, bw, bh = cv2.boundingRect(big)
-            last_seen_x   = cx_obj
+            last_seen_x = cx_obj
             last_bottom_y = min(by_top + bh, 239)
             cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
             cv2.circle(frame, (cx_obj, cy_obj), 5, (0, 255, 255), -1)
@@ -354,12 +357,33 @@ try:
         def centroid_in_arrive_zone():
             return (arrive_x1 <= cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
 
-        # ── LIDAR 모드 ────────────────────────────────────────────────
         if mode == "LIDAR":
+            if fm > OPEN_SPACE_FM:
+                if open_space_t is None:
+                    open_space_t = time.time()
+                elif time.time() - open_space_t > OPEN_SPACE_TIMEOUT:
+                    mode = "PARK"
+                    park_state = "SAFE_HOP"
+                    hop_start_t = time.time()
+                    open_space_t = None
+                    detect_count = 0
+                    continue
+            else:
+                open_space_t = None
+
             if found:
-                detect_count += 1
+                if fmean < TARGET_LOCK_DIST:
+                    target_lock_t = time.time() if target_lock_t is None else target_lock_t
+                    if time.time() - target_lock_t > TARGET_LOCK_CONFIRM:
+                        detect_count += 1
+                    else:
+                        detect_count = max(detect_count - 1, 0)
+                else:
+                    detect_count = 0
+                    target_lock_t = None
             else:
                 detect_count = 0
+                target_lock_t = None
 
             if detect_count >= DETECT_CONFIRM:
                 detect_count = 0
@@ -368,10 +392,8 @@ try:
                 continue
 
             if lidar_state == "WALL_SEARCH":
-                left_close  = side_min(scan, 240, 300)
-                right_close = side_min(scan, 60, 120)
-                if fm < WALL_SCAN_DIST or left_close < WALL_SCAN_DIST or right_close < WALL_SCAN_DIST:
-                    follow_side = "L" if left_close <= right_close else "R"
+                if fm < WALL_SCAN_DIST:
+                    follow_side = "L"
                     lidar_state = "WALL_APPROACH"
                 else:
                     send_cmd(0.0, WALL_SEARCH_W)
@@ -380,74 +402,26 @@ try:
                 wall_dist, _, valid = estimate_wall(scan, follow_side)
                 if valid and wall_dist <= WALL_TARGET * 1.4:
                     lidar_state = "WALL_FOLLOW"
-                    wall_follow_start_t = time.time()
-                    wall_follow_dist_cm = 0.0
                 else:
                     sign = 1 if follow_side == "L" else -1
                     if fm < THRESH_STOP:
-                        send_cmd(0.08, adir * 1.0)
+                        send_cmd(0.08, adir * 1.0 if adir != 0 else 1.0)
                     elif fm < THRESH_TURN:
-                        send_cmd(WALL_APPROACH_V * 0.6, adir * 0.7)
+                        send_cmd(WALL_APPROACH_V * 0.6, adir * 0.7 if adir != 0 else sign * 0.7)
                     else:
                         send_cmd(WALL_APPROACH_V, sign * 0.3)
 
             elif lidar_state == "WALL_FOLLOW":
-                # 벽추종 시작 시 기준 초기화
-                if wall_follow_start_t is None:
-                    wall_follow_start_t = time.time()
-                    wall_follow_dist_cm = 0.0
-                    spiral_t = None
-                    spiral_seg_idx = 0
-
-                (v, w), (dbg_wall_dist, dbg_wall_angle, dbg_valid) = wall_follow_debug(
-                    scan, fm, adir, follow_side, WALL_V
-                )
-
-                # 전진 거리 누적
-                dt = time.time() - wall_follow_start_t
-                wall_follow_start_t = time.time()
-                wall_follow_dist_cm += max(v, 0.0) * dt * 100.0
-
-                # 30cm 도달 -> spiral 탐색 시작
-                if wall_follow_dist_cm >= FOLLOW_LIMIT_CM:
-                    lidar_state = "WALL_SPIRAL_SEARCH"
-                    spiral_t = time.time()
-                    spiral_seg_idx = 0
-                    continue
-
+                (v, w), (dbg_wall_dist, dbg_wall_angle, dbg_valid) = wall_follow_debug(scan, fm, adir, follow_side, WALL_V)
+                if dbg_valid:
+                    wall_lost_t = None
+                else:
+                    wall_lost_t = time.time() if wall_lost_t is None else wall_lost_t
+                    if time.time() - wall_lost_t > WALL_LOST_TIMEOUT:
+                        lidar_state = "WALL_SEARCH"
+                        wall_lost_t = None
                 send_cmd(v, w)
 
-            elif lidar_state == "WALL_SPIRAL_SEARCH":
-                # 점점 큰 원호로 탐색
-                if spiral_t is None:
-                    spiral_t = time.time()
-                    spiral_seg_idx = 0
-
-                elapsed = time.time() - spiral_t
-                spiral_seg_idx = int(elapsed // SPIRAL_SEG_SEC)
-                if spiral_seg_idx >= SPIRAL_MAX_SEG:
-                    spiral_seg_idx = SPIRAL_MAX_SEG - 1
-
-                v = SPIRAL_V0 + SPIRAL_V_STEP * spiral_seg_idx
-                w = SPIRAL_W
-
-                # 좌우 회전 방향은 환경에 맞게 선택 가능
-                # 현재는 왼쪽으로 원을 그리는 방향
-                send_cmd(v, w)
-
-                left_close  = side_min(scan, 240, 300)
-                right_close = side_min(scan, 60, 120)
-
-                # 벽 재검출 시 즉시 복귀
-                if fm < WALL_SCAN_DIST or left_close < WALL_SCAN_DIST or right_close < WALL_SCAN_DIST:
-                    follow_side = "L" if left_close <= right_close else "R"
-                    lidar_state = "WALL_APPROACH"
-                    wall_follow_start_t = time.time()
-                    wall_follow_dist_cm = 0.0
-                    spiral_t = None
-                    spiral_seg_idx = 0
-
-        # ── PARK 모드 ────────────────────────────────────────────────
         elif mode == "PARK":
             if park_state == "SAFE_HOP":
                 if found:
@@ -463,13 +437,15 @@ try:
                 elapsed_hop = time.time() - hop_start_t
                 if elapsed_hop < 2.0:
                     send_cmd(0.0, 1.2)
+                    cv2.putText(frame, "HOP: TURNING", (10, 45), 0, 0.5, (0, 0, 255), 2)
                 else:
                     if fm > 130.0:
                         send_cmd(0.0, 1.0)
+                        cv2.putText(frame, "HOP: SCANNING", (10, 45), 0, 0.5, (0, 150, 255), 2)
                     elif fm > 50.0:
-                        send_cmd(WALL_V, 0.0)
+                        send_cmd(0.12, 0.0)
+                        cv2.putText(frame, f"HOP: MOVING ({fm:.0f}cm)", (10, 45), 0, 0.5, (0, 255, 0), 2)
                     else:
-                        follow_side = "L" if left_close <= right_close else "R"
                         park_state = "WALL_APPROACH"
                         mission_start_t = time.time()
                         continue
@@ -479,8 +455,7 @@ try:
                 continue
 
             if park_state == "FORWARD":
-                elapsed = time.time() - park_t
-                if elapsed >= ARRIVE_FORWARD_SEC:
+                if time.time() - park_t >= ARRIVE_FORWARD_SEC:
                     stop_robot()
                     park_state = "PARKING"
                     park_t = time.time()
@@ -507,14 +482,9 @@ try:
                 else:
                     detect_count = 0
 
-                left_close  = side_min(scan, 240, 300)
-                right_close = side_min(scan, 60, 120)
-
-                if fm < WALL_SCAN_DIST or left_close < WALL_SCAN_DIST or right_close < WALL_SCAN_DIST:
-                    follow_side = "L" if left_close <= right_close else "R"
+                if fm < WALL_SCAN_DIST:
                     park_state = "WALL_APPROACH"
                     continue
-
                 send_cmd(0.0, WALL_SEARCH_W)
 
             elif park_state == "WALL_APPROACH":
@@ -530,29 +500,18 @@ try:
                 wall_dist, _, valid = estimate_wall(scan, follow_side)
                 if valid and wall_dist <= WALL_TARGET * 1.4:
                     park_state = "WALL_FOLLOW"
-                    wall_follow_start_t = time.time()
-                    wall_follow_dist_cm = 0.0
-                    spiral_t = None
-                    spiral_seg_idx = 0
                     continue
 
                 sign = 1 if follow_side == "L" else -1
                 if fm < THRESH_STOP:
-                    v, w = 0.08, adir * 1.0
+                    v, w = 0.08, adir * 1.0 if adir != 0 else sign * 1.0
                 elif fm < THRESH_TURN:
-                    v, w = WALL_APPROACH_V * 0.6, adir * 0.7
+                    v, w = WALL_APPROACH_V * 0.6, adir * 0.7 if adir != 0 else sign * 0.7
                 else:
                     v, w = WALL_APPROACH_V, sign * 0.3
                 send_cmd(v, w)
 
             elif park_state == "WALL_FOLLOW":
-                # 벽추종 시작 시 기준 초기화
-                if wall_follow_start_t is None:
-                    wall_follow_start_t = time.time()
-                    wall_follow_dist_cm = 0.0
-                    spiral_t = None
-                    spiral_seg_idx = 0
-
                 if found:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
@@ -562,51 +521,12 @@ try:
                 else:
                     detect_count = 0
 
-                (v, w), (dbg_wall_dist, dbg_wall_angle, dbg_valid) = wall_follow_debug(
-                    scan, fm, adir, follow_side, WALL_V
-                )
-
-                # 전진 거리 누적
-                dt = time.time() - wall_follow_start_t
-                wall_follow_start_t = time.time()
-                wall_follow_dist_cm += max(v, 0.0) * dt * 100.0
-
-                # 30cm마다 spiral 탐색 반복
-                if wall_follow_dist_cm >= FOLLOW_LIMIT_CM:
-                    park_state = "WALL_SPIRAL_SEARCH"
-                    spiral_t = time.time()
-                    spiral_seg_idx = 0
-                    continue
-
+                (v, w), (dbg_wall_dist, dbg_wall_angle, dbg_valid) = wall_follow_debug(scan, fm, adir, follow_side, WALL_V)
                 send_cmd(v, w)
-
-            elif park_state == "WALL_SPIRAL_SEARCH":
-                if spiral_t is None:
-                    spiral_t = time.time()
-                    spiral_seg_idx = 0
-
-                elapsed = time.time() - spiral_t
-                spiral_seg_idx = int(elapsed // SPIRAL_SEG_SEC)
-                if spiral_seg_idx >= SPIRAL_MAX_SEG:
-                    spiral_seg_idx = SPIRAL_MAX_SEG - 1
-
-                v = SPIRAL_V0 + SPIRAL_V_STEP * spiral_seg_idx
-                w = SPIRAL_W
-                send_cmd(v, w)
-
-                left_close  = side_min(scan, 240, 300)
-                right_close = side_min(scan, 60, 120)
-
-                if fm < WALL_SCAN_DIST or left_close < WALL_SCAN_DIST or right_close < WALL_SCAN_DIST:
-                    follow_side = "L" if left_close <= right_close else "R"
-                    park_state = "WALL_APPROACH"
-                    wall_follow_start_t = time.time()
-                    wall_follow_dist_cm = 0.0
-                    spiral_t = None
-                    spiral_seg_idx = 0
 
             elif park_state == "TRACK":
-                arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
+                arrive_count = arrive_count + 1 if (found and centroid_in_arrive_zone()) else 0
+
                 if arrive_count >= ARRIVE_CONFIRM:
                     arrive_count = 0
                     park_state = "FORWARD"
@@ -614,39 +534,46 @@ try:
                     send_cmd(ARRIVE_FORWARD_V, 0.0)
                     continue
 
-                err_x = cx_obj - cx_mid
-                err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
-                reduced_v = APPROACH_V * (1.0 - err_ratio)
+                if found:
+                    err_x = cx_obj - cx_mid
+                    err_ratio = min(abs(err_x) / float(cx_mid), 1.0)
+                    reduced_v = APPROACH_V * (1.0 - err_ratio)
 
-                def cam_w(ex):
-                    raw = -0.030 * ex
-                    if abs(raw) < W_MIN and ex != 0:
-                        return -W_MIN if ex > 0 else W_MIN
-                    return raw
+                    def cam_w(ex):
+                        raw = -KP_ROT * ex
+                        if abs(raw) < W_MIN and ex != 0:
+                            return -W_MIN if ex > 0 else W_MIN
+                        return raw
 
-                if fm >= THRESH_SLOW:
-                    v, w = reduced_v, cam_w(err_x)
-                else:
-                    w_cam = cam_w(err_x)
-                    w_lid = adir * 0.7
-                    if fm < THRESH_STOP:
-                        v, w = 0.09, w_lid
-                    elif fm < THRESH_TURN:
-                        v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
+                    if fm >= THRESH_SLOW:
+                        v, w = reduced_v, cam_w(err_x)
                     else:
-                        v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
-
-                last_cmd = (v, w)
-                send_cmd(v, w)
+                        w_cam = cam_w(err_x)
+                        w_lid = adir * 0.7 if adir != 0 else 0.7
+                        if fm < THRESH_STOP:
+                            v, w = 0.09, w_lid
+                        elif fm < THRESH_TURN:
+                            v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
+                        else:
+                            v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
+                    last_cmd = (v, w)
+                    send_cmd(v, w)
+                else:
+                    if last_seen_x > cx_mid:
+                        send_cmd(0.0, -1.0)
+                    else:
+                        send_cmd(0.0, 1.0)
 
             elif park_state == "SEARCH":
-                elapsed_search = time.time() - search_t
-                if elapsed_search > 5.0:
+                if search_t is None:
+                    search_t = time.time()
+                    arrive_count = 0
+                if time.time() - search_t > 5.0:
                     park_state = "WALL_SEARCH"
+                    search_t = None
                 else:
                     send_cmd(0.0, -1.0 if last_seen_x > cx_mid else 1.0)
 
-        # ── 디버그 오버레이 ───────────────────────────────────────────
         search_time_left = MISSION_TIMEOUT_SEC - (time.time() - mission_start_t)
         if is_searching and search_time_left > 0:
             cv2.putText(frame, f"Timeout: {search_time_left:.1f}s | Side:{follow_side}",
@@ -659,8 +586,7 @@ try:
         if in_wall_follow:
             color_v = (0, 255, 100) if dbg_valid else (0, 80, 255)
             cv2.putText(frame,
-                f"WF dist={dbg_wall_dist:.1f}cm ang={np.rad2deg(dbg_wall_angle):.1f}deg "
-                f"{'OK' if dbg_valid else 'NO'}",
+                f"WF dist={dbg_wall_dist:.1f}cm ang={np.rad2deg(dbg_wall_angle):.1f}deg {'OK' if dbg_valid else 'NO'}",
                 (10, H - 10), 0, 0.42, color_v, 1)
 
         cv2.imshow("f", frame)
