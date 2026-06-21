@@ -174,7 +174,7 @@ def make_mask(frame, hsv, name):
     return cv2.bitwise_and(m, bm)
 
 # ── PARAMS ────────────────────────────────────────────────────────────
-MIN_AREA           = 250
+MIN_AREA           = 400
 KP_ROT             = 0.012
 W_MIN              = 0.12
 DEADBAND_PX        = 8
