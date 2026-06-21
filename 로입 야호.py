@@ -179,9 +179,6 @@ WALL_TURN_V    = 0.10
 WALL_LOST_W    = 1.3     
 WALL_SEARCH_W  = 1.1     
 
-# ★ 신규: 현재 회전 각속도 기준, 정확히 360도(2*pi)를 도는 데 걸리는 시간 계산 (약 5.71초)
-SEARCH_SPIN_SEC = (2 * math.pi) / WALL_SEARCH_W
-
 MISSION_TIMEOUT_SEC = 15.0  
 
 FULL_LOOP_THRESH   = math.radians(400)   
@@ -196,11 +193,11 @@ arrive_count  = 0
 follow_side   = "L"   
 lidar_state   = "WALL_SEARCH"
 
-park_state    = "SEARCH"  
+# 시작 상태를 벽 탐색으로 되돌림
+park_state    = "WALL_SEARCH"  
 last_seen_x   = 160
 last_bottom_y = 0
 park_t        = None
-search_t      = None      
 mission_start_t = time.time() 
 hop_start_t     = None        
 last_cmd      = (0.0, 0.0)
@@ -231,7 +228,8 @@ try:
 
         cv2.putText(frame, f"TARGET: {target.upper()}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, draw, 2)
 
-        is_searching = (mode == "LIDAR") or (mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH"])
+        # SEARCH 상태 제거됨
+        is_searching = (mode == "LIDAR") or (mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW"])
         
         if is_searching:
             if time.time() - mission_start_t > MISSION_TIMEOUT_SEC:
@@ -342,35 +340,9 @@ try:
                     arrive_count = 0
                     detect_count = 0
                     if mission_idx < len(MISSION):
-                        park_state = "SEARCH"
-                        search_t = None
+                        # 주차 후 제자리 회전 없이 바로 벽 찾기로 전환
+                        park_state = "WALL_SEARCH"
                     continue
-
-            elif park_state == "SEARCH":
-                if search_t is None:
-                    search_t = time.time()
-                    arrive_count = 0
-                    detect_count = 0
-
-                if found:
-                    detect_count += 1
-                    if detect_count >= DETECT_CONFIRM:
-                        detect_count = 0
-                        park_state = "TRACK"
-                        search_t = None
-                        continue
-                else:
-                    detect_count = 0
-
-                # ★ 수정: 정확히 계산된 한 바퀴(360도) 시간에 도달하면 회전 종료
-                elapsed_search = time.time() - search_t
-                if elapsed_search > SEARCH_SPIN_SEC:
-                    park_state = "WALL_SEARCH"
-                    search_t = None
-                else:
-                    v = 0.0
-                    w = -WALL_SEARCH_W if last_seen_x > cx_mid else WALL_SEARCH_W
-                    send_cmd(v, w)
 
             elif park_state == "WALL_SEARCH":
                 if found:
