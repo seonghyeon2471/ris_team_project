@@ -35,9 +35,9 @@ THRESH_TURN  = 24.0
 THRESH_STOP  = 12.0
 
 # ── TRACK 전용 회피 히스테리시스 ────────────────────────────────────────
-AVOID_ENTER   = THRESH_TURN        # 24cm 이하로 들어오면 회피 시작
-AVOID_EXIT    = THRESH_SLOW * 1.3  # 약 52cm 이상 멀어져야 회피 해제
-AVOID_MIN_SEC = 0.5                # 회피 시작 후 최소 이 시간 동안은 무조건 유지
+AVOID_ENTER   = THRESH_TURN
+AVOID_EXIT    = THRESH_SLOW * 1.3
+AVOID_MIN_SEC = 0.5
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -165,9 +165,24 @@ def stop_robot():
 
 # ── COLOR CONFIG ──────────────────────────────────────────────────────
 COLOR_CFG = {
-    "red":    {"hsv1": ([169, 136, 114], [179, 220, 255]), "hsv2": None, "bgr":  ([20, 20, 80],  [255, 255, 255]), "draw": (0, 0, 255)},
-    "yellow": {"hsv1": ([24, 19, 193], [45, 165, 255]),    "hsv2": None, "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
-    "blue":   {"hsv1": ([98, 100, 95], [138, 207, 246]),   "hsv2": None, "bgr":  ([40, 0, 0],    [255, 220, 220]), "draw": (255, 80, 0)},
+    "red": {
+        "hsv1": ([169, 136, 114], [179, 220, 255]),
+        "hsv2": None,
+        "bgr":  ([20, 20, 80], [255, 255, 255]),
+        "draw": (0, 0, 255)
+    },
+    "yellow": {
+        "hsv1": ([25, 60, 160], [32, 161, 255]),
+        "hsv2": None,
+        "bgr":  ([0, 80, 80], [255, 255, 255]),
+        "draw": (0, 200, 255)
+    },
+    "blue": {
+        "hsv1": ([96, 100, 95], [138, 207, 246]),
+        "hsv2": None,
+        "bgr":  ([40, 0, 0], [255, 220, 220]),
+        "draw": (255, 80, 0)
+    },
 }
 MISSION = ["red", "yellow", "blue"]
 
@@ -212,7 +227,6 @@ WALL_LOST_W      = 1.5
 WALL_SEARCH_W    = 1.1
 MISSION_TIMEOUT_SEC = 10.0
 
-# 개활지 탐색 추가
 SEARCH_FORWARD_DIST_SEC = 2.5
 SEARCH_FORWARD_V        = 0.10
 SEARCH_ROTATE_W         = 1.2
@@ -238,7 +252,6 @@ last_cmd      = (0.0, 0.0)
 search_phase  = "FORWARD"
 search_phase_t = time.time()
 
-# ── TRACK 회피 상태 ───────────────────────────────────────────────────
 avoiding       = False
 avoid_start_t  = 0.0
 avoid_dir_lock = 1
@@ -480,8 +493,6 @@ try:
                 send_cmd(v, w)
 
             elif park_state == "TRACK":
-                # ── 회피 중이 아닐 때만 "타겟 안 보임 → SEARCH" 판정 ──
-                # (회피 중에는 잠깐 안 보여도 회피를 끝까지 유지해야 진동이 안 생김)
                 if not found and not avoiding:
                     park_state = "SEARCH"
                     search_t = time.time()
@@ -491,17 +502,15 @@ try:
                 if found:
                     arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
 
-                # ── 회피 진입 판정 (히스테리시스) ──
                 if not avoiding and fm < AVOID_ENTER:
                     avoiding = True
                     avoid_start_t = time.time()
-                    avoid_dir_lock = adir   # 진입 시점 방향 고정 -> 도중에 안 바뀜
+                    avoid_dir_lock = adir
 
-                # ── 회피 중이면 카메라 신호 완전히 무시, 라이다 회피만 단독 수행 ──
                 if avoiding:
                     elapsed_avoid = time.time() - avoid_start_t
                     if fm > AVOID_EXIT and elapsed_avoid > AVOID_MIN_SEC:
-                        avoiding = False   # 충분히 멀어지고 최소 유지시간도 지나야 해제
+                        avoiding = False
                     else:
                         if fm < THRESH_STOP:
                             v, w = 0.04, avoid_dir_lock * 1.3
@@ -516,14 +525,12 @@ try:
                             break
                         continue
 
-                # ── 회피가 막 끝났는데 타겟이 안 보이면 SEARCH로 ──
                 if not found:
                     park_state = "SEARCH"
                     search_t = time.time()
                     arrive_count = 0
                     continue
 
-                # ── 회피 중이 아닐 때만 카메라 추적 (라이다 블렌딩 없음) ──
                 if arrive_count >= ARRIVE_CONFIRM:
                     arrive_count = 0
                     park_state = "FORWARD"
