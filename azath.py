@@ -155,7 +155,7 @@ def send_cmd(v, w):
     last_cmd_time = curr_time
     accumulated_yaw += w * dt
 
-    arduino_ser.write(f"{v:.3f},{w:.3f}\n".encode())   # ★ 수정: -w -> w (부호 반전 테스트)
+    arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())   # ★ 수정: -w -> w (부호 반전 테스트)
 
 def stop_robot(): 
     send_cmd(0.0, 0.0)
