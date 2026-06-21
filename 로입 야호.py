@@ -193,13 +193,13 @@ arrive_count  = 0
 follow_side   = "L"   
 lidar_state   = "WALL_SEARCH"
 
-# 시작 상태를 벽 탐색으로 되돌림
 park_state    = "WALL_SEARCH"  
 last_seen_x   = 160
 last_bottom_y = 0
 park_t        = None
 mission_start_t = time.time() 
 hop_start_t     = None        
+bypass_t        = None        # ◀ 우회(BYPASS) 타이머 변수 추가
 last_cmd      = (0.0, 0.0)
 
 print(f"START | MISSION: {MISSION}")
@@ -228,7 +228,6 @@ try:
 
         cv2.putText(frame, f"TARGET: {target.upper()}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, draw, 2)
 
-        # SEARCH 상태 제거됨
         is_searching = (mode == "LIDAR") or (mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW"])
         
         if is_searching:
@@ -340,7 +339,6 @@ try:
                     arrive_count = 0
                     detect_count = 0
                     if mission_idx < len(MISSION):
-                        # 주차 후 제자리 회전 없이 바로 벽 찾기로 전환
                         park_state = "WALL_SEARCH"
                     continue
 
@@ -384,32 +382,51 @@ try:
 
                 v, w = wall_follow(scan, fm, adir, follow_side)
                 send_cmd(v, w)
+                
+            # ◀ 새로 추가된 BYPASS 상태
+            elif park_state == "BYPASS":
+                # 우회 중에는 타겟이 보이더라도 무시하고 벽 추종에만 집중합니다.
+                v, w = wall_follow(scan, fm, adir, follow_side)
+                send_cmd(v, w)
+
+                # 우회를 시작한 지 2.5초가 지났고, 눈앞(55cm)이 뚫렸다면 다시 판단합니다.
+                if time.time() - bypass_t > 2.5 and fm > THRESH_SLOW:
+                    if found:
+                        park_state = "TRACK"
+                    else:
+                        park_state = "WALL_SEARCH"
 
             elif park_state == "TRACK":
-                park_state = "TRACK"
+                # 타겟을 완전히 놓치면 다시 벽을 찾으러 갑니다.
+                if not found:
+                    park_state = "WALL_SEARCH"
+                    continue
+                    
                 arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
 
                 if arrive_count >= ARRIVE_CONFIRM:
                     arrive_count = 0; park_state = "FORWARD"; park_t = time.time()
                     send_cmd(ARRIVE_FORWARD_V, 0.0); continue
-                else:
-                    err_x = cx_obj - cx_mid
-                    err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
-                    reduced_v = APPROACH_V * (1.0 - err_ratio)
+                
+                # ◀ 전방 30cm 이내에 장애물이 나타나면 벽 추종(우회) 모드로 돌입!
+                if fm < THRESH_TURN:
+                    follow_side = decide_follow_side(adir, found, cx_obj, cx_mid)
+                    park_state = "BYPASS"
+                    bypass_t = time.time()
+                    continue
 
-                    def cam_w(ex):
-                        raw = -KP_ROT * ex
-                        if abs(raw) < W_MIN and ex != 0: return -W_MIN if ex > 0 else W_MIN
-                        return raw
+                # ◀ 장애물 회피 믹싱 로직을 제거하고, 순수하게 객체만 따라가도록 수정
+                err_x = cx_obj - cx_mid
+                err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
+                reduced_v = APPROACH_V * (1.0 - err_ratio)
 
-                    if fm >= THRESH_SLOW: v, w = reduced_v, cam_w(err_x)
-                    else:
-                        w_cam = cam_w(err_x); w_lid = adir * 0.7
-                        if fm < THRESH_STOP: v, w = 0.09, w_lid
-                        elif fm < THRESH_TURN: v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
-                        else: v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
+                def cam_w(ex):
+                    raw = -KP_ROT * ex
+                    if abs(raw) < W_MIN and ex != 0: return -W_MIN if ex > 0 else W_MIN
+                    return raw
 
-                    last_cmd = (v, w); send_cmd(v, w)
+                v, w = reduced_v, cam_w(err_x)
+                last_cmd = (v, w); send_cmd(v, w)
 
 
         cv2.imshow("f", frame)
