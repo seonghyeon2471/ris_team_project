@@ -30,9 +30,9 @@ EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
 FRONT_RANGE  = 90    
 
-THRESH_SLOW  = 40.0   # 40cm 앞 외벽 감지 시 브레이킹 시작
-THRESH_TURN  = 24.0   # 24cm 앞 하드 선회 시작
-THRESH_STOP  = 12.0   # 12cm 비상 정지 및 제자리 회전
+THRESH_SLOW  = 40.0   
+THRESH_TURN  = 24.0   
+THRESH_STOP  = 12.0   
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -76,12 +76,21 @@ def front_min(scan):
     idx = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     return float(np.min(scan[idx]))
 
-# [삭제] 쥐약 같던 avoid_dir 함수 완전 삭제 폐기
-
+# [핵심 로직 1] 추종할 벽의 방향 결정 (크로스 회피)
 def decide_follow_side(found, cx_obj, cx_mid, last_seen_x):
-    # 현재 타겟 객체가 보이거나, 마지막 잔상이 중앙보다 왼쪽에 있었다면 좌측 벽 추종, 아니면 우측 벽 추종
     ref_x = cx_obj if (found and cx_obj >= 0) else last_seen_x
-    return "L" if ref_x < cx_mid else "R"
+    if ref_x == 160: 
+        return "L"  # 객체를 한 번도 본 적 없으면 기본적으로 왼쪽 벽 탐색
+    # 타겟이 오른쪽에 있으면 장애물을 왼쪽에 두고(L), 왼쪽에 있으면 오른쪽에 둠(R)
+    return "L" if ref_x > cx_mid else "R"
+
+# [핵심 로직 2] 장애물 정면 충돌 임박 시 코너 탈출 방향 결정
+def get_turn_dir(last_seen_x, cx_mid, follow_side):
+    if last_seen_x == 160:
+        # 객체를 한 번도 못 본 개활지 위험 상태: 현재 타는 벽을 배신하지 않고 인코너로 돔
+        return -1.0 if follow_side == "L" else 1.0
+    # 객체 잔상이 남아있다면 무조건 객체가 있는 방향으로 강제 회전
+    return 1.0 if last_seen_x < cx_mid else -1.0
 
 def side_dist(scan, side):
     if side == "L":
@@ -100,9 +109,8 @@ def wall_follow(scan, fm, follow_side, found, last_seen_x, cx_mid):
     right_close = side_min(scan, 60, 120)    
     sign = 1 if follow_side == "L" else -1
 
-    # [수정] 오직 카메라 잔상 정보(마지막으로 객체를 본 방향)로만 조향 방향을 결정합니다.
-    # 마지막 보았던 위치가 왼쪽이면 좌회전(1), 오른쪽이면 우회전(-1)
-    turn_dir = 1.0 if last_seen_x < cx_mid else -1.0
+    # 공통 회전 방향 로직 적용
+    turn_dir = get_turn_dir(last_seen_x, cx_mid, follow_side)
 
     # 1. 초근접 위험 구역 처리 (강력 탈출)
     if fm < THRESH_STOP:
@@ -130,7 +138,7 @@ def wall_follow(scan, fm, follow_side, found, last_seen_x, cx_mid):
     err = sd - WALL_TARGET
     w   = sign * WALL_KP * err
     
-    # 6. 전방 외벽 감지 시 브레이크 블렌딩 및 카메라 지향적 회전 적용
+    # 6. 전방 외벽 감지 시 브레이크 블렌딩 및 선회 적용
     if fm < THRESH_SLOW:
         blend = float(np.clip((THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
         w = (1 - blend) * w + blend * turn_dir * 1.25  
@@ -205,10 +213,6 @@ WALL_TURN_V      = 0.04
 WALL_LOST_W      = 1.5     
 WALL_SEARCH_W    = 1.1     
 MISSION_TIMEOUT_SEC = 10.0  
-
-FULL_LOOP_THRESH   = math.radians(400)   
-LOOP_ESCAPE_BACK_V = -0.12               
-LOOP_ESCAPE_SEC    = 0.6                 
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"   
@@ -307,7 +311,6 @@ try:
                     follow_side = decide_follow_side(found, cx_obj, cx_mid, last_seen_x)
                     lidar_state = "WALL_APPROACH"
                 else: 
-                    # avoid_dir이 빠졌으므로 기본 탐색 시 제자리 우회전(or 좌회전)으로 일정하게 서칭
                     send_cmd(0.0, -WALL_SEARCH_W)
 
             elif lidar_state == "WALL_APPROACH":
@@ -315,7 +318,7 @@ try:
                 if sd <= WALL_TARGET * 1.3: lidar_state = "WALL_FOLLOW"
                 else:
                     sign = 1 if follow_side == "L" else -1
-                    turn_dir = 1.0 if last_seen_x < cx_mid else -1.0
+                    turn_dir = get_turn_dir(last_seen_x, cx_mid, follow_side)
                     if fm < THRESH_STOP: send_cmd(0.02, turn_dir * 1.4)
                     elif fm < THRESH_TURN: send_cmd(WALL_APPROACH_V * 0.4, turn_dir * 1.1)
                     else: send_cmd(WALL_APPROACH_V, sign * 0.3)
@@ -402,7 +405,8 @@ try:
                 if sd <= WALL_TARGET * 1.3: park_state = "WALL_FOLLOW"; continue
 
                 sign = 1 if follow_side == "L" else -1
-                turn_dir = 1.0 if last_seen_x < cx_mid else -1.0
+                turn_dir = get_turn_dir(last_seen_x, cx_mid, follow_side)
+                
                 if fm < THRESH_STOP: v, w = 0.02, turn_dir * 1.4
                 elif fm < THRESH_TURN: v, w = WALL_APPROACH_V * 0.4, turn_dir * 1.1
                 else: v, w = WALL_APPROACH_V, sign * 0.3
@@ -443,8 +447,10 @@ try:
                     if fm >= THRESH_SLOW: v, w = reduced_v, cam_w(err_x)
                     else:
                         w_cam = cam_w(err_x)
-                        turn_dir = 1.0 if last_seen_x < cx_mid else -1.0
+                        # TRACK 모드에서 장애물 근접 시 탈출 방향도 안전하게 get_turn_dir 활용
+                        turn_dir = get_turn_dir(last_seen_x, cx_mid, follow_side)
                         w_lid = turn_dir * 0.75
+                        
                         if fm < THRESH_STOP: v, w = 0.02, w_lid * 1.5
                         elif fm < THRESH_TURN: v, w = 0.04, 0.8 * (w_lid * 1.45) + 0.2 * w_cam
                         else: v, w = reduced_v, 0.4 * w_lid + 0.6 * w_cam
