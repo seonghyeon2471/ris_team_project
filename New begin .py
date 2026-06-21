@@ -245,10 +245,6 @@ ARRIVE_CONFIRM     = 8
 WALL_SCAN_DIST      = 150.0
 MISSION_TIMEOUT_SEC = 10.0
 
-# SEARCH 상태(타겟 놓쳤을 때 카메라 회전 탐색) 파라미터
-SEARCH_W            = 0.85                          # 회전 속도 (rad/s)
-SEARCH_FULL_ROT_SEC = float(2 * np.pi / SEARCH_W)   # 360도 회전에 걸리는 시간 (≈7.39s)
-
 # ── STATE ─────────────────────────────────────────────────────────────
 mode            = "LIDAR"
 mission_idx     = 0
@@ -482,15 +478,6 @@ try:
                 send_cmd(v, w)
 
             elif park_state == "TRACK":
-                if not found:
-                    # 타겟을 놓치면 명시적으로 SEARCH 상태로 전환
-                    # (기존엔 이 분기가 없어서 cx_obj=-1로 계산된 의미없는
-                    #  err_x 때문에 한쪽 방향으로만 영원히 회전하는 버그가 있었음)
-                    park_state = "SEARCH"
-                    search_t = None
-                    arrive_count = 0
-                    continue
-
                 arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
 
                 if arrive_count >= ARRIVE_CONFIRM:
@@ -526,23 +513,14 @@ try:
                 send_cmd(v, w)
 
             elif park_state == "SEARCH":
-                if found:
-                    # 회전 중 타겟이 다시 보이면 즉시 추적 복귀
-                    park_state = "TRACK"
-                    search_t = None
-                    continue
-
                 if search_t is None:
                     search_t = time.time()
                     arrive_count = 0
-
-                if time.time() - search_t > SEARCH_FULL_ROT_SEC:
-                    # 360도 다 돌아도 못 찾으면 카메라 탐색을 포기하고
-                    # 라이다 벽 추종 탐색(WALL_SEARCH)으로 넘겨서 실제로 이동하며 찾음
+                if time.time() - search_t > 5.0:
                     park_state = "WALL_SEARCH"
                     search_t = None
                 else:
-                    send_cmd(0.0, -SEARCH_W if last_seen_x > cx_mid else SEARCH_W)
+                    send_cmd(0.0, -1.0 if last_seen_x > cx_mid else 1.0)
 
         # ── 디버그 오버레이 ───────────────────────────────────────────
         search_time_left = MISSION_TIMEOUT_SEC - (time.time() - mission_start_t)
