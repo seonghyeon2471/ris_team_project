@@ -34,6 +34,11 @@ THRESH_SLOW  = 40.0
 THRESH_TURN  = 24.0
 THRESH_STOP  = 12.0
 
+# ── TRACK 전용 회피 히스테리시스 ────────────────────────────────────────
+AVOID_ENTER   = THRESH_TURN        # 24cm 이하로 들어오면 회피 시작
+AVOID_EXIT    = THRESH_SLOW * 1.3  # 약 52cm 이상 멀어져야 회피 해제
+AVOID_MIN_SEC = 0.5                # 회피 시작 후 최소 이 시간 동안은 무조건 유지
+
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
 scan_lock = threading.Lock()
@@ -233,6 +238,11 @@ last_cmd      = (0.0, 0.0)
 search_phase  = "FORWARD"
 search_phase_t = time.time()
 
+# ── TRACK 회피 상태 ───────────────────────────────────────────────────
+avoiding       = False
+avoid_start_t  = 0.0
+avoid_dir_lock = 1
+
 print(f"START | MISSION: {MISSION}")
 
 # ── MAIN LOOP ─────────────────────────────────────────────────────────
@@ -396,6 +406,7 @@ try:
                     mission_idx += 1
                     arrive_count = 0
                     detect_count = 0
+                    avoiding = False
                     if mission_idx < len(MISSION):
                         park_state = "WALL_SEARCH"
                     continue
@@ -469,14 +480,50 @@ try:
                 send_cmd(v, w)
 
             elif park_state == "TRACK":
+                # ── 회피 중이 아닐 때만 "타겟 안 보임 → SEARCH" 판정 ──
+                # (회피 중에는 잠깐 안 보여도 회피를 끝까지 유지해야 진동이 안 생김)
+                if not found and not avoiding:
+                    park_state = "SEARCH"
+                    search_t = time.time()
+                    arrive_count = 0
+                    continue
+
+                if found:
+                    arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
+
+                # ── 회피 진입 판정 (히스테리시스) ──
+                if not avoiding and fm < AVOID_ENTER:
+                    avoiding = True
+                    avoid_start_t = time.time()
+                    avoid_dir_lock = adir   # 진입 시점 방향 고정 -> 도중에 안 바뀜
+
+                # ── 회피 중이면 카메라 신호 완전히 무시, 라이다 회피만 단독 수행 ──
+                if avoiding:
+                    elapsed_avoid = time.time() - avoid_start_t
+                    if fm > AVOID_EXIT and elapsed_avoid > AVOID_MIN_SEC:
+                        avoiding = False   # 충분히 멀어지고 최소 유지시간도 지나야 해제
+                    else:
+                        if fm < THRESH_STOP:
+                            v, w = 0.04, avoid_dir_lock * 1.3
+                        elif fm < THRESH_TURN:
+                            v, w = 0.08, avoid_dir_lock * 1.1
+                        else:
+                            v, w = 0.12, avoid_dir_lock * 0.85
+                        last_cmd = (v, w)
+                        send_cmd(v, w)
+                        cv2.imshow("f", frame)
+                        if cv2.waitKey(1) & 0xFF == 27:
+                            break
+                        continue
+
+                # ── 회피가 막 끝났는데 타겟이 안 보이면 SEARCH로 ──
                 if not found:
                     park_state = "SEARCH"
                     search_t = time.time()
                     arrive_count = 0
                     continue
 
-                arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
-
+                # ── 회피 중이 아닐 때만 카메라 추적 (라이다 블렌딩 없음) ──
                 if arrive_count >= ARRIVE_CONFIRM:
                     arrive_count = 0
                     park_state = "FORWARD"
@@ -494,18 +541,7 @@ try:
                             return -W_MIN if ex > 0 else W_MIN
                         return raw
 
-                    if fm >= THRESH_SLOW:
-                        v, w = reduced_v, cam_w(err_x)
-                    else:
-                        w_cam = cam_w(err_x)
-                        w_lid = adir * 0.75
-                        if fm < THRESH_STOP:
-                            v, w = 0.02, w_lid * 1.5
-                        elif fm < THRESH_TURN:
-                            v, w = 0.04, 0.8 * (w_lid * 1.45) + 0.2 * w_cam
-                        else:
-                            v, w = reduced_v, 0.4 * w_lid + 0.6 * w_cam
-
+                    v, w = reduced_v, cam_w(err_x)
                     last_cmd = (v, w)
                     send_cmd(v, w)
 
