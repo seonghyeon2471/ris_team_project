@@ -166,6 +166,39 @@ def make_mask(frame, hsv, name):
     bm = cv2.inRange(frame, np.array(cfg["bgr"][0]), np.array(cfg["bgr"][1]))
     return cv2.bitwise_and(m, bm)
 
+# ── 논문 알고리즘 적용 (복합 알고리즘 기반 장애물 회피) ────────────────────
+def complex_vision_obstacle_detection(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # 1. 3x3 Sobel 연산자 윤곽선 추출
+    sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    sobel = cv2.magnitude(sobelx, sobely)
+    sobel = np.uint8(np.clip(sobel, 0, 255))
+    
+    # 2. NOR Convert 및 경계치 설정 (229)
+    inv_sobel = cv2.bitwise_not(sobel)
+    _, binary = cv2.threshold(inv_sobel, 229, 255, cv2.THRESH_BINARY)
+    
+    # 3. Labeling (Segmentation) 및 루프의 픽셀 면적 연산
+    cnts, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    
+    max_area = 0
+    obs_cx = -1
+    
+    for cnt in cnts:
+        area = cv2.contourArea(cnt)
+        if area > max_area:
+            max_area = area
+            M = cv2.moments(cnt)
+            if M["m00"] != 0:
+                obs_cx = int(M["m10"] / M["m00"])
+                
+    # 장애물이 화면의 상당부분(10^4 기준) 차지하는지 확인
+    is_obstacle = max_area > 10000 
+    
+    return is_obstacle, obs_cx, max_area
+
 # ── WALL FOLLOW / PARK 세부 파라미터 ───────────────────────────────────────────
 MIN_AREA       = 400
 KP_ROT         = 0.030
@@ -238,7 +271,15 @@ try:
 
         is_searching = (mode == "LIDAR") or (mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "CORNER_ESCAPE"])
         
+        # 주차 대상이 아닐 때만 비전 기반 전방 장애물 회피 검사 수행
+        vision_obs = False
+        v_cx = -1
         if is_searching:
+            vision_obs, v_cx, v_area = complex_vision_obstacle_detection(frame)
+            if vision_obs:
+                cv2.putText(frame, f"VISION OBS: {int(v_area)}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                cv2.circle(frame, (v_cx, H//2), 5, (0, 0, 255), -1)
+
             if time.time() - mission_start_t > MISSION_TIMEOUT_SEC:
                 mode = "PARK"
                 park_state = "SAFE_HOP"
@@ -271,6 +312,16 @@ try:
 
         def centroid_in_arrive_zone():
             return (cx_obj >= arrive_x1 and cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
+
+        # ── 논문 복합 알고리즘 기반 강제 회피 동작 ──
+        # 라이다로 잡히지 않는 특수 형태의 장애물을 비전으로 먼저 인식하여 회피
+        if vision_obs and not found:
+            # 장애물이 화면의 우측에 있으면 좌회전, 좌측에 있으면 우회전
+            turn_speed = -1.0 if v_cx > cx_mid else 1.0
+            send_cmd(0.04, turn_speed) # 속도를 줄이고 회피 회전
+            cv2.imshow("f", frame)
+            cv2.waitKey(1)
+            continue
 
         # ══ LIDAR 모드 ═════════════════════════════════════════════════════
         if mode == "LIDAR":
