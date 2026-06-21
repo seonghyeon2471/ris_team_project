@@ -30,11 +30,11 @@ EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
 FRONT_RANGE  = 90    
 
-THRESH_SLOW  = 40.0   
-THRESH_TURN  = 24.0   
-THRESH_STOP  = 12.0   
+# ⚠️ 50cm 제한 및 10cm 추종에 맞춘 안전 거리 재밸런싱
+THRESH_SLOW  = 25.0   # 25cm~50cm 구간에서 안정적으로 객체를 보며 돌진(TRACK) 가능
+THRESH_TURN  = 16.0   
+THRESH_STOP  = 8.0    # 벽 간격이 10cm이므로 정면 비상 정지는 8cm로 낮춰야 멈추지 않음
 
-# [수정 1] 초기 스캔 배열 값을 150.0에서 50.0으로 변경 (최대 거리 50cm와 동기화)
 _scan     = np.full(360, 50.0, dtype=np.float32)
 _scan_pub = np.full(360, 50.0, dtype=np.float32)
 scan_lock = threading.Lock()
@@ -61,7 +61,7 @@ def lidar_loop():
         angle   = int(((raw[1] >> 1) | (raw[2] << 7)) / 64.0) % 360
         dist_cm = (raw[3] | (raw[4] << 8)) / 40.0
         
-        # [수정 2] 유효 탐지 거리를 3 ~ 150에서 3 ~ 50으로 변경
+        # 유효 탐지 거리 3 ~ 50cm
         if 3 < dist_cm < 50: _ema(angle, dist_cm)
         
         if sf == 1:
@@ -80,14 +80,12 @@ def front_min(scan):
     idx = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     return float(np.min(scan[idx]))
 
-# [핵심 로직 1] 추종할 벽의 방향 결정 (크로스 회피)
 def decide_follow_side(found, cx_obj, cx_mid, last_seen_x):
     ref_x = cx_obj if (found and cx_obj >= 0) else last_seen_x
     if ref_x == 160: 
         return "L"
     return "L" if ref_x > cx_mid else "R"
 
-# [핵심 로직 2] 장애물 정면 충돌 임박 시 코너 탈출 방향 결정
 def get_turn_dir(last_seen_x, cx_mid, follow_side):
     if last_seen_x == 160:
         return -1.0 if follow_side == "L" else 1.0
@@ -186,18 +184,18 @@ DETECT_CONFIRM = 6
 
 ARRIVE_Y_TOP    = int(240 * 0.85)
 ARRIVE_X_MARGIN = 30
-ARRIVE_FORWARD_SEC = 1.0  # 기존 0.8에서 1.0으로 수정 (무작정 직진 시간 0.2초 증가)
+ARRIVE_FORWARD_SEC = 1.0  
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
-# [수정 3] 벽을 따라 주행할 때 유지하려는 목표 간격을 12.0에서 10.0으로 변경
-WALL_TARGET      = 10.0    
-SIDE_STOP        = 9.5     
-BOTTLENECK_ENTER = 15.0    
+# 🛠️ 상호 간섭이 없도록 조율된 주행 거리 관련 제어 파라미터들
+WALL_TARGET      = 10.0    # 벽을 따라갈 때 유지하려는 목표 간격 (10cm)
+SIDE_STOP        = 7.5     # 측면 비상 반발 거리 (목표치인 10cm보다 작게 설정)
+BOTTLENECK_ENTER = 13.0    
 CENTER_KP        = 0.050   
 BOTTLENECK_V     = 0.11    
-WALL_SCAN_DIST   = 80.0    
-SIDE_SCAN_DIST   = 22.0    
+WALL_SCAN_DIST   = 40.0    # 최대 유효 거리가 50cm이므로 벽 판단 탐색도 40cm부터 개시
+SIDE_SCAN_DIST   = 18.0    
 
 WALL_APPROACH_V  = 0.14    
 WALL_KP          = 0.030   
@@ -412,8 +410,6 @@ try:
                         detect_count = 0; park_state = "TRACK"; continue
                 else: 
                     detect_count = 0
-                    
-                    # [추가] 장애물 탈출 감지: 정면이 크게 뚫리고, 측면 장애물도 시야에서 벗어난 경우 탈출로 간주
                     sd = side_dist(scan, follow_side)
                     if fm > WALL_SCAN_DIST and sd > SIDE_SCAN_DIST:
                         park_state = "SEARCH"
@@ -454,7 +450,6 @@ try:
                     last_cmd = (v, w); send_cmd(v, w)
 
             elif park_state == "SEARCH":
-                # [추가] 회전 탐색 중 객체를 다시 발견하면 즉시 TRACK으로 복귀
                 if found and fm > THRESH_SLOW:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
