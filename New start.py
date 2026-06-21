@@ -31,8 +31,8 @@ EMA_ALPHA   = 0.35
 MEDIAN_K    = 2
 FRONT_RANGE = 90
 THRESH_SLOW = 55.0
-THRESH_TURN = 30.0
-THRESH_STOP = 18.0
+THRESH_TURN = 32.0
+THRESH_STOP = 19.0
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
