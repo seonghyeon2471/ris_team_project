@@ -75,11 +75,12 @@ def front_min(scan):
 def avoid_dir(scan):
     return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
 
+# ★ 수정: L/R 각도 구간이 실제 좌/우와 반대로 매핑되어 있던 문제를 swap하여 수정
 def side_dist(scan, side):
     if side == "L":
-        idx = np.arange(65, 96) % 360
+        idx = np.arange(265, 296) % 360   # (수정 전: 65, 96)
     else:
-        idx = np.arange(265, 296) % 360
+        idx = np.arange(65, 96) % 360     # (수정 전: 265, 296)
     return float(np.min(scan[idx]))
 
 def side_min(scan, start, end):
@@ -88,8 +89,9 @@ def side_min(scan, start, end):
 
 def wall_follow(scan, fm, adir, follow_side):
     sd          = side_dist(scan, follow_side)
-    left_close  = side_min(scan, 60, 120)
-    right_close = side_min(scan, 240, 300)
+    # ★ 수정: side_dist와 동일한 이유로 left_close/right_close 구간도 swap
+    left_close  = side_min(scan, 240, 300)   # (수정 전: 60, 120)
+    right_close = side_min(scan, 60, 120)    # (수정 전: 240, 300)
     sign = 1 if follow_side == "L" else -1
 
     if fm < THRESH_STOP:
