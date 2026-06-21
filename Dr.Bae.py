@@ -266,6 +266,11 @@ STEP_FORWARD_V   = 0.18          # 직진 속도
 STEP_FORWARD_SEC = 1.5           # 좌우 살피기 전 직진 시간
 WALL_START_DIST  = 30.0          # 전방 30cm 이내 장애물 감지 시 강제 전환 거리
 
+# ========== 개활지(개방 공간) 복귀 파라미터 ==========
+OPEN_FIELD_DIST      = 50.0      # 전방 이 거리(cm) 이내에 아무것도 없으면 "개활지"로 판단
+OPEN_FIELD_LIMIT_SEC = 5.0       # 개활지 상태가 이 시간(초) 이상 지속되면 180도 돌아서 복귀
+RETURN_TURN_SEC      = float(np.pi / SECTOR_SCAN_W)  # 180도 회전에 걸리는 시간
+
 # ── STATE ─────────────────────────────────────────────────────────────
 mode            = "LIDAR"
 mission_idx     = 0
@@ -286,6 +291,10 @@ last_cmd        = (0.0, 0.0)
 # 스캔 상태 관리용 변수
 scan_phase      = 0   
 scan_t          = 0.0
+
+# 개활지 복귀 관리용 변수
+open_field_since = None   # 전방 OPEN_FIELD_DIST 밖이 비어있기 시작한 시각
+return_turn_t    = 0.0    # RETURN_TURN 상태 시작 시각
 
 dbg_wall_dist  = 0.0
 dbg_wall_angle = 0.0
@@ -320,7 +329,7 @@ try:
         draw   = COLOR_CFG[target]["draw"]
 
         is_searching = (mode == "LIDAR") or (
-            mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH", "CENTROID_TRACK"]
+            mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH", "CENTROID_TRACK", "RETURN_TURN"]
         )
 
         if is_searching:
@@ -330,6 +339,7 @@ try:
                 park_state  = "SAFE_HOP"
                 hop_start_t = time.time()
                 detect_count = 0
+                open_field_since = None
                 continue
         elif park_state not in ["SAFE_HOP"]:
             mission_start_t = time.time()
@@ -390,7 +400,7 @@ try:
                 continue
 
             if lidar_state == "WALL_SEARCH":
-                # [수정] 1순위 전방 차단 체크를 항상 가동하고, 1.5초 직진(phase 1) 중에도 걸리도록 변경
+                # 1순위: 전방 30cm 이내 막힘 → 기존 동작(벽 추종 진입) 그대로 유지
                 if fm < WALL_START_DIST:
                     left_dist = side_min(scan, 0, 90)
                     right_dist = side_min(scan, 270, 360)
@@ -398,9 +408,24 @@ try:
                     print(f"🚧 [LIDAR] 직진/탐색 중 전방 {fm:.1f}cm 막힘! {follow_side} 벽 추종 진입")
                     lidar_state = "WALL_APPROACH"
                     scan_phase = 0
+                    open_field_since = None
                     continue
 
-                # 2순위: 시간 기반 직진 후 스캔 패턴
+                # [추가] 2순위: 전방 50cm 이내에도 아무것도 없는 "개활지" 상태가
+                #        OPEN_FIELD_LIMIT_SEC 이상 지속되면 180도 돌아서 복귀
+                if fm > OPEN_FIELD_DIST:
+                    if open_field_since is None:
+                        open_field_since = time.time()
+                    elif time.time() - open_field_since > OPEN_FIELD_LIMIT_SEC:
+                        print(f"🔄 [LIDAR] {OPEN_FIELD_LIMIT_SEC:.0f}초간 {OPEN_FIELD_DIST:.0f}cm 이내 아무것도 없음! 180도 회전 후 복귀")
+                        lidar_state = "RETURN_TURN"
+                        open_field_since = None
+                        return_turn_t = time.time()
+                        continue
+                else:
+                    open_field_since = None  # 50cm 이내에 뭔가 다시 보이면 타이머 리셋
+
+                # 3순위: 시간 기반 직진 후 스캔 패턴
                 if scan_phase == 0:
                     scan_t = time.time()
                     scan_phase = 1
@@ -459,6 +484,14 @@ try:
                 else:
                     send_cmd(0.0, WALL_SEARCH_W)
 
+            elif lidar_state == "RETURN_TURN":
+                # 개활지에서 180도 회전하여 진행 반대 방향으로 복귀
+                send_cmd(0.0, SECTOR_SCAN_W)
+                if time.time() - return_turn_t > RETURN_TURN_SEC:
+                    lidar_state = "WALL_SEARCH"
+                    scan_phase = 0
+                    open_field_since = None
+
         # ── CENTROID 모드 (독립) ─────────────────────────────────────────
         elif mode == "CENTROID":
             if found:
@@ -479,6 +512,7 @@ try:
                     mode = "LIDAR"
                     lidar_state = "WALL_SEARCH"
                     scan_phase = 0 
+                    open_field_since = None
                     continue
             else:
                 print(f"👀 [{target}] 타겟이 카메라 밑으로 사라짐! 0.8초 직진 마무리 돌입!")
@@ -500,6 +534,7 @@ try:
                     mode = "LIDAR"
                     lidar_state = "WALL_SEARCH"
                     scan_phase = 0 
+                    open_field_since = None
                 else:
                     mode = "DONE"
                 continue
@@ -574,6 +609,7 @@ try:
                     if mission_idx < len(MISSION):
                         park_state = "WALL_SEARCH"
                         scan_phase = 0 
+                        open_field_since = None
                     continue
 
             # PARK 모드의 WALL_SEARCH 상태
@@ -589,7 +625,7 @@ try:
                 else:
                     detect_count = 0
 
-                # [수정] PARK 모드의 스캔 루프 내에서도 전방 차단 상시 체크
+                # [수정] PARK 모드의 스캔 루프 내에서도 전방 차단 상시 체크 (30cm 이내 → 기존 동작 유지)
                 if fm < WALL_START_DIST:
                     left_dist = side_min(scan, 0, 90)
                     right_dist = side_min(scan, 270, 360)
@@ -597,7 +633,22 @@ try:
                     print(f"🚧 [PARK] 직진/탐색 중 전방 {fm:.1f}cm 막힘! {follow_side} 벽 추종 진입")
                     park_state = "WALL_APPROACH"
                     scan_phase = 0
+                    open_field_since = None
                     continue
+
+                # [추가] 전방 50cm 이내에도 아무것도 없는 "개활지" 상태가
+                #        OPEN_FIELD_LIMIT_SEC 이상 지속되면 180도 돌아서 복귀
+                if fm > OPEN_FIELD_DIST:
+                    if open_field_since is None:
+                        open_field_since = time.time()
+                    elif time.time() - open_field_since > OPEN_FIELD_LIMIT_SEC:
+                        print(f"🔄 [PARK] {OPEN_FIELD_LIMIT_SEC:.0f}초간 {OPEN_FIELD_DIST:.0f}cm 이내 아무것도 없음! 180도 회전 후 복귀")
+                        park_state = "RETURN_TURN"
+                        open_field_since = None
+                        return_turn_t = time.time()
+                        continue
+                else:
+                    open_field_since = None
 
                 # 2순위: 직진 후 스캔 패턴
                 if scan_phase == 0:
@@ -679,6 +730,14 @@ try:
                     park_state = "WALL_APPROACH"
                 else:
                     send_cmd(0.0, WALL_SEARCH_W)
+
+            elif park_state == "RETURN_TURN":
+                # 개활지에서 180도 회전하여 진행 반대 방향으로 복귀
+                send_cmd(0.0, SECTOR_SCAN_W)
+                if time.time() - return_turn_t > RETURN_TURN_SEC:
+                    park_state = "WALL_SEARCH"
+                    scan_phase = 0
+                    open_field_since = None
 
             elif park_state == "CENTROID_TRACK":
                 if found:
@@ -788,6 +847,8 @@ try:
         if (mode == "LIDAR" and lidar_state == "WALL_SEARCH") or (mode == "PARK" and park_state == "WALL_SEARCH"):
             status_text = ["", "FORWARD(1.5s)", "SCAN_LEFT", "SCAN_RIGHT", "SCAN_CENTER"][scan_phase] if scan_phase < 5 else ""
             cv2.putText(frame, f"PHASE: {status_text}", (10, 60), 0, 0.5, (255, 0, 255), 2)
+        elif (mode == "LIDAR" and lidar_state == "RETURN_TURN") or (mode == "PARK" and park_state == "RETURN_TURN"):
+            cv2.putText(frame, "PHASE: RETURN_TURN (180deg)", (10, 60), 0, 0.5, (0, 255, 255), 2)
 
         cv2.imshow("f", frame)
         if cv2.waitKey(1) & 0xFF == 27:
