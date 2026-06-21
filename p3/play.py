@@ -145,7 +145,7 @@ def wall_follow(scan, fm, adir, follow_side):
     return (v, w)
 
 # ── MOTOR ─────────────────────────────────────────────────────────────
-# ★★ 신규: 마지막으로 실제 전송된 (v, w)를 기록 — Watchdog(P1)이 "최근 얼마나 회전했는지"를
+# 마지막으로 실제 전송된 (v, w)를 기록 — Watchdog(P1)이 "최근 얼마나 회전했는지"를
 #   판단하는 데 사용. send_cmd를 거치는 모든 상태에서 동일하게 누적되므로 상태별로 따로
 #   계측 코드를 넣지 않아도 된다.
 last_sent_v, last_sent_w = 0.0, 0.0
@@ -203,7 +203,10 @@ WALL_V         = 0.22
 WALL_TURN_V    = 0.10
 WALL_LOST_W    = 1.3
 WALL_SEARCH_W  = 1.1
-MISSION_TIMEOUT_SEC = 10.0   # P1: 같은 색을 이 시간 넘게 못 찾으면 LOOP_ESCAPE (시간 기반 트리거)
+
+# P1: 같은 색을 이 시간 넘게 못 찾으면 LOOP_ESCAPE (시간 기반 트리거)
+# ★ 변경: 10.0 -> 6.0 (더 빨리 "맴돈다"고 판단하도록 단축)
+MISSION_TIMEOUT_SEC = 6.0
 
 TARGET_CLEAR_DIST      = 40.0
 TARGET_CHECK_HALFWIDTH = 15
@@ -211,10 +214,13 @@ CAMERA_HFOV            = 60.0
 CAM_TO_LIDAR_SIGN      = 1
 
 # P1: 같은 자리를 맴도는 것(회전 누적)을 감지하기 위한 임계값/탈출 동작
-# (기존 코드에 정의는 있었지만 실제로 어디서도 사용되지 않던 상수 — 이번에 Watchdog 로직에 연결)
-FULL_LOOP_THRESH   = math.radians(400)
+# ★ 변경: 400도 -> 260도 (더 적게 돌아도 맴돈다고 판단 -> 더 빠른 인식)
+FULL_LOOP_THRESH   = math.radians(260)
 LOOP_ESCAPE_BACK_V = -0.12
 LOOP_ESCAPE_SEC    = 0.6
+# ★ 신규: 탈출 시 회전 단계의 길이/속도를 별도 상수로 분리 (기존엔 1.5초, WALL_SEARCH_W*1.2로 하드코딩)
+LOOP_ESCAPE_TURN_SEC = 2.6                  # 1.5 -> 2.6초로 연장 (더 오래 회전)
+LOOP_ESCAPE_TURN_W   = WALL_SEARCH_W * 1.6  # 1.2배 -> 1.6배로 증가 (더 빠르게/많이 회전)
 
 # ── 우선순위(P1 > P2 > P3) ──────────────────────────────────────────────
 # P0 비상정지   : 전방 < THRESH_STOP → wall_follow()/각 상태 내부에서 즉시 처리. 상태와 무관하게 항상 최우선.
@@ -227,7 +233,7 @@ EXPLORE_STATES = ("WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW")
 TARGET_INTERRUPTIBLE_STATES = EXPLORE_STATES + ("LOOP_ESCAPE",)
 
 # ── STATE ─────────────────────────────────────────────────────────────
-state         = "WALL_SEARCH"   # ★★ mode + lidar_state + park_state를 단일 상태로 통합 (중복 로직 제거)
+state         = "WALL_SEARCH"   # mode + lidar_state + park_state를 단일 상태로 통합 (중복 로직 제거)
 mission_idx   = 0
 detect_count  = 0
 arrive_count  = 0
@@ -351,12 +357,12 @@ try:
             send_cmd(v, w)
 
         elif state == "LOOP_ESCAPE":
-            # 1) 잠시 후진 → 2) 추가 회전으로 새 방향 모색 → 3) WALL_SEARCH로 복귀
+            # 1) 잠시 후진 → 2) 추가 회전으로 새 방향 모색(연장됨) → 3) WALL_SEARCH로 복귀
             elapsed_esc = now_t - escape_t
             if elapsed_esc < LOOP_ESCAPE_SEC:
                 send_cmd(LOOP_ESCAPE_BACK_V, 0.0)
-            elif elapsed_esc < LOOP_ESCAPE_SEC + 1.5:
-                send_cmd(0.0, WALL_SEARCH_W * 1.2)
+            elif elapsed_esc < LOOP_ESCAPE_SEC + LOOP_ESCAPE_TURN_SEC:
+                send_cmd(0.0, LOOP_ESCAPE_TURN_W)
             else:
                 state = "WALL_SEARCH"
                 mission_start_t = now_t
