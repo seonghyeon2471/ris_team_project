@@ -25,15 +25,15 @@ lidar_ser.reset_input_buffer()
 lidar_ser.write(bytes([0xA5, 0x20])); lidar_ser.read(7)
 print("LIDAR OK")
 
-# ── LIDAR PARAMS (20x20 로봇 + 전방 라이다 최적화 세팅) ───────────────────────
+# ── LIDAR PARAMS (정면 외벽 충돌 방지 - 고회전 / 하드 브레이킹 세팅) ───────────────
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
-FRONT_RANGE  = 90   
+FRONT_RANGE  = 90    
 
-# [수정] 범퍼 기준 실제 거리 체계 반영 (타이트 세팅)
-THRESH_SLOW  = 25.0   # 범퍼 앞 25cm에서 감속 및 블렌딩 조향 시작
-THRESH_TURN  = 15.0   # 범퍼 앞 15cm에서 코너링 시작
-THRESH_STOP  = 8.0    # 범퍼 앞 8cm까지 다가오면 비상 제동 및 강제 회전
+# [적용] 외벽에 박지 않도록 원거리 감속 시작 및 하드 선회 임계값 세팅
+THRESH_SLOW  = 40.0   # 40cm 앞 외벽 감지 시점부터 미리 속도 줄이기 시작
+THRESH_TURN  = 24.0   # 24cm 앞에서부터 확실하게 강한 선회 시작
+THRESH_STOP  = 12.0   # 12cm 이하는 즉시 정지 및 초강력 회전
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -102,19 +102,19 @@ def wall_follow(scan, fm, adir, follow_side, found, last_seen_x, cx_mid):
     right_close = side_min(scan, 60, 120)    
     sign = 1 if follow_side == "L" else -1
 
-    # [수정] 전방 한계선 이내 진입 시 신속하게 선회 조향력 부여
+    # [적용] 정면 외벽이 임계구역 이하로 좁혀지면 전진 속도를 극도로 죽이고 제자리 회전
     if fm < THRESH_STOP:
-        return (0.07, adir * 1.3)
+        return (0.02, adir * 1.5)          # 거의 멈춘 채 풀 조향 회전
     if fm < THRESH_TURN:
-        return (WALL_TURN_V, adir * 0.95)
+        return (WALL_TURN_V, adir * 1.45)  # 속도는 0.04로 제한, 꺾는 힘은 1.45로 강하게 도끼 조향
 
-    # [수정] 후미 걸림 방지를 위해 SIDE_STOP 감지 시 조향 반발력 제어 강화
+    # 측면 모서리 긁힘 방지
     if left_close < SIDE_STOP:
-        return (WALL_V * 0.6, -0.8)
+        return (WALL_V * 0.4, -1.2)  
     if right_close < SIDE_STOP:
-        return (WALL_V * 0.6,  0.8)
+        return (WALL_V * 0.4,  1.2)  
 
-    # [수정] 협로 진입 시 콤팩트한 센터링 제어
+    # 협로 진입 시 센터링 제어
     if left_close < BOTTLENECK_ENTER and right_close < BOTTLENECK_ENTER:
         err_center = left_close - right_close   
         w_center = float(np.clip(CENTER_KP * err_center, -0.9, 0.9))
@@ -126,10 +126,11 @@ def wall_follow(scan, fm, adir, follow_side, found, last_seen_x, cx_mid):
     err = sd - WALL_TARGET
     w   = sign * WALL_KP * err
     
+    # [적용] 외벽 충돌 징후(fm < THRESH_SLOW) 시 브레이크 블렌딩 강화
     if fm < THRESH_SLOW:
         blend = float(np.clip((THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
-        w = (1 - blend) * w + blend * adir * 0.6
-        v = WALL_V * (1.0 - 0.4 * blend)
+        w = (1 - blend) * w + blend * adir * 1.20  # 대각선 진입 시점부터 미리 회전력 보강
+        v = WALL_V * (1.0 - 0.70 * blend)          # 감속 비율을 70%까지 높여 확실하게 제동 관성 축소
     else:
         v = WALL_V
 
@@ -144,7 +145,7 @@ def wall_follow(scan, fm, adir, follow_side, found, last_seen_x, cx_mid):
         if is_safe:
             w += (obj_dir * 0.20)
 
-    w = float(np.clip(w, -1.2, 1.2)) # 최대 조향 한계 살짝 상향 조정
+    w = float(np.clip(w, -1.5, 1.5))
     return (v, w)
 
 # ── MOTOR ─────────────────────────────────────────────────────────────
@@ -173,7 +174,7 @@ def make_mask(frame, hsv, name):
     bm = cv2.inRange(frame, np.array(cfg["bgr"][0]), np.array(cfg["bgr"][1]))
     return cv2.bitwise_and(m, bm)
 
-# ── [수정] WALL FOLLOW / PARK 세부 파라미터 최적화 ─────────────────────────────
+# ── WALL FOLLOW / PARK 세부 파라미터 최적화 ─────────────────────────────────────
 MIN_AREA       = 400
 KP_ROT         = 0.030
 W_MIN          = 0.20
@@ -187,20 +188,22 @@ ARRIVE_FORWARD_SEC = 0.8
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
-# [수정] 몸집과 라이다 전방 배치를 반영한 콤팩트 튜닝
-WALL_TARGET      = 10.0    # 목표 벽 유지 거리 (10cm)
-SIDE_STOP        = 8.0     # [상향] 제자리 회전 시 로봇 후미가 외벽을 긁는 것을 방지하기 위한 마진 (8cm)
-BOTTLENECK_ENTER = 14.0    # [하향] 좌우 센서 모두 14cm 이하일 때만 중앙 유지 모드 발동
-CENTER_KP        = 0.045   # [상향] 좁은 곳에서 기민하게 복귀하도록 반응성 증가
-BOTTLENECK_V     = 0.12    # 좁은 통로 안전 주행 속도
-WALL_SCAN_DIST   = 80.0    # [하향] 불필요한 원거리 벽 무시 및 빠른 탐색 전환 기준 (80cm)
-SIDE_SCAN_DIST   = 22.0    # [하향] 제자리 회전을 중단할 측면 벽 기준 거리 (22cm)
+# [적용] 선회 시 외벽으로 밀려나는 언더스티어 현상 억제용 파라미터 세팅
+WALL_TARGET      = 12.0    
+SIDE_STOP        = 9.5     
+BOTTLENECK_ENTER = 15.0    
+CENTER_KP        = 0.050   
+BOTTLENECK_V     = 0.11    
+WALL_SCAN_DIST   = 80.0    
+SIDE_SCAN_DIST   = 22.0    
 
-WALL_APPROACH_V  = 0.18    
-WALL_KP          = 0.028   # [상향] 타이트한 주행을 위한 P-제어 게인 보정
-WALL_V           = 0.20    # 코너 안정성을 위해 기본 주행 속도를 0.22에서 0.20으로 미세 조정
-WALL_TURN_V      = 0.08
-WALL_LOST_W      = 1.3     
+WALL_APPROACH_V  = 0.14    
+WALL_KP          = 0.030   
+WALL_V           = 0.17    
+
+# [적용 핵심] 돌 때 외벽 충돌 관성을 완전히 죽이기 위해 전진 속도 하향, 조향 상향
+WALL_TURN_V      = 0.04    # 코너링 시 전진 전력 최소화 (기어가는 수준)
+WALL_LOST_W      = 1.5     # 클리핑 한계까지 조향 가중치 개방
 WALL_SEARCH_W    = 1.1     
 MISSION_TIMEOUT_SEC = 10.0  
 
@@ -313,8 +316,8 @@ try:
                 if sd <= WALL_TARGET * 1.3: lidar_state = "WALL_FOLLOW"
                 else:
                     sign = 1 if follow_side == "L" else -1
-                    if fm < THRESH_STOP: send_cmd(0.07, adir * 1.2)
-                    elif fm < THRESH_TURN: send_cmd(WALL_APPROACH_V * 0.6, adir * 0.8)
+                    if fm < THRESH_STOP: send_cmd(0.02, adir * 1.4)
+                    elif fm < THRESH_TURN: send_cmd(WALL_APPROACH_V * 0.4, adir * 1.1)
                     else: send_cmd(WALL_APPROACH_V, sign * 0.3)
 
             elif lidar_state == "WALL_FOLLOW":
@@ -339,7 +342,7 @@ try:
                 if elapsed_hop < 2.0:
                     send_cmd(0.0, 1.2)
                 else:
-                    if fm > 100.0: # 타이트 스케일에 맞춰 복귀 임계 하향
+                    if fm > 100.0: 
                         send_cmd(0.0, 1.0)
                     elif fm > 40.0:
                         send_cmd(WALL_V, 0.0)
@@ -399,8 +402,8 @@ try:
                 if sd <= WALL_TARGET * 1.3: park_state = "WALL_FOLLOW"; continue
 
                 sign = 1 if follow_side == "L" else -1
-                if fm < THRESH_STOP: v, w = 0.07, adir * 1.2
-                elif fm < THRESH_TURN: v, w = WALL_APPROACH_V * 0.6, adir * 0.8
+                if fm < THRESH_STOP: v, w = 0.02, adir * 1.4
+                elif fm < THRESH_TURN: v, w = WALL_APPROACH_V * 0.4, adir * 1.1
                 else: v, w = WALL_APPROACH_V, sign * 0.3
                 send_cmd(v, w)
 
@@ -438,10 +441,10 @@ try:
 
                     if fm >= THRESH_SLOW: v, w = reduced_v, cam_w(err_x)
                     else:
-                        w_cam = cam_w(err_x); w_lid = adir * 0.7
-                        if fm < THRESH_STOP: v, w = 0.09, w_lid
-                        elif fm < THRESH_TURN: v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
-                        else: v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
+                        w_cam = cam_w(err_x); w_lid = adir * 0.75
+                        if fm < THRESH_STOP: v, w = 0.02, w_lid * 1.5
+                        elif fm < THRESH_TURN: v, w = 0.04, 0.8 * (w_lid * 1.45) + 0.2 * w_cam
+                        else: v, w = reduced_v, 0.4 * w_lid + 0.6 * w_cam
 
                     last_cmd = (v, w); send_cmd(v, w)
 
