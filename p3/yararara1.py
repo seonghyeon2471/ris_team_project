@@ -364,9 +364,16 @@ try:
                 elapsed = time.time() - park_t
                 if elapsed >= PARK_SEC:
                     mission_idx += 1
+                    mode            = "LIDAR"
+                    park_state      = "TRACK"
+                    detect_count    = 0
+                    arrive_count    = 0
+                    last_cmd        = (0.0, 0.0)
+                    wf_side         = None
+                    wf_prev_err     = 0.0
+                    wf_corner_state = "NONE"
+                    wf_corner_cnt   = 0
                     if mission_idx < len(MISSION):
-                        mode = "LIDAR"
-                        detect_count = 0
                         print(f"다음 미션 [{MISSION[mission_idx]}] → LIDAR 모드")
                     continue
                 cv2.putText(frame, f"PARKING: {target}", (10, 25), 0, 0.6, draw, 2)
