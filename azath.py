@@ -4,6 +4,7 @@ import numpy as np
 import time
 import math
 import threading
+import sys
 
 # ── SERIAL ────────────────────────────────────────────────────────────
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
@@ -26,6 +27,7 @@ lidar_ser.reset_input_buffer()
 lidar_ser.write(bytes([0xA5, 0x20]))
 lidar_ser.read(7)
 print("LIDAR OK")
+print("-" * 50) # 구분선
 
 # ── LIDAR ─────────────────────────────────────────────────────────────
 EMA_ALPHA    = 0.35
@@ -91,7 +93,6 @@ def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
 
-# ★ 개선 1: 추종할 벽 방향 동적 결정 함수
 def decide_follow_side(scan):
     left_wall = float(np.min(scan[265:296]))
     right_wall = float(np.min(scan[65:96]))
@@ -108,15 +109,13 @@ def wall_follow(scan, fm, adir, follow_side):
     if fm < THRESH_TURN:
         return (WALL_TURN_V, adir * 0.85)
 
-    # ★ 개선 4: 측면 정지 기준 분리 (SIDE_STOP = 12.0) 적용
     if left_close < SIDE_STOP:
         return (WALL_V * 0.7, -0.7)
     if right_close < SIDE_STOP:
         return (WALL_V * 0.7,  0.7)
 
-    # ★ 개선 3: 병목 구조 진입 시 중앙 정렬 기능
     if left_close < 35.0 and right_close < 35.0:
-        w_center = 0.025 * (left_close - right_close)  # 양쪽 벽 중앙 유지 조향
+        w_center = 0.025 * (left_close - right_close)  
         return (WALL_V * 0.8, float(np.clip(w_center, -0.5, 0.5)))
 
     if sd > WALL_TARGET * 2.0:
@@ -174,12 +173,11 @@ ARRIVE_FORWARD_SEC = 0.8
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
-# ★ 개선 관련 파라미터 셋팅
-WALL_TARGET    = 10.0    # ★ 개선 2: 벽 추종 거리를 10cm로 좁힘
-SIDE_STOP      = 12.0    # ★ 개선 4: 측면 전용 정지 임계값 신설
+WALL_TARGET    = 10.0    
+SIDE_STOP      = 12.0    
 WALL_SCAN_DIST = 50.0    
 WALL_APPROACH_V = 0.20  
-WALL_KP        = 0.024    # 최적화된 조향 게인
+WALL_KP        = 0.024    
 WALL_V         = 0.22
 WALL_TURN_V    = 0.10
 WALL_LOST_W    = 1.3     
@@ -201,10 +199,8 @@ park_t        = None
 search_t      = None      
 mission_start_t = time.time() 
 hop_start_t     = None        
-wall_stuck_t    = time.time()  # ★ 개선 3: 동일 장애물 갇힘 감지용 타이머
+wall_stuck_t    = time.time()  
 last_cmd      = (0.0, 0.0)
-
-print(f"START | MISSION: {MISSION}")
 
 # ── MAIN LOOP ─────────────────────────────────────────────────────────
 try:
@@ -222,24 +218,30 @@ try:
         fm     = front_min(scan)
         adir   = avoid_dir(scan)
 
+        # 장애물 감지 시 동적 벽 결정
         if fm < 45.0:
-            # adir이 1이라는 것은 왼쪽이 더 가까워서 우회전해야 한다는 뜻. 
-            # 즉, 더 가까운 왼쪽(L)을 새로운 추종 벽으로 설정!
             follow_side = "L" if adir == 1 else "R"
-            
+
+        # 미션 완료 처리
         if mission_idx >= len(MISSION):
             stop_robot()
-            cv2.putText(frame, "ALL MISSIONS DONE", (30, H // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            print("\n[INFO] ALL MISSIONS DONE")
+            cv2.putText(frame, "DONE", (10, 30), cv2.FONT_HERSHEY_PLAIN, 2.0, (0, 255, 0), 2)
             cv2.imshow("f", frame)
             cv2.waitKey(1)
             continue
 
         target = MISSION[mission_idx]
         draw   = COLOR_CFG[target]["draw"]
+        current_state = lidar_state if mode == "LIDAR" else park_state
 
-        cv2.putText(frame, f"TARGET: {target.upper()}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, draw, 2)
+        # ★ CMD 창 출력 최적화: 한 줄에 핵심 상태만 덮어쓰기 (\r 사용)
+        print(f"\r🎯 TARGET: {target.upper():<6} | 📏 FM: {fm:>5.1f}cm | 🤖 {mode}-{current_state:<13} | 🧱 WALL: {follow_side}", end="")
+        sys.stdout.flush()
 
-        # ★ 개선 3: 벽 모드 진입 후 표적을 못 찾고 7초 이상 뺑뺑이 돌면 루프 탈출
+        # ★ 카메라 화면 출력 최적화: 오직 추적 중인 색상 이름만 띄움
+        cv2.putText(frame, target.upper(), (10, 30), cv2.FONT_HERSHEY_PLAIN, 2.0, draw, 2)
+
         is_searching = (mode == "LIDAR") or (mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH"])
         if is_searching:
             if (lidar_state in ["WALL_APPROACH", "WALL_FOLLOW"] or park_state in ["WALL_APPROACH", "WALL_FOLLOW"]):
@@ -275,12 +277,16 @@ try:
             bx, by_top, bw, bh = cv2.boundingRect(big)
             last_seen_x   = cx_obj
             last_bottom_y = min(by_top + bh, 239)
-            cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 2)
-            cv2.circle(frame, (cx_obj, cy_obj), 5, (0, 255, 255), -1)
+            
+            # 추적 객체 외곽선만 얇게 그리기
+            cv2.rectangle(frame, (bx, by_top), (bx + bw, by_top + bh), draw, 1)
+            cv2.circle(frame, (cx_obj, cy_obj), 3, (0, 255, 255), -1)
 
         arrive_x1 = cx_mid - ARRIVE_X_MARGIN
         arrive_x2 = cx_mid + ARRIVE_X_MARGIN
-        cv2.rectangle(frame, (arrive_x1, ARRIVE_Y_TOP), (arrive_x2, H - 1), (0, 0, 255), 1)
+
+        # ★ 도착 구역 박스(cv2.rectangle) 제거하여 화면 렌더링 최적화
+        # cv2.rectangle(frame, (arrive_x1, ARRIVE_Y_TOP), (arrive_x2, H - 1), (0, 0, 255), 1)
 
         def centroid_in_arrive_zone():
             return (cx_obj >= arrive_x1 and cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
@@ -298,9 +304,9 @@ try:
 
             if lidar_state == "WALL_SEARCH":
                 if fm < WALL_SCAN_DIST:
-                    follow_side = decide_follow_side(scan)  # ★ 개선 1: 동적 벽 결정
+                    follow_side = decide_follow_side(scan) 
                     lidar_state = "WALL_APPROACH"
-                    wall_stuck_t = time.time()              # 타이머 초기화
+                    wall_stuck_t = time.time()              
                 else: 
                     send_cmd(0.0, WALL_SEARCH_W)
 
@@ -323,7 +329,6 @@ try:
 
         # ══ PARK 모드 ═════════════════════════════════════════════════════
         elif mode == "PARK":
-
             if park_state == "SAFE_HOP":
                 if found:
                     detect_count += 1
@@ -345,7 +350,7 @@ try:
                     elif fm > 50.0:
                         send_cmd(WALL_V, 0.0)
                     else:
-                        follow_side = decide_follow_side(scan)  # ★ 개선 1: 동적 벽 결정
+                        follow_side = decide_follow_side(scan) 
                         park_state = "WALL_APPROACH"
                         mission_start_t = time.time()
                         wall_stuck_t = time.time()
@@ -385,7 +390,7 @@ try:
                     detect_count = 0
 
                 if fm < WALL_SCAN_DIST:
-                    follow_side = decide_follow_side(scan)  # ★ 개선 1: 동적 벽 결정
+                    follow_side = decide_follow_side(scan)
                     park_state = "WALL_APPROACH"
                     wall_stuck_t = time.time()
                     continue
@@ -477,7 +482,7 @@ try:
             break
 
 except KeyboardInterrupt:
-    print("STOP")
+    print("\n[INFO] STOP")
 finally:
     stop_robot()
     cap.release()
