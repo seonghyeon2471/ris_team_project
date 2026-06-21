@@ -75,16 +75,19 @@ def front_min(scan):
 def avoid_dir(scan):
     return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
 
+# ★ 신규: 어느 쪽 벽을 추종할지 결정 (타겟이 보이면 타겟 쪽, 안 보이면 라이다 기준 더 넓게 트인 쪽)
+# WALL_SEARCH -> WALL_APPROACH로 넘어가는 순간에만 호출, 추종 중에는 절대 다시 호출하지 않음
 def decide_follow_side(adir, found, cx_obj, cx_mid):
     if found and cx_obj >= 0:
         return "L" if cx_obj < cx_mid else "R"
     return "L" if adir == 1 else "R"
 
+# ★ 수정: L/R 각도 구간이 실제 좌/우와 반대로 매핑되어 있던 문제를 swap하여 수정
 def side_dist(scan, side):
     if side == "L":
-        idx = np.arange(265, 296) % 360
+        idx = np.arange(265, 296) % 360   # (수정 전: 65, 96)
     else:
-        idx = np.arange(65, 96) % 360
+        idx = np.arange(65, 96) % 360     # (수정 전: 265, 296)
     return float(np.min(scan[idx]))
 
 def side_min(scan, start, end):
@@ -93,8 +96,9 @@ def side_min(scan, start, end):
 
 def wall_follow(scan, fm, adir, follow_side):
     sd          = side_dist(scan, follow_side)
-    left_close  = side_min(scan, 240, 300)
-    right_close = side_min(scan, 60, 120)
+    # ★ 수정: side_dist와 동일한 이유로 left_close/right_close 구간도 swap
+    left_close  = side_min(scan, 240, 300)   # (수정 전: 60, 120)
+    right_close = side_min(scan, 60, 120)    # (수정 전: 240, 300)
     sign = 1 if follow_side == "L" else -1
 
     if fm < THRESH_STOP:
@@ -107,8 +111,9 @@ def wall_follow(scan, fm, adir, follow_side):
     if right_close < SIDE_STOP:
         return (WALL_V * 0.7,  0.7)
 
+    # ★ 신규: 병목 구간(양쪽 벽이 동시에 좁아짐) -> 한쪽 벽 추종 대신 중앙 정렬 제어로 전환
     if left_close < BOTTLENECK_ENTER and right_close < BOTTLENECK_ENTER:
-        err_center = left_close - right_close
+        err_center = left_close - right_close   # 왼쪽이 더 가까우면 음수 -> 오른쪽으로(음의 w), 오른쪽이 더 가까우면 양수 -> 왼쪽으로(양의 w)
         w_center = float(np.clip(CENTER_KP * err_center, -0.9, 0.9))
         return (BOTTLENECK_V, w_center)
 
@@ -166,30 +171,31 @@ ARRIVE_FORWARD_SEC = 0.8
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
-WALL_TARGET    = 10.0
-SIDE_STOP      = 6.0
-BOTTLENECK_ENTER = 25.0
-CENTER_KP      = 0.030
-BOTTLENECK_V   = 0.15
+WALL_TARGET    = 10.0    # (수정: 20.0 -> 10.0) 목표 이격거리
+SIDE_STOP      = 6.0     # ★ 신규: 측면 "너무 가까움" 비상회피 기준 (WALL_TARGET보다 작아야 P제어가 정상 작동)
+BOTTLENECK_ENTER = 25.0  # ★ 신규: 좌/우 모두 이 값보다 가까우면 "병목 구간"으로 판단
+CENTER_KP      = 0.030   # ★ 신규: 병목 구간에서 중앙 정렬 제어 게인
+BOTTLENECK_V   = 0.15    # ★ 신규: 병목 구간 통과 속도 (양쪽 벽 가까우므로 WALL_V보다 느리게)
 WALL_SCAN_DIST = 150.0  
 WALL_APPROACH_V = 0.20  
-WALL_KP        = 0.024
+WALL_KP        = 0.024   # (수정: 0.012 -> 0.024) 목표거리가 절반이 되어 오차 범위도 절반이므로 게인을 2배로 보정
 WALL_V         = 0.22
 WALL_TURN_V    = 0.10
 WALL_LOST_W    = 1.3     
 WALL_SEARCH_W  = 1.1     
 MISSION_TIMEOUT_SEC = 10.0  
 
-FULL_LOOP_THRESH   = math.radians(400)
-LOOP_ESCAPE_BACK_V = -0.12
-LOOP_ESCAPE_SEC    = 0.6
+# ★ 신규: 같은 장애물을 한 바퀴 넘게 도는 것을 감지하기 위한 회전각 누적 임계값/탈출 동작
+FULL_LOOP_THRESH   = math.radians(400)   # 약 400도 누적 회전 -> "한 바퀴 돈 것 같다" 판단 (여유 40도)
+LOOP_ESCAPE_BACK_V = -0.12               # 탈출 시 후진 속도
+LOOP_ESCAPE_SEC    = 0.6                 # 후진 지속 시간(초)
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"   
 mission_idx   = 0
 detect_count  = 0
 arrive_count  = 0
-follow_side   = "L"
+follow_side   = "L"   # 초기값일 뿐, WALL_SEARCH -> WALL_APPROACH 전환 시 decide_follow_side()로 항상 재결정됨
 lidar_state   = "WALL_SEARCH"
 
 park_state    = "TRACK"   
@@ -225,9 +231,11 @@ try:
         target = MISSION[mission_idx]
         draw   = COLOR_CFG[target]["draw"]
 
+        # ★ 화면 왼쪽 상단에 현재 추적 중인 색상 표시 (예: "TARGET: RED")
+        # 해당 색상 고유의 BGR 색상으로 글씨가 나타납니다.
         cv2.putText(frame, f"TARGET: {target.upper()}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, draw, 2)
 
-        is_searching = (mode == "LIDAR") or (mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH", "LEAVE"])
+        is_searching = (mode == "LIDAR") or (mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH"])
         
         if is_searching:
             if time.time() - mission_start_t > MISSION_TIMEOUT_SEC:
@@ -236,7 +244,7 @@ try:
                 hop_start_t = time.time()
                 detect_count = 0
                 continue
-        elif park_state not in ["SAFE_HOP", "LEAVE"]:
+        elif park_state not in ["SAFE_HOP"]:
             mission_start_t = time.time()
 
         mask = make_mask(frame, hsv, target)
@@ -265,8 +273,7 @@ try:
 
         # ══ LIDAR 모드 ═════════════════════════════════════════════════════
         if mode == "LIDAR":
-            # ★ 수정: 정면 장애물이 없을 때(fm >= THRESH_SLOW)만 TRACK 전환 카운트 증가
-            if found and fm >= THRESH_SLOW: detect_count += 1
+            if found: detect_count += 1
             else: detect_count = 0
 
             if detect_count >= DETECT_CONFIRM:
@@ -298,8 +305,7 @@ try:
         elif mode == "PARK":
 
             if park_state == "SAFE_HOP":
-                # ★ 수정: 정면에 장애물이 없을 때만 TRACK 전환 (우회 보장)
-                if found and fm >= THRESH_SLOW:
+                if found:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
                         detect_count = 0
@@ -341,23 +347,11 @@ try:
                     arrive_count = 0
                     detect_count = 0
                     if mission_idx < len(MISSION):
-                        # ★ 수정: 주차 직후 제자리 회전 방지를 위해 WALL_SEARCH 대신 LEAVE 상태로 진입
-                        park_state = "LEAVE"
-                        park_t = time.time()
+                        park_state = "WALL_SEARCH"
                     continue
 
-            # ★ 추가: 주차 후 뒤로 빠져서 거리를 확보하는 상태
-            elif park_state == "LEAVE":
-                elapsed_leave = time.time() - park_t
-                if elapsed_leave < 1.0: # 1초간 후진
-                    send_cmd(-0.12, 0.0)
-                else:
-                    park_state = "WALL_SEARCH"
-                continue
-
             elif park_state == "WALL_SEARCH":
-                # ★ 수정: 정면 장애물 없을 때만 색상 추적
-                if found and fm >= THRESH_SLOW:
+                if found:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
                         detect_count = 0
@@ -372,8 +366,7 @@ try:
                 send_cmd(0.0, WALL_SEARCH_W)
 
             elif park_state == "WALL_APPROACH":
-                # ★ 수정: 정면 장애물 없을 때만 색상 추적
-                if found and fm >= THRESH_SLOW:
+                if found:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
                         detect_count = 0; park_state = "TRACK"; continue
@@ -389,8 +382,7 @@ try:
                 send_cmd(v, w)
 
             elif park_state == "WALL_FOLLOW":
-                # ★ 수정: 정면 장애물 없을 때만 색상 추적
-                if found and fm >= THRESH_SLOW:
+                if found:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
                         detect_count = 0; park_state = "TRACK"; continue
@@ -416,22 +408,12 @@ try:
                         if abs(raw) < W_MIN and ex != 0: return -W_MIN if ex > 0 else W_MIN
                         return raw
 
-                    w_cam = cam_w(err_x)
-
-                    # ★ 수정: 상황 A - 주차 진입 직전 (목표물이 코앞에 있음 -> 라이다 회피 비활성화)
-                    if arrive_count > 0 or cy_obj > int(240 * 0.7):
-                        v, w = reduced_v, w_cam
-                        
-                    # ★ 수정: 상황 B - 추적 중인데 정면에 장애물이 가로막음 (우회 지시)
-                    elif fm < THRESH_SLOW:
-                        detect_count = 0
-                        follow_side = decide_follow_side(adir, found, cx_obj, cx_mid)
-                        park_state = "WALL_APPROACH"
-                        continue
-                        
-                    # ★ 수정: 상황 C - 정면이 뚫려있어 정상적으로 색상 추격
+                    if fm >= THRESH_SLOW: v, w = reduced_v, cam_w(err_x)
                     else:
-                        v, w = reduced_v, w_cam
+                        w_cam = cam_w(err_x); w_lid = adir * 0.7
+                        if fm < THRESH_STOP: v, w = 0.09, w_lid
+                        elif fm < THRESH_TURN: v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
+                        else: v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
 
                     last_cmd = (v, w); send_cmd(v, w)
 
