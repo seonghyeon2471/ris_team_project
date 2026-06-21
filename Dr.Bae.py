@@ -28,11 +28,16 @@ print("LIDAR OK")
 # ── LIDAR PARAMS ──────────────────────────────────────────────────────
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
-FRONT_RANGE  = 90    
+FRONT_RANGE  = 90
 
-THRESH_SLOW  = 40.0   
-THRESH_TURN  = 24.0   
-THRESH_STOP  = 12.0   
+THRESH_SLOW  = 40.0
+THRESH_TURN  = 24.0
+THRESH_STOP  = 12.0
+
+# [신규 추가] TRACK 전용 임시 회피 히스테리시스 파라미터
+AVOID_ENTER   = THRESH_TURN
+AVOID_EXIT    = THRESH_SLOW * 1.3
+AVOID_MIN_SEC = 0.5
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -76,7 +81,7 @@ def front_min(scan):
     idx = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
     return float(np.min(scan[idx]))
 
-# [개념 변경] 가상맵 탈출 방지를 위해 장애물을 무조건 왼쪽에 두고 우회전(-1.0) 회피로 고정
+# [유지] 가상맵 탈출 방지를 위해 장애물을 무조건 왼쪽에 두고 우회전(-1.0) 회피로 고정
 def get_turn_dir():
     return -1.0
 
@@ -88,12 +93,12 @@ def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
 
-# [단방향 리팩토링] 항상 장애물 왼쪽 면만 추종하는 로직
+# [유지] 단방향(왼쪽 면) 고정 추종 로직
 def wall_follow(scan, fm, found):
     sd          = side_dist(scan, "L")
     left_close  = side_min(scan, 240, 300)   
     right_close = side_min(scan, 60, 120)    
-    sign = 1 # Left 고정이므로 무조건 1
+    sign = 1 # Left 고정
     turn_dir = get_turn_dir() # 무조건 -1.0 (우회전 탈출)
 
     if fm < THRESH_STOP:
@@ -141,7 +146,7 @@ def send_cmd(v, w):
 
 def stop_robot(): send_cmd(0.0, 0.0)
 
-# ── COLOR CONFIG (요청 수치 반영 완료) ──────────────────────────────────────
+# ── COLOR CONFIG ──────────────────────────────────────────────────────
 COLOR_CFG = {
     "red":    {"hsv1": ([169, 136, 114], [179, 220, 255]), "hsv2": None, "bgr":  ([20, 20, 80],  [255, 255, 255]), "draw": (0, 0, 255)},
     "yellow": {"hsv1": ([25, 60, 160], [32, 161, 255]),    "hsv2": None, "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
@@ -164,7 +169,7 @@ MIN_AREA       = 400
 KP_ROT         = 0.030
 W_MIN          = 0.20
 APPROACH_V     = 0.13
-PARK_SEC       = 1.2
+PARK_SEC       = 3.0   # 주차 3초 유지
 DETECT_CONFIRM = 6
 
 ARRIVE_Y_TOP    = int(240 * 0.85)
@@ -173,39 +178,52 @@ ARRIVE_FORWARD_SEC = 0.8
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
-WALL_TARGET      = 12.0    
-SIDE_STOP        = 9.5     
-BOTTLENECK_ENTER = 15.0    
-CENTER_KP        = 0.050   
-BOTTLENECK_V     = 0.11    
-WALL_SCAN_DIST   = 80.0    
-SIDE_SCAN_DIST   = 22.0    
+WALL_TARGET      = 12.0
+SIDE_STOP        = 9.5
+BOTTLENECK_ENTER = 15.0
+CENTER_KP        = 0.050
+BOTTLENECK_V     = 0.11
+WALL_SCAN_DIST   = 80.0
+SIDE_SCAN_DIST   = 22.0
 
-WALL_APPROACH_V  = 0.14    
-WALL_KP          = 0.030   
-WALL_V           = 0.17    
+WALL_APPROACH_V  = 0.14
+WALL_KP          = 0.030
+WALL_V           = 0.17
 
-WALL_TURN_V      = 0.04    
-WALL_LOST_W      = 1.5     
-WALL_SEARCH_W    = 1.1     
-MISSION_TIMEOUT_SEC = 10.0  
+WALL_TURN_V      = 0.04
+WALL_LOST_W      = 1.5
+WALL_SEARCH_W    = 1.1
+MISSION_TIMEOUT_SEC = 10.0
+
+# [신규 추가] 탐색 모드(SEARCH) 전진-회전 파라미터
+SEARCH_FORWARD_DIST_SEC = 2.5
+SEARCH_FORWARD_V        = 0.10
+SEARCH_ROTATE_W         = 1.2
+SEARCH_ROTATE_SEC       = 5.4
 
 # ── STATE ─────────────────────────────────────────────────────────────
-mode          = "LIDAR"   
+mode          = "LIDAR"
 mission_idx   = 0
 detect_count  = 0
 arrive_count  = 0
-follow_side   = "L"   # 무조건 "L" 고정
 lidar_state   = "WALL_SEARCH"
 
-park_state    = "TRACK"   
+park_state    = "TRACK"
 last_seen_x   = 160
 last_bottom_y = 0
 park_t        = None
-search_t      = None      
-mission_start_t = time.time() 
-hop_start_t      = None        
+search_t      = None
+mission_start_t = time.time()
+hop_start_t      = None
 last_cmd      = (0.0, 0.0)
+
+# [신규 추가] 탐색 패턴 및 회피 상태 변수
+search_phase   = "FORWARD"
+search_phase_t = time.time()
+
+avoiding       = False
+avoid_start_t  = 0.0
+avoid_dir_lock = -1.0 # 단방향(왼쪽 벽) 추종에 맞춰 우회전(-1.0) 고정
 
 print(f"START | MISSION: {MISSION}")
 
@@ -233,7 +251,7 @@ try:
         cv2.putText(frame, f"TARGET: {target.upper()}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, draw, 2)
 
         is_searching = (mode == "LIDAR") or (mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH"])
-        
+
         if is_searching:
             if time.time() - mission_start_t > MISSION_TIMEOUT_SEC:
                 mode = "PARK"
@@ -246,7 +264,7 @@ try:
 
         mask = make_mask(frame, hsv, target)
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        big    = max(cnts, key=cv2.contourArea) if cnts else None
+        big = max(cnts, key=cv2.contourArea) if cnts else None
         found = big is not None and cv2.contourArea(big) > MIN_AREA
 
         cx_obj, cy_obj = -1, -1
@@ -270,7 +288,7 @@ try:
 
         # ══ LIDAR 모드 ═════════════════════════════════════════════════════
         if mode == "LIDAR":
-            if found and fm > THRESH_SLOW: detect_count += 1
+            if found: detect_count += 1
             else: detect_count = 0
 
             if detect_count >= DETECT_CONFIRM:
@@ -285,16 +303,30 @@ try:
 
                 if fm < WALL_SCAN_DIST or left_close < SIDE_SCAN_DIST or right_close < SIDE_SCAN_DIST:
                     lidar_state = "WALL_APPROACH"
-                else: 
-                    # 가상맵 이탈 방지: 아무것도 감지 안 되면 전진하지 않고 제자리 회전 탐색
-                    send_cmd(0.0, -WALL_SEARCH_W)
+                    search_phase = "FORWARD"
+                    search_phase_t = time.time()
+                else:
+                    # [적용 완료] 제자리 회전 대신 전진-회전 탐색 패턴 이식
+                    if search_phase == "FORWARD":
+                        if time.time() - search_phase_t < SEARCH_FORWARD_DIST_SEC:
+                            send_cmd(SEARCH_FORWARD_V, 0.0)
+                        else:
+                            search_phase = "ROTATE"
+                            search_phase_t = time.time()
+                    elif search_phase == "ROTATE":
+                        if time.time() - search_phase_t < SEARCH_ROTATE_SEC:
+                            send_cmd(0.0, -SEARCH_ROTATE_W) # 단방향 우회전 통일
+                        else:
+                            search_phase = "FORWARD"
+                            search_phase_t = time.time()
 
             elif lidar_state == "WALL_APPROACH":
                 sd = side_dist(scan, "L")
-                if sd <= WALL_TARGET * 1.3: lidar_state = "WALL_FOLLOW"
+                if sd <= WALL_TARGET * 1.3:
+                    lidar_state = "WALL_FOLLOW"
                 else:
                     sign = 1 
-                    turn_dir = get_turn_dir() # 무조건 우회전 회피
+                    turn_dir = get_turn_dir()
                     if fm < THRESH_STOP: send_cmd(0.02, turn_dir * 1.4)
                     elif fm < THRESH_TURN: send_cmd(WALL_APPROACH_V * 0.4, turn_dir * 1.1)
                     else: send_cmd(WALL_APPROACH_V, sign * 0.3)
@@ -307,7 +339,7 @@ try:
         elif mode == "PARK":
 
             if park_state == "SAFE_HOP":
-                if found and fm > THRESH_SLOW:
+                if found:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
                         detect_count = 0
@@ -317,21 +349,16 @@ try:
                 else: detect_count = 0
 
                 elapsed_hop = time.time() - hop_start_t
-                
-                if elapsed_hop < 2.0:
-                    send_cmd(0.0, 1.2)
+                if elapsed_hop < 2.0: send_cmd(0.0, 1.2)
                 else:
-                    if fm > 100.0: 
-                        send_cmd(0.0, 1.0)
-                    elif fm > 40.0:
-                        send_cmd(WALL_V, 0.0)
+                    if fm > 100.0: send_cmd(0.0, 1.0)
+                    elif fm > 40.0: send_cmd(WALL_V, 0.0)
                     else:
                         park_state = "WALL_APPROACH"
                         mission_start_t = time.time()
                         continue
                 
                 cv2.imshow("f", frame); cv2.waitKey(1); continue
-
 
             if park_state == "FORWARD":
                 elapsed = time.time() - park_t
@@ -347,12 +374,13 @@ try:
                     mission_idx += 1
                     arrive_count = 0
                     detect_count = 0
+                    avoiding = False
                     if mission_idx < len(MISSION):
                         park_state = "WALL_SEARCH"
                     continue
 
             elif park_state == "WALL_SEARCH":
-                if found and fm > THRESH_SLOW:
+                if found:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
                         detect_count = 0
@@ -366,54 +394,95 @@ try:
                 if fm < WALL_SCAN_DIST or left_close < SIDE_SCAN_DIST or right_close < SIDE_SCAN_DIST:
                     park_state = "WALL_APPROACH"
                     continue
-                # 가상맵 이탈 방지: 제자리 회전 탐색
-                send_cmd(0.0, -WALL_SEARCH_W)
+
+                # [적용 완료] 전진-회전 탐색 패턴 이식
+                if search_phase == "FORWARD":
+                    if time.time() - search_phase_t < SEARCH_FORWARD_DIST_SEC:
+                        send_cmd(SEARCH_FORWARD_V, 0.0)
+                    else:
+                        search_phase = "ROTATE"
+                        search_phase_t = time.time()
+                elif search_phase == "ROTATE":
+                    if time.time() - search_phase_t < SEARCH_ROTATE_SEC:
+                        send_cmd(0.0, -SEARCH_ROTATE_W)
+                    else:
+                        search_phase = "FORWARD"
+                        search_phase_t = time.time()
 
             elif park_state == "WALL_APPROACH":
-                if found and fm > THRESH_SLOW:
+                if found:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
-                        detect_count = 0; park_state = "TRACK"; continue
+                        detect_count = 0
+                        park_state = "TRACK"
+                        continue
                 else: detect_count = 0
 
                 sd = side_dist(scan, "L")
-                if sd <= WALL_TARGET * 1.3: park_state = "WALL_FOLLOW"; continue
+                if sd <= WALL_TARGET * 1.3:
+                    park_state = "WALL_FOLLOW"
+                    continue
 
                 sign = 1
                 turn_dir = get_turn_dir()
-                
                 if fm < THRESH_STOP: v, w = 0.02, turn_dir * 1.4
                 elif fm < THRESH_TURN: v, w = WALL_APPROACH_V * 0.4, turn_dir * 1.1
                 else: v, w = WALL_APPROACH_V, sign * 0.3
                 send_cmd(v, w)
 
             elif park_state == "WALL_FOLLOW":
-                if found and fm > THRESH_SLOW:
+                if found:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
-                        detect_count = 0; park_state = "TRACK"; continue
+                        detect_count = 0
+                        park_state = "TRACK"
+                        continue
                 else: detect_count = 0
 
                 v, w = wall_follow(scan, fm, found)
                 send_cmd(v, w)
 
             elif park_state == "TRACK":
+                if not found and not avoiding:
+                    park_state = "SEARCH"
+                    search_t = time.time()
+                    arrive_count = 0
+                    continue
+
+                if found:
+                    arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
+
+                # [적용 완료] TRACK 중 정면에 장애물 발견 시 AVOID(단기 회피) 모드 발동
+                if not avoiding and fm < AVOID_ENTER:
+                    avoiding = True
+                    avoid_start_t = time.time()
+                    avoid_dir_lock = get_turn_dir() # 무조건 -1.0(우회전)으로 단방향 통일
+
+                if avoiding:
+                    elapsed_avoid = time.time() - avoid_start_t
+                    if fm > AVOID_EXIT and elapsed_avoid > AVOID_MIN_SEC:
+                        avoiding = False
+                    else:
+                        if fm < THRESH_STOP: v, w = 0.04, avoid_dir_lock * 1.3
+                        elif fm < THRESH_TURN: v, w = 0.08, avoid_dir_lock * 1.1
+                        else: v, w = 0.12, avoid_dir_lock * 0.85
+                        last_cmd = (v, w); send_cmd(v, w)
+                        cv2.imshow("f", frame)
+                        if cv2.waitKey(1) & 0xFF == 27: break
+                        continue # 회피 기동 중에는 아래 객체 추종 로직 건너뜀
+
                 if not found:
                     park_state = "SEARCH"
                     search_t = time.time()
                     arrive_count = 0
                     continue
 
-                # 객체 추종 중 정면에 장애물 발견 시 무조건 왼쪽 면을 타도록 진입 고정
-                if fm < THRESH_SLOW:
-                    park_state = "WALL_APPROACH"
-                    continue
-
-                arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
-
                 if arrive_count >= ARRIVE_CONFIRM:
-                    arrive_count = 0; park_state = "FORWARD"; park_t = time.time()
-                    send_cmd(ARRIVE_FORWARD_V, 0.0); continue
+                    arrive_count = 0
+                    park_state = "FORWARD"
+                    park_t = time.time()
+                    send_cmd(ARRIVE_FORWARD_V, 0.0)
+                    continue
                 else:
                     err_x = cx_obj - cx_mid
                     err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
@@ -421,18 +490,23 @@ try:
 
                     def cam_w(ex):
                         raw = -KP_ROT * ex
-                        if abs(raw) < W_MIN and ex != 0: return -W_MIN if ex > 0 else W_MIN
+                        if abs(raw) < W_MIN and ex != 0:
+                            return -W_MIN if ex > 0 else W_MIN
                         return raw
 
                     v, w = reduced_v, cam_w(err_x)
-                    last_cmd = (v, w); send_cmd(v, w)
+                    last_cmd = (v, w)
+                    send_cmd(v, w)
 
             elif park_state == "SEARCH":
                 elapsed_search = time.time() - search_t
                 if elapsed_search > 5.0:
                     park_state = "WALL_SEARCH"
+                    search_phase = "FORWARD"
+                    search_phase_t = time.time()
                 else:
-                    v = 0.0; w = (-1.0 if last_seen_x > cx_mid else 1.0)
+                    v = 0.0
+                    w = (-1.0 if last_seen_x > cx_mid else 1.0)
                     send_cmd(v, w)
 
         cv2.imshow("f", frame)
