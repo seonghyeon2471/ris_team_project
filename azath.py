@@ -139,6 +139,10 @@ def wall_follow(scan, fm, adir, follow_side):
 accumulated_yaw = 0.0
 last_cmd_time = time.time()
 
+# ★ 테스트: w 부호 반전 (기존: arduino_ser.write(f"{v:.3f},{-w:.3f}\n") -> -w 였음)
+#   내부 로직(wall_follow, decide_follow_side, 비상회피 등)은 전혀 손대지 않고
+#   아두이노로 나가는 시점에서만 부호를 반전시켜, 시스템 전체의 좌/우가 통째로 뒤집힘.
+#   원래대로 되돌리려면 아래 줄의 "{w:.3f}"를 다시 "{-w:.3f}"로 바꾸면 됨.
 def send_cmd(v, w):
     global accumulated_yaw, last_cmd_time
     
@@ -151,7 +155,7 @@ def send_cmd(v, w):
     last_cmd_time = curr_time
     accumulated_yaw += w * dt
 
-    arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
+    arduino_ser.write(f"{v:.3f},{w:.3f}\n".encode())   # ★ 수정: -w -> w (부호 반전 테스트)
 
 def stop_robot(): 
     send_cmd(0.0, 0.0)
@@ -193,7 +197,7 @@ SIDE_STOP      = 6.0
 BOTTLENECK_ENTER = 25.0  
 CENTER_KP      = 0.030   
 BOTTLENECK_V   = 0.15    
-WALL_SCAN_DIST = 150.0  
+WALL_SCAN_DIST = 50.0    # (수정: 150.0 -> 50.0)
 WALL_APPROACH_V = 0.20  
 WALL_KP        = 0.024   
 WALL_V         = 0.22
