@@ -5,25 +5,108 @@ import time
 import math
 import threading
 
+import subprocess
+
 # ── SERIAL ────────────────────────────────────────────────────────────
 arduino_ser = serial.Serial("/dev/serial0", 115200, timeout=0.1)
+time.sleep(0.3)
 lidar_ser   = serial.Serial("/dev/ttyUSB0",  460800, timeout=0.1)
+time.sleep(0.3)
 
-# ── CAMERA ────────────────────────────────────────────────────────────
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH,  320)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
-cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-time.sleep(1.0)
-cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
-cap.set(cv2.CAP_PROP_AUTO_WB, 0)
+# ── PWR MONITOR (★ 신규: vcgencmd 기반 실시간 저전압/스로틀링 감시) ──────
+# 0x1 = 현재 저전압, 0x4 = 현재 스로틀링 (둘 다 "지금 이 순간" 비트만 사용,
+# 0x10000/0x40000 같은 "과거 발생 이력" 비트는 일부러 무시 -> 안전정지를 계속 유발하지 않도록)
+_pwr_ok    = True
+pwr_lock   = threading.Lock()
 
-# ── LIDAR BOOT ────────────────────────────────────────────────────────
+def power_monitor_loop():
+    global _pwr_ok
+    while True:
+        try:
+            out = subprocess.check_output(["vcgencmd", "get_throttled"]).decode()
+            val = int(out.strip().split("=")[1], 16)
+            bad = bool(val & 0x1) or bool(val & 0x4)
+            with pwr_lock:
+                _pwr_ok = not bad
+            if bad:
+                print(f"[PWR] 경고: 전원 불안정 (throttled=0x{val:x}) -> 안전 정지")
+        except Exception as e:
+            print(f"[PWR] vcgencmd 조회 실패: {e}")
+        time.sleep(1.0)
+
+def power_ok():
+    with pwr_lock:
+        return _pwr_ok
+
+threading.Thread(target=power_monitor_loop, daemon=True).start()
+
+# ── LIDAR BOOT (카메라보다 먼저 기동 -> 전류 스파이크 시점을 분산) ───────
 lidar_ser.write(bytes([0xA5, 0x40])); time.sleep(2)
 lidar_ser.reset_input_buffer()
 lidar_ser.write(bytes([0xA5, 0x20])); lidar_ser.read(7)
 print("LIDAR OK")
+time.sleep(0.5)   # ★ 신규: LiDAR 모터 기동 전류와 카메라 USB 기동 전류가 겹치지 않도록 분산
+
+# ── CAMERA (★ 신규: 별도 쓰레드로 분리 -> cap.read() 행(hang)이 메인 루프를 막지 않음) ──
+_frame         = None
+_frame_ts      = 0.0
+frame_lock     = threading.Lock()
+CAM_STALE_SEC  = 0.5   # 이보다 오래 새 프레임이 없으면 "카메라 멈춤"으로 간주
+
+def open_camera(retries=5):
+    for i in range(retries):
+        c = cv2.VideoCapture(0)
+        if c.isOpened():
+            c.set(cv2.CAP_PROP_FRAME_WIDTH,  320)
+            c.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+            c.set(cv2.CAP_PROP_BUFFERSIZE,   1)
+            c.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            time.sleep(1.0)
+            c.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+            c.set(cv2.CAP_PROP_AUTO_WB, 0)
+            return c
+        print(f"[CAM] open 실패 (시도 {i+1}/{retries}), 재시도...")
+        c.release()
+        time.sleep(1.0)
+    raise RuntimeError("카메라를 열 수 없습니다 (전원/연결 확인 필요)")
+
+cap = open_camera()
+
+def camera_loop():
+    global cap, _frame, _frame_ts
+    fail_count = 0
+    while True:
+        ret, f = cap.read()
+        if ret:
+            f = cv2.flip(f, 1)
+            with frame_lock:
+                _frame = f
+                _frame_ts = time.time()
+            fail_count = 0
+        else:
+            fail_count += 1
+            if fail_count >= 15:
+                print("[CAM] read 연속 실패 -> 카메라 재오픈 시도")
+                try: cap.release()
+                except Exception: pass
+                time.sleep(0.5)
+                try:
+                    cap = open_camera()
+                except Exception as e:
+                    print(f"[CAM] 재오픈 실패: {e}")
+                    time.sleep(1.0)
+                fail_count = 0
+        time.sleep(0.005)
+
+threading.Thread(target=camera_loop, daemon=True).start()
+
+def get_frame(timeout=CAM_STALE_SEC):
+    """최근 프레임을 반환. timeout 동안 새 프레임이 없으면 None (카메라 멈춤 신호)"""
+    with frame_lock:
+        f, ts = _frame, _frame_ts
+    if f is None or (time.time() - ts) > timeout:
+        return None
+    return f.copy()
 
 # ── LIDAR ─────────────────────────────────────────────────────────────
 EMA_ALPHA    = 0.35
@@ -236,10 +319,20 @@ print(f"START | MISSION: {MISSION}")
 # ── MAIN LOOP ─────────────────────────────────────────────────────────
 try:
     while True:
-        ret, frame = cap.read()
-        if not ret: continue
+        # ★ 신규: 전원이 현재 불안정하면(저전압/스로틀링) 모터부터 즉시 정지
+        if not power_ok():
+            stop_robot()
+            if cv2.waitKey(1) & 0xFF == 27: break
+            continue
 
-        frame  = cv2.flip(frame, 1)
+        # ★ 신규: cap.read() 직접 호출 대신, 카메라 쓰레드가 채워주는 최신 프레임 사용
+        #   - 카메라가 멈춰 있으면(0.5초 이상 새 프레임 없음) None -> 정지 후 재시도
+        frame = get_frame()
+        if frame is None:
+            stop_robot()
+            if cv2.waitKey(1) & 0xFF == 27: break
+            continue
+
         H, W   = frame.shape[:2]
         cx_mid = W // 2
         hsv    = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
