@@ -120,6 +120,7 @@ def wall_follow(scan, fm, follow_side, found, last_seen_x, cx_mid):
     if right_close < SIDE_STOP:
         return (WALL_V * 0.4,  1.2)  
 
+    # 🛠️ 양옆 총 거리 25cm 중앙정렬 돌파 반영 (한쪽 벽당 기준 12.5cm)
     if left_close < BOTTLENECK_ENTER and right_close < BOTTLENECK_ENTER:
         err_center = left_close - right_close   
         w_center = float(np.clip(CENTER_KP * err_center, -0.9, 0.9))
@@ -188,10 +189,11 @@ ARRIVE_FORWARD_SEC = 1.0
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
-# 🛠️ 상호 간섭이 없도록 조율된 주행 거리 관련 제어 파라미터들
+# 상호 간섭이 없도록 조율된 주행 거리 관련 제어 파라미터들
 WALL_TARGET      = 10.0    # 벽을 따라갈 때 유지하려는 목표 간격 (10cm)
 SIDE_STOP        = 7.5     # 측면 비상 반발 거리 (목표치인 10cm보다 작게 설정)
-BOTTLENECK_ENTER = 13.0    
+# 🛠️ 양옆 총 거리 25cm 제한에 맞춘 단일 벽 진입 임계치 (25 / 2 = 12.5cm)
+BOTTLENECK_ENTER = 12.5    
 CENTER_KP        = 0.050   
 BOTTLENECK_V     = 0.11    
 WALL_SCAN_DIST   = 40.0    # 최대 유효 거리가 50cm이므로 벽 판단 탐색도 40cm부터 개시
@@ -426,28 +428,38 @@ try:
                     arrive_count = 0
                     continue
 
-                if fm < THRESH_SLOW:
-                    follow_side = decide_follow_side(found, cx_obj, cx_mid, last_seen_x)
-                    park_state = "WALL_APPROACH"
-                    continue
-
-                arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
-
-                if arrive_count >= ARRIVE_CONFIRM:
-                    arrive_count = 0; park_state = "FORWARD"; park_t = time.time()
-                    send_cmd(ARRIVE_FORWARD_V, 0.0); continue
+                # 🛠️ 수정 구간 1: 카메라 주차 판단(Zone 진입)을 무조건 최우선으로 검사
+                if centroid_in_arrive_zone():
+                    arrive_count += 1
+                    if arrive_count >= ARRIVE_CONFIRM:
+                        arrive_count = 0
+                        park_state = "FORWARD"
+                        park_t = time.time()
+                        send_cmd(ARRIVE_FORWARD_V, 0.0)
+                        continue
                 else:
-                    err_x = cx_obj - cx_mid
-                    err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
-                    reduced_v = APPROACH_V * (1.0 - err_ratio)
+                    arrive_count = 0
 
-                    def cam_w(ex):
-                        raw = -KP_ROT * ex
-                        if abs(raw) < W_MIN and ex != 0: return -W_MIN if ex > 0 else W_MIN
-                        return raw
+                    # 주차 구역이 아닐 때만 정면 라이다 거리를 체크하되,
+                    # 대상을 정면에 두고 돌진 중이므로 완전히 벽 직전(THRESH_TURN = 16cm)까지는 탈출하지 않도록 차단
+                    if fm < THRESH_TURN:
+                        follow_side = decide_follow_side(found, cx_obj, cx_mid, last_seen_x)
+                        park_state = "WALL_APPROACH"
+                        continue
 
-                    v, w = reduced_v, cam_w(err_x)
-                    last_cmd = (v, w); send_cmd(v, w)
+                # 카메라 기반 트래킹 제어 루틴
+                err_x = cx_obj - cx_mid
+                err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
+                reduced_v = APPROACH_V * (1.0 - err_ratio)
+
+                def cam_w(ex):
+                    raw = -KP_ROT * ex
+                    if abs(raw) < W_MIN and ex != 0: return -W_MIN if ex > 0 else W_MIN
+                    return raw
+
+                v, w = reduced_v, cam_w(err_x)
+                last_cmd = (v, w)
+                send_cmd(v, w)
 
             elif park_state == "SEARCH":
                 if found and fm > THRESH_SLOW:
