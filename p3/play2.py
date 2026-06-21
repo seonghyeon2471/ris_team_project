@@ -79,8 +79,8 @@ def avoid_dir(scan):
 # WALL_SEARCH -> WALL_APPROACH로 넘어가는 순간에만 호출, 추종 중에는 절대 다시 호출하지 않음
 def decide_follow_side(adir, found, cx_obj, cx_mid):
     if found and cx_obj >= 0:
-        return "L" if cx_obj < cx_mid else "R"
-    return "R" if adir == 1 else "L"
+        return "R" if cx_obj < cx_mid else "L"
+    return "L" if adir == 1 else "R"
 
 def side_dist(scan, side):
     if side == "L":
