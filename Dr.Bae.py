@@ -142,16 +142,21 @@ def wall_follow(scan, fm, adir, follow_side, current_v=None):
     left_close  = side_min(scan, 60, 120)
     right_close = side_min(scan, 240, 300)
 
-    if fm < THRESH_STOP:
-        return (0.08, adir * 1.1), (0.0, 0.0, False)
-    if fm < THRESH_TURN:
-        return (WALL_TURN_V, adir * 0.85), (0.0, 0.0, False)
-    if left_close < THRESH_STOP:
-        return (WALL_V * 0.7, -0.7), (0.0, 0.0, False)
-    if right_close < THRESH_STOP:
-        return (WALL_V * 0.7, 0.7), (0.0, 0.0, False)
-
+    # ── [수정] 안전 분기(전방/측면 근접)와 무관하게 실제 벽 추정은 항상 먼저 계산.
+    #     기존에는 안전 분기에 걸리면 무조건 valid=False를 강제 반환했기 때문에,
+    #     모서리에서 fm이 작아진 것 뿐인데도 "벽을 잃어버렸다"고 오인해
+    #     CORNER_SEARCH ↔ WALL_APPROACH ↔ WALL_FOLLOW 사이를 무한히 왕복하며
+    #     L/R 메시지가 번갈아 출력되고 로봇이 거의 정지하는 문제가 있었음.
     wall_dist, wall_angle, valid = estimate_wall(scan, follow_side)
+
+    if fm < THRESH_STOP:
+        return (0.08, adir * 1.1), (wall_dist, wall_angle, valid)
+    if fm < THRESH_TURN:
+        return (WALL_TURN_V, adir * 0.85), (wall_dist, wall_angle, valid)
+    if left_close < THRESH_STOP:
+        return (WALL_V * 0.7, -0.7), (wall_dist, wall_angle, valid)
+    if right_close < THRESH_STOP:
+        return (WALL_V * 0.7, 0.7), (wall_dist, wall_angle, valid)
 
     if not valid:
         return (WALL_V * 0.6, sign * WALL_LOST_W), (wall_dist, wall_angle, False)
