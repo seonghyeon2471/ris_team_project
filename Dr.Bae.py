@@ -277,7 +277,7 @@ CENTROID_STABLE_CNT  = 10        # 안정화 카운트
 
 # ========== 직진 및 스캔 파라미터 ==========
 SECTOR_SCAN_W    = 1.2           # 스캔 회전 속도
-SECTOR_SCAN_SEC  = 1.0           # 1.2 rad/s * 1.0s = 약 70도 회전
+SECTOR_SCAN_SEC  = 0.65           # 1.2 rad/s * 1.0s = 약 70도 회전
 STEP_FORWARD_V   = 0.18          # 직진 속도
 STEP_FORWARD_SEC = 1.5           # 좌우 살피기 전 직진 시간
 WALL_START_DIST  = 30.0          # 전방 30cm 이내 장애물 감지 시 강제 전환 거리
