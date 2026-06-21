@@ -167,7 +167,7 @@ WF_SIDE_RANGE   = 20     # 측면 각도 범위 (90°±20° / 270°±20°)
 WF_KP           = 0.020  # PD 비례 게인
 WF_KD           = 0.008  # PD 미분 게인
 WF_V            = 0.15   # wall-following 전진 속도
-WF_TURN_W       = 0.9    # 코너 회전 속도
+WF_TURN_W       = 0.9    # 전방 긴급 회전 속도
 
 # 코너 감지 & 오버슈트 파라미터
 # 측면 벽이 갑자기 사라지면(거리가 크게 늘면) 코너로 판정
@@ -309,7 +309,7 @@ try:
                     print(f"코너 완료 → wall-following 재개")
                 else:
                     # 벽 방향으로 꺾기 (sign 반전: 벽이 있던 쪽으로 돌아야 함)
-                    send_cmd(WF_CORNER_FWD_V * 0.5, -sign * WF_CORNER_TURN_W)
+                    send_cmd(WF_CORNER_FWD_V * 0.5, sign * WF_CORNER_TURN_W)
                 cv2.putText(frame, "CORNER TURN", (10, 25), 0, 0.5, col, 1)
 
             # ── 일반 wall-following ────────────────────────────────
