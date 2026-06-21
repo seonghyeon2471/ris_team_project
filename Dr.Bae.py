@@ -242,7 +242,6 @@ ARRIVE_FORWARD_SEC = 0.88
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
-WALL_SCAN_DIST      = 150.0
 MISSION_TIMEOUT_SEC = 10.0
 
 SEARCH_W            = 0.85
@@ -254,6 +253,13 @@ CENTROID_KP          = 0.035     # 센트로이드 회전 게인
 CENTROID_MIN_DIST    = 8.0       # 색지 근접 정지 거리 (cm)
 CENTROID_ALIGN_TOL   = 15        # 중심 정렬 허용 오차 (pixel)
 CENTROID_STABLE_CNT  = 10        # 안정화 카운트 (센트로이드 정렬 유지 횟수)
+
+# ========== NEW: 섹터 스캔 & 찔끔 직진 파라미터 ==========
+SECTOR_SCAN_W    = 0.8           # 스캔 회전 속도
+SECTOR_SCAN_SEC  = 0.8           # 70도 회전에 걸리는 시간 (환경에 맞춰 미세조정 필요)
+STEP_FORWARD_V   = 0.18          # 스캔 후 찔끔 직진 속도
+STEP_FORWARD_SEC = 0.6           # 직진하는 시간 (0.6초)
+WALL_START_DIST  = 30.0          # 전방 30cm 이내 장애물 감지 시 벽추종으로 강제 전환
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode            = "LIDAR"
@@ -272,12 +278,16 @@ mission_start_t = time.time()
 hop_start_t     = None
 last_cmd        = (0.0, 0.0)
 
+# 스캔 상태 관리용 변수
+scan_phase      = 0   
+scan_t          = 0.0
+
 dbg_wall_dist  = 0.0
 dbg_wall_angle = 0.0
 dbg_valid      = False
 
 print(f"START | MISSION: {MISSION}")
-print("========== 센트로이드 우선순위 기반 & 0.8초 직진 마무리 적용 ==========")
+print("========== 섹터 스캔(70도) & 찔끔 직진 탐색 적용 ==========")
 
 try:
     while True:
@@ -340,27 +350,21 @@ try:
         arrive_x2 = cx_mid + ARRIVE_X_MARGIN
         cv2.rectangle(frame, (arrive_x1, ARRIVE_Y_TOP), (arrive_x2, H - 1), (0, 0, 255), 1)
 
-        # ========== 센트로이드가 ARRIVE_ZONE 내인지 확인 ==========
         def centroid_in_arrive_zone():
             return (arrive_x1 <= cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
 
-        # ========== 센트로이드 추적 제어 ==========
         def centroid_track_control(cx_obj, cx_mid, last_bottom_y, ARRIVE_Y_TOP):
             err_x = cx_obj - cx_mid
             err_y = last_bottom_y - ARRIVE_Y_TOP
             
-            # 거리 기반 속도 제어 (색지에 가까우면 감속)
-            if err_y < CENTROID_MIN_DIST * 3:  # 매우 가까움
+            if err_y < CENTROID_MIN_DIST * 3:
                 v = 0.05
-            elif err_y < CENTROID_MIN_DIST * 6:  # 가까움
+            elif err_y < CENTROID_MIN_DIST * 6:
                 v = 0.08
             else:
                 v = CENTROID_TRACK_V
             
-            # 편차 기반 회전 제어
             w = -CENTROID_KP * err_x
-            
-            # 최소 회전 게인 적용
             if abs(w) < W_MIN and err_x != 0:
                 w = -W_MIN if err_x > 0 else W_MIN
             
@@ -380,12 +384,45 @@ try:
                 print(f"[{target}] LIDAR → CENTROID 모드 전환!")
                 continue
 
+            # [수정됨] 기존 뺑뺑 돌던 WALL_SEARCH -> 섹터 스캔 및 찔끔 직진 탐색
             if lidar_state == "WALL_SEARCH":
-                if fm < WALL_SCAN_DIST:
-                    follow_side = "L"
+                # 1순위: 전방 30cm 이내 막힘 확인 -> 벽추종 강제 진입
+                if fm < WALL_START_DIST:
+                    left_dist = side_min(scan, 0, 90)
+                    right_dist = side_min(scan, 270, 360)
+                    follow_side = "L" if left_dist < right_dist else "R"
+                    print(f"🚧 [LIDAR] 전방 {fm:.1f}cm 막힘! {follow_side} 방향 벽 추종 진입 ㅅㅂ")
                     lidar_state = "WALL_APPROACH"
-                else:
-                    send_cmd(0.0, WALL_SEARCH_W)
+                    scan_phase = 0
+                    continue
+
+                # 2순위: 스캔 및 직진 패턴
+                if scan_phase == 0:
+                    scan_t = time.time()
+                    scan_phase = 1
+                elif scan_phase == 1:
+                    # 좌측으로 70도 스캔
+                    send_cmd(0.0, SECTOR_SCAN_W)
+                    if time.time() - scan_t > SECTOR_SCAN_SEC:
+                        scan_t = time.time()
+                        scan_phase = 2
+                elif scan_phase == 2:
+                    # 우측으로 140도 스캔 (좌측 끝 -> 우측 끝)
+                    send_cmd(0.0, -SECTOR_SCAN_W)
+                    if time.time() - scan_t > SECTOR_SCAN_SEC * 2:
+                        scan_t = time.time()
+                        scan_phase = 3
+                elif scan_phase == 3:
+                    # 다시 중앙으로 복귀 (70도)
+                    send_cmd(0.0, SECTOR_SCAN_W)
+                    if time.time() - scan_t > SECTOR_SCAN_SEC:
+                        scan_t = time.time()
+                        scan_phase = 4
+                elif scan_phase == 4:
+                    # 중앙 정렬 완료 & 앞이 30cm 이상 뚫려있음 -> 찔끔 직진
+                    send_cmd(STEP_FORWARD_V, 0.0)
+                    if time.time() - scan_t > STEP_FORWARD_SEC:
+                        scan_phase = 0 # 다시 좌우 스캔 무한반복
 
             elif lidar_state == "WALL_APPROACH":
                 wall_dist, _, valid = estimate_wall(scan, follow_side)
@@ -404,7 +441,6 @@ try:
                 (v, w), (dbg_wall_dist, dbg_wall_angle, dbg_valid) = \
                     wall_follow_debug(scan, fm, adir, follow_side, WALL_V)
                 
-                # 모서리 탐색 로직 적용
                 if not dbg_valid:
                     print("⚠️ [LIDAR] 모서리 감지! 좌우 스캔 시작")
                     lidar_state = "CORNER_SEARCH"
@@ -412,7 +448,6 @@ try:
                 send_cmd(v, w)
             
             elif lidar_state == "CORNER_SEARCH":
-                # 0도 기준 좌(0~70도), 우(-70~0도) 스캔
                 left_dist = side_min(scan, 0, 70)
                 right_dist = side_min(scan, 290, 360)
                 
@@ -442,9 +477,9 @@ try:
                     detect_count = 0
                     mode = "LIDAR"
                     lidar_state = "WALL_SEARCH"
+                    scan_phase = 0 # 모드 전환 시 스캔 초기화
                     continue
             else:
-                # 타겟 잃음 = 카메라 밑으로 들어갔다고 판단, 0.8초 마무리 전진!
                 print(f"👀 [{target}] 타겟이 카메라 밑으로 사라짐! 0.8초 직진 마무리 돌입!")
                 mode = "FINISH_FORWARD"
                 park_t = time.time()
@@ -453,7 +488,7 @@ try:
         # ── 마무리 직진 상태 (CENTROID 독립 모드용) ──
         elif mode == "FINISH_FORWARD":
             if time.time() - park_t < 0.8:
-                send_cmd(ARRIVE_FORWARD_V, 0.0) # 0.8초 고정 직진
+                send_cmd(ARRIVE_FORWARD_V, 0.0) 
             else:
                 print(f"🎉 [{target}] 0.8초 직진 완료! 주차 완벽 성공!")
                 stop_robot()
@@ -463,14 +498,13 @@ try:
                 if mission_idx < len(MISSION):
                     mode = "LIDAR"
                     lidar_state = "WALL_SEARCH"
+                    scan_phase = 0 # 스캔 초기화
                 else:
                     mode = "DONE"
                 continue
 
         # ── PARK 모드 ───────────────────────────────────────────────
         elif mode == "PARK":
-
-            # [긴급 생존 1순위] 물리적 장애물 10cm 이내 (주차 및 직진 상태 제외)
             if park_state not in ["SAFE_HOP", "FORWARD", "FINISH_FORWARD", "PARKING"]:
                 if fm < 10.0:
                     print("⚠️ [긴급] 충돌 직전 물리적 장애물 감지! 우회 시작")
@@ -480,7 +514,6 @@ try:
                     park_state = "WALL_APPROACH"
                     detect_count = 0 
 
-            # PARK 상태 분기
             if park_state == "SAFE_HOP":
                 if found:
                     detect_count += 1
@@ -514,7 +547,6 @@ try:
                 cv2.waitKey(1)
                 continue
             
-            # [기존 마무리 전진 로직]
             elif park_state == "FORWARD":
                 if time.time() - park_t >= ARRIVE_FORWARD_SEC:
                     stop_robot()
@@ -523,9 +555,8 @@ try:
                 else:
                     send_cmd(*last_cmd)
             
-            # [새로운 0.8초 마무리 전진 로직]
             elif park_state == "FINISH_FORWARD":
-                if time.time() - park_t < 0.8:  # 무조건 0.8초 직진
+                if time.time() - park_t < 0.8:  
                     send_cmd(ARRIVE_FORWARD_V, 0.0)
                 else:
                     print(f"🎉 [{target}] 0.8초 직진 완료! 주차 완벽 성공!")
@@ -533,7 +564,6 @@ try:
                     park_state = "PARKING"
                     park_t = time.time()
 
-            # [주차 완료 후 대기 로직]
             elif park_state == "PARKING":
                 stop_robot()
                 if time.time() - park_t >= PARK_SEC:
@@ -542,8 +572,10 @@ try:
                     detect_count = 0
                     if mission_idx < len(MISSION):
                         park_state = "WALL_SEARCH"
+                        scan_phase = 0 # 스캔 초기화
                     continue
 
+            # [수정됨] PARK 모드 내의 탐색 로직도 동일하게 센터 스캔 적용
             elif park_state == "WALL_SEARCH":
                 if found:
                     detect_count += 1
@@ -556,10 +588,39 @@ try:
                 else:
                     detect_count = 0
 
-                if fm < WALL_SCAN_DIST:
+                # 1순위: 전방 막힘
+                if fm < WALL_START_DIST:
+                    left_dist = side_min(scan, 0, 90)
+                    right_dist = side_min(scan, 270, 360)
+                    follow_side = "L" if left_dist < right_dist else "R"
+                    print(f"🚧 [PARK] 전방 {fm:.1f}cm 막힘! {follow_side} 방향 벽 추종 진입 ㅅㅂ")
                     park_state = "WALL_APPROACH"
+                    scan_phase = 0
                     continue
-                send_cmd(0.0, WALL_SEARCH_W)
+
+                # 2순위: 스캔 및 직진 패턴
+                if scan_phase == 0:
+                    scan_t = time.time()
+                    scan_phase = 1
+                elif scan_phase == 1:
+                    send_cmd(0.0, SECTOR_SCAN_W)
+                    if time.time() - scan_t > SECTOR_SCAN_SEC:
+                        scan_t = time.time()
+                        scan_phase = 2
+                elif scan_phase == 2:
+                    send_cmd(0.0, -SECTOR_SCAN_W)
+                    if time.time() - scan_t > SECTOR_SCAN_SEC * 2:
+                        scan_t = time.time()
+                        scan_phase = 3
+                elif scan_phase == 3:
+                    send_cmd(0.0, SECTOR_SCAN_W)
+                    if time.time() - scan_t > SECTOR_SCAN_SEC:
+                        scan_t = time.time()
+                        scan_phase = 4
+                elif scan_phase == 4:
+                    send_cmd(STEP_FORWARD_V, 0.0)
+                    if time.time() - scan_t > STEP_FORWARD_SEC:
+                        scan_phase = 0
 
             elif park_state == "WALL_APPROACH":
                 if found:
@@ -600,7 +661,6 @@ try:
                 (v, w), (dbg_wall_dist, dbg_wall_angle, dbg_valid) = \
                     wall_follow_debug(scan, fm, adir, follow_side, WALL_V)
                 
-                # 모서리 탐색 로직 적용
                 if not dbg_valid:
                     print("⚠️ [PARK] 모서리 감지! 좌우 스캔 시작")
                     park_state = "CORNER_SEARCH"
@@ -636,7 +696,6 @@ try:
                         detect_count = 0
                         continue
                 else:
-                    # 타겟 잃음 = 카메라 밑으로 들어갔다고 판단, 0.8초 마무리 전진!
                     detect_count = 0
                     print(f"👀 [{target}] 타겟이 카메라 밑으로 사라짐! 0.8초 직진 마무리 돌입!")
                     park_state = "FINISH_FORWARD"
@@ -645,7 +704,6 @@ try:
 
             elif park_state == "TRACK":
                 if not found:
-                    # TRACK 중 타겟 잃음 = 카메라 밑으로 들어갔다고 판단, 0.8초 마무리 전진!
                     print(f"👀 [{target}] TRACK 중 시야에서 사라짐! 0.8초 직진 마무리 돌입!")
                     park_state = "FINISH_FORWARD"
                     park_t = time.time()
@@ -692,6 +750,7 @@ try:
                 if time.time() - search_t > SEARCH_FULL_ROT_SEC:
                     park_state = "WALL_SEARCH"
                     search_t = None
+                    scan_phase = 0 # 스캔 초기화
                 else:
                     send_cmd(0.0, -SEARCH_W if last_seen_x > cx_mid else SEARCH_W)
 
@@ -701,7 +760,6 @@ try:
             cv2.putText(frame, f"Timeout: {search_time_left:.1f}s | Side:{follow_side}",
                         (10, 20), 0, 0.50, (255, 150, 0), 2)
 
-        # 센트로이드 오버레이
         if mode in ["CENTROID", "FINISH_FORWARD"] or park_state in ["CENTROID_TRACK", "FINISH_FORWARD"]:
             err_x = cx_obj - cx_mid if found else 0
             err_y = last_bottom_y - ARRIVE_Y_TOP if found else 0
@@ -724,6 +782,11 @@ try:
             cv2.putText(frame,
                 f"WF dist={dbg_wall_dist:.1f}cm ang={np.rad2deg(dbg_wall_angle):.1f}deg {'OK' if dbg_valid else 'NO'}",
                 (10, H - 10), 0, 0.42, color_v, 1)
+
+        # 현재 스캔 단계를 화면에 띄워줍니다 (디버깅용)
+        if (mode == "LIDAR" and lidar_state == "WALL_SEARCH") or (mode == "PARK" and park_state == "WALL_SEARCH"):
+            status_text = ["", "SCAN_LEFT", "SCAN_RIGHT", "SCAN_CENTER", "STEP_FORWARD"][scan_phase]
+            cv2.putText(frame, f"PHASE: {status_text}", (10, 60), 0, 0.5, (255, 0, 255), 2)
 
         cv2.imshow("f", frame)
         if cv2.waitKey(1) & 0xFF == 27:
