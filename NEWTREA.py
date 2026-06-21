@@ -131,7 +131,7 @@ WALL_APPROACH_V  = 0.20
 WALL_LOST_W      = 0.45
 WALL_SEARCH_W    = 1.1
 LOOKAHEAD_TIME   = 0.35
-MAX_W            = *********.90
+MAX_W            = 0.90
 
 def wall_follow(scan, fm, adir, follow_side, current_v=None):
     if current_v is None:
@@ -368,7 +368,6 @@ try:
 
         # ── LIDAR 모드 ───────────────────────────────────────────────
         if mode == "LIDAR":
-            # ========== NEW: 센트로이드 추적 모드 추가 ==========
             if found:
                 detect_count += 1
             else:
