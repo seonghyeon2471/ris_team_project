@@ -25,12 +25,12 @@ lidar_ser.reset_input_buffer()
 lidar_ser.write(bytes([0xA5, 0x20])); lidar_ser.read(7)
 print("LIDAR OK")
 
-# ── LIDAR PARAMS (정면 외벽 충돌 방지 - 고회전 / 하드 브레이킹 세팅) ───────────────
+# ── LIDAR PARAMS (정면 외벽 충돌 방지 및 카메라-라이다 동기화 세팅) ────────────
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
 FRONT_RANGE  = 90    
 
-# [적용] 외벽에 박지 않도록 원거리 감속 시작 및 하드 선회 임계값 세팅
+# 외벽 감지 시점 브레이킹 및 급선회 임계값
 THRESH_SLOW  = 40.0   # 40cm 앞 외벽 감지 시점부터 미리 속도 줄이기 시작
 THRESH_TURN  = 24.0   # 24cm 앞에서부터 확실하게 강한 선회 시작
 THRESH_STOP  = 12.0   # 12cm 이하는 즉시 정지 및 초강력 회전
@@ -102,48 +102,52 @@ def wall_follow(scan, fm, adir, follow_side, found, last_seen_x, cx_mid):
     right_close = side_min(scan, 60, 120)    
     sign = 1 if follow_side == "L" else -1
 
-    # [적용] 정면 외벽이 임계구역 이하로 좁혀지면 전진 속도를 극도로 죽이고 제자리 회전
-    if fm < THRESH_STOP:
-        return (0.02, adir * 1.5)          # 거의 멈춘 채 풀 조향 회전
-    if fm < THRESH_TURN:
-        return (WALL_TURN_V, adir * 1.45)  # 속도는 0.04로 제한, 꺾는 힘은 1.45로 강하게 도끼 조향
+    # [적용] 객체가 안 보일 때 라이다의 허황된 공간탐색(adir)을 카메라 잔상 방향으로 강제 일치
+    if not found:
+        camera_dir = 1.0 if last_seen_x < cx_mid else -1.0
+        adir = camera_dir  
 
-    # 측면 모서리 긁힘 방지
+    # 1. 초근접 위험 구역 처리 (강력 탈출)
+    if fm < THRESH_STOP:
+        return (0.02, adir * 1.5)          
+    if fm < THRESH_TURN:
+        return (WALL_TURN_V, adir * 1.45)  
+
+    # 2. 측면 모서리 긁힘 방지
     if left_close < SIDE_STOP:
         return (WALL_V * 0.4, -1.2)  
     if right_close < SIDE_STOP:
         return (WALL_V * 0.4,  1.2)  
 
-    # 협로 진입 시 센터링 제어
+    # 3. 협로 진입 시 센터링 제어
     if left_close < BOTTLENECK_ENTER and right_close < BOTTLENECK_ENTER:
         err_center = left_close - right_close   
         w_center = float(np.clip(CENTER_KP * err_center, -0.9, 0.9))
         return (BOTTLENECK_V, w_center)
 
+    # 4. 벽 유실 시 기본 회전 탈출
     if sd > WALL_TARGET * 2.0:
         return (0.05, sign * WALL_LOST_W)
 
+    # 5. 일반 벽 추종 P 제어 수식
     err = sd - WALL_TARGET
     w   = sign * WALL_KP * err
     
-    # [적용] 외벽 충돌 징후(fm < THRESH_SLOW) 시 브레이크 블렌딩 강화
+    # 6. 전방 외벽 감지 시 브레이크 블렌딩 및 카메라 지향적 방향(adir) 선회
     if fm < THRESH_SLOW:
         blend = float(np.clip((THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
-        w = (1 - blend) * w + blend * adir * 1.20  # 대각선 진입 시점부터 미리 회전력 보강
-        v = WALL_V * (1.0 - 0.70 * blend)          # 감속 비율을 70%까지 높여 확실하게 제동 관성 축소
+        w = (1 - blend) * w + blend * adir * 1.25  # 카메라의 잔상이 지배하는 라이다 탈출 조향
+        v = WALL_V * (1.0 - 0.70 * blend)          
     else:
         v = WALL_V
 
-    if not found:
-        obj_dir = 1.0 if last_seen_x < cx_mid else -1.0
+    # 7. 미세 편향 추가 (외벽 영역 진입 전 일때만 서서히 가중치 부여)
+    if not found and fm >= THRESH_SLOW:
         is_safe = True
-        if obj_dir > 0 and left_close < (WALL_TARGET * 1.3):
-            is_safe = False
-        if obj_dir < 0 and right_close < (WALL_TARGET * 1.3):
-            is_safe = False
-            
+        if adir > 0 and left_close < (WALL_TARGET * 1.3): is_safe = False
+        if adir < 0 and right_close < (WALL_TARGET * 1.3): is_safe = False
         if is_safe:
-            w += (obj_dir * 0.20)
+            w += (adir * 0.20)
 
     w = float(np.clip(w, -1.5, 1.5))
     return (v, w)
@@ -174,7 +178,7 @@ def make_mask(frame, hsv, name):
     bm = cv2.inRange(frame, np.array(cfg["bgr"][0]), np.array(cfg["bgr"][1]))
     return cv2.bitwise_and(m, bm)
 
-# ── WALL FOLLOW / PARK 세부 파라미터 최적화 ─────────────────────────────────────
+# ── WALL FOLLOW / PARK 세부 파라미터 ───────────────────────────────────────────
 MIN_AREA       = 400
 KP_ROT         = 0.030
 W_MIN          = 0.20
@@ -188,7 +192,6 @@ ARRIVE_FORWARD_SEC = 0.8
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
-# [적용] 선회 시 외벽으로 밀려나는 언더스티어 현상 억제용 파라미터 세팅
 WALL_TARGET      = 12.0    
 SIDE_STOP        = 9.5     
 BOTTLENECK_ENTER = 15.0    
@@ -201,9 +204,9 @@ WALL_APPROACH_V  = 0.14
 WALL_KP          = 0.030   
 WALL_V           = 0.17    
 
-# [적용 핵심] 돌 때 외벽 충돌 관성을 완전히 죽이기 위해 전진 속도 하향, 조향 상향
-WALL_TURN_V      = 0.04    # 코너링 시 전진 전력 최소화 (기어가는 수준)
-WALL_LOST_W      = 1.5     # 클리핑 한계까지 조향 가중치 개방
+# 언더스티어 방지용 코너 서행 및 고전력 회전 상수
+WALL_TURN_V      = 0.04    # 코너 선회 전진 속도 최소화
+WALL_LOST_W      = 1.5     # 벽 유실 및 최대 회전 한계선
 WALL_SEARCH_W    = 1.1     
 MISSION_TIMEOUT_SEC = 10.0  
 
