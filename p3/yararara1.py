@@ -167,14 +167,15 @@ WF_SIDE_RANGE   = 20     # 측면 각도 범위 (90°±20° / 270°±20°)
 WF_KP           = 0.020  # PD 비례 게인
 WF_KD           = 0.008  # PD 미분 게인
 WF_V            = 0.15   # wall-following 전진 속도
-WF_TURN_W       = 0.9    # 전방 긴급 회전 속도
+WF_TURN_W       = 1.0    # 전방 긴급 회전 속도
 
 # 코너 감지 & 오버슈트 파라미터
 # 측면 벽이 갑자기 사라지면(거리가 크게 늘면) 코너로 판정
 WF_CORNER_SIDE_THRESH = 45.0  # cm — 측면 거리가 이 값 초과 시 코너 감지
+WF_CORNER_CONFIRM     = 5     # 코너 판정 연속 프레임 수 (노이즈 오판 방지)
 WF_CORNER_FWD_SEC     = 2.0   # 초 — 코너 감지 후 직진 시간 (바퀴 걸림 방지)
 WF_CORNER_FWD_V       = 0.15  # 코너 직진 속도
-WF_CORNER_TURN_W      = 0.85  # 코너 직진 후 회전 속도 (벽 방향으로 꺾기)
+WF_CORNER_TURN_W      = 1.0   # 코너 직진 후 회전 속도 (벽 방향으로 꺾기)
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"   # "LIDAR" | "WALL" | "PARK"
@@ -193,6 +194,7 @@ wf_side         = None   # "LEFT" | "RIGHT"
 wf_prev_err     = 0.0    # PD 미분항용 이전 오차
 wf_corner_state = "NONE" # "NONE" | "FWD" | "TURN"  — 코너 처리 단계
 wf_corner_t     = None   # 코너 직진/회전 시작 시각
+wf_corner_cnt   = 0      # 코너 연속 감지 카운터
 
 print(f"START | MISSION: {MISSION}")
 
@@ -263,6 +265,7 @@ try:
                 wf_side         = None
                 wf_prev_err     = 0.0
                 wf_corner_state = "NONE"
+                wf_corner_cnt   = 0
                 mode        = "PARK"
                 park_state  = "TRACK"
                 print(f"[{target}] 발견 → PARK 모드")
@@ -323,10 +326,17 @@ try:
                     continue
 
                 # 코너 감지: 측면 벽이 갑자기 사라짐 (전방은 아직 막혀 있음)
-                if sd > WF_CORNER_SIDE_THRESH and fm < WF_ENGAGE_DIST:
+                # 코너 감지: 측면 벽 사라짐 + 전방 열림 → N프레임 연속 확인
+                if sd > WF_CORNER_SIDE_THRESH and fm >= THRESH_SLOW:
+                    wf_corner_cnt += 1
+                else:
+                    wf_corner_cnt = 0
+
+                if wf_corner_cnt >= WF_CORNER_CONFIRM:
+                    wf_corner_cnt   = 0
                     wf_corner_state = "FWD"
                     wf_corner_t     = time.time()
-                    print(f"코너 감지 (side={sd:.0f}cm) → {WF_CORNER_FWD_SEC}초 직진")
+                    print(f"코너 확정 (side={sd:.0f}cm, fm={fm:.0f}cm) → {WF_CORNER_FWD_SEC}초 직진")
                     send_cmd(WF_CORNER_FWD_V, 0.0)
                     continue
 
