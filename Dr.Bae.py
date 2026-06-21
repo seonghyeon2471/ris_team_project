@@ -79,7 +79,7 @@ def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
 
-NARROW_SQUEEZE_DIST = 30.0
+NARROW_SQUEEZE_DIST = 15.0
 NARROW_FORWARD_V    = 0.10
 NARROW_MAX_SEC      = 3.0
 NARROW_HARD_STOP    = 12.0
@@ -89,11 +89,11 @@ def narrow_squeeze(scan, fm):
     right_close = side_min(scan, 240, 300)
     return fm < NARROW_SQUEEZE_DIST and left_close < NARROW_SQUEEZE_DIST and right_close < NARROW_SQUEEZE_DIST
 
-WALL_SCAN_START_L = 55
+WALL_SCAN_START_L = 50
 WALL_SCAN_END_L   = 125
 WALL_SCAN_START_R = 235
 WALL_SCAN_END_R   = 305
-WALL_MAX_DIST      = 80.0
+WALL_MAX_DIST      = 30.0
 WALL_MIN_POINTS    = 5
 
 def estimate_wall(scan, side):
