@@ -80,16 +80,13 @@ def front_min(scan):
 def decide_follow_side(found, cx_obj, cx_mid, last_seen_x):
     ref_x = cx_obj if (found and cx_obj >= 0) else last_seen_x
     if ref_x == 160: 
-        return "L"  # 객체를 한 번도 본 적 없으면 기본적으로 왼쪽 벽 탐색
-    # 타겟이 오른쪽에 있으면 장애물을 왼쪽에 두고(L), 왼쪽에 있으면 오른쪽에 둠(R)
+        return "L"
     return "L" if ref_x > cx_mid else "R"
 
 # [핵심 로직 2] 장애물 정면 충돌 임박 시 코너 탈출 방향 결정
 def get_turn_dir(last_seen_x, cx_mid, follow_side):
     if last_seen_x == 160:
-        # 객체를 한 번도 못 본 개활지 위험 상태: 현재 타는 벽을 배신하지 않고 인코너로 돔
         return -1.0 if follow_side == "L" else 1.0
-    # 객체 잔상이 남아있다면 무조건 객체가 있는 방향으로 강제 회전
     return 1.0 if last_seen_x < cx_mid else -1.0
 
 def side_dist(scan, side):
@@ -109,36 +106,29 @@ def wall_follow(scan, fm, follow_side, found, last_seen_x, cx_mid):
     right_close = side_min(scan, 60, 120)    
     sign = 1 if follow_side == "L" else -1
 
-    # 공통 회전 방향 로직 적용
     turn_dir = get_turn_dir(last_seen_x, cx_mid, follow_side)
 
-    # 1. 초근접 위험 구역 처리 (강력 탈출)
     if fm < THRESH_STOP:
         return (0.02, turn_dir * 1.5)          
     if fm < THRESH_TURN:
         return (WALL_TURN_V, turn_dir * 1.45)  
 
-    # 2. 측면 모서리 긁힘 방지
     if left_close < SIDE_STOP:
         return (WALL_V * 0.4, -1.2)  
     if right_close < SIDE_STOP:
         return (WALL_V * 0.4,  1.2)  
 
-    # 3. 협로 진입 시 센터링 제어
     if left_close < BOTTLENECK_ENTER and right_close < BOTTLENECK_ENTER:
         err_center = left_close - right_close   
         w_center = float(np.clip(CENTER_KP * err_center, -0.9, 0.9))
         return (BOTTLENECK_V, w_center)
 
-    # 4. 벽 유실 시 기본 회전 탈출
     if sd > WALL_TARGET * 2.0:
         return (0.05, sign * WALL_LOST_W)
 
-    # 5. 일반 벽 추종 P 제어 수식
     err = sd - WALL_TARGET
     w   = sign * WALL_KP * err
     
-    # 6. 전방 외벽 감지 시 브레이크 블렌딩 및 선회 적용
     if fm < THRESH_SLOW:
         blend = float(np.clip((THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
         w = (1 - blend) * w + blend * turn_dir * 1.25  
@@ -146,7 +136,6 @@ def wall_follow(scan, fm, follow_side, found, last_seen_x, cx_mid):
     else:
         v = WALL_V
 
-    # 7. 미세 편향 추가 (외벽 영역 진입 전 일때만 서서히 가중치 부여)
     if not found and fm >= THRESH_SLOW:
         is_safe = True
         if turn_dir > 0 and left_close < (WALL_TARGET * 1.3): is_safe = False
@@ -166,10 +155,11 @@ def send_cmd(v, w):
 def stop_robot(): send_cmd(0.0, 0.0)
 
 # ── COLOR CONFIG ──────────────────────────────────────────────────────
+# 요청하신 설정으로 업데이트
 COLOR_CFG = {
     "red":    {"hsv1": ([169, 136, 114], [179, 220, 255]), "hsv2": None, "bgr":  ([20, 20, 80],  [255, 255, 255]), "draw": (0, 0, 255)},
-    "yellow": {"hsv1": ([24, 19, 193], [45, 165, 255]),    "hsv2": None, "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
-    "blue":   {"hsv1": ([98, 100, 95], [138, 207, 246]),   "hsv2": None, "bgr":  ([40,  0,   0], [255, 220, 220]), "draw": (255, 80, 0)},
+    "yellow": {"hsv1": ([25, 60, 160], [32, 161, 255]),    "hsv2": None, "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
+    "blue":   {"hsv1": ([96, 100, 95], [138, 207, 246]),   "hsv2": None, "bgr":  ([40,  0,   0], [255, 220, 220]), "draw": (255, 80, 0)},
 }
 MISSION = ["red", "yellow", "blue"]
 
@@ -294,7 +284,7 @@ try:
 
         # ══ LIDAR 모드 ═════════════════════════════════════════════════════
         if mode == "LIDAR":
-            if found: detect_count += 1
+            if found and fm > THRESH_SLOW: detect_count += 1
             else: detect_count = 0
 
             if detect_count >= DETECT_CONFIRM:
@@ -331,7 +321,7 @@ try:
         elif mode == "PARK":
 
             if park_state == "SAFE_HOP":
-                if found:
+                if found and fm > THRESH_SLOW:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
                         detect_count = 0
@@ -377,7 +367,7 @@ try:
                     continue
 
             elif park_state == "WALL_SEARCH":
-                if found:
+                if found and fm > THRESH_SLOW:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
                         detect_count = 0
@@ -395,7 +385,7 @@ try:
                 send_cmd(0.0, -WALL_SEARCH_W)
 
             elif park_state == "WALL_APPROACH":
-                if found:
+                if found and fm > THRESH_SLOW:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
                         detect_count = 0; park_state = "TRACK"; continue
@@ -413,7 +403,7 @@ try:
                 send_cmd(v, w)
 
             elif park_state == "WALL_FOLLOW":
-                if found:
+                if found and fm > THRESH_SLOW:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
                         detect_count = 0; park_state = "TRACK"; continue
@@ -427,6 +417,11 @@ try:
                     park_state = "SEARCH"
                     search_t = time.time()
                     arrive_count = 0
+                    continue
+
+                if fm < THRESH_SLOW:
+                    follow_side = decide_follow_side(found, cx_obj, cx_mid, last_seen_x)
+                    park_state = "WALL_APPROACH"
                     continue
 
                 arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
@@ -444,17 +439,7 @@ try:
                         if abs(raw) < W_MIN and ex != 0: return -W_MIN if ex > 0 else W_MIN
                         return raw
 
-                    if fm >= THRESH_SLOW: v, w = reduced_v, cam_w(err_x)
-                    else:
-                        w_cam = cam_w(err_x)
-                        # TRACK 모드에서 장애물 근접 시 탈출 방향도 안전하게 get_turn_dir 활용
-                        turn_dir = get_turn_dir(last_seen_x, cx_mid, follow_side)
-                        w_lid = turn_dir * 0.75
-                        
-                        if fm < THRESH_STOP: v, w = 0.02, w_lid * 1.5
-                        elif fm < THRESH_TURN: v, w = 0.04, 0.8 * (w_lid * 1.45) + 0.2 * w_cam
-                        else: v, w = reduced_v, 0.4 * w_lid + 0.6 * w_cam
-
+                    v, w = reduced_v, cam_w(err_x)
                     last_cmd = (v, w); send_cmd(v, w)
 
             elif park_state == "SEARCH":
