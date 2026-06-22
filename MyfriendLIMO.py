@@ -146,7 +146,7 @@ def make_mask(frame, hsv, name):
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
 KP_ROT         = 0.030
-W_MIN          = 0.20
+W_MIN          = 0.10
 APPROACH_V     = 0.13
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
