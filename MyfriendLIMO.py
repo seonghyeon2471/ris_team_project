@@ -317,7 +317,7 @@ try:
         if mode == "PARK" and park_state == "ESCAPE":
             elapsed_escape = time.time() - escape_t
             if elapsed_escape < ESCAPE_DURATION:
-                send_cmd(-0.10, escape_dir * 1.3)
+                send_cmd(-0.10, escape_dir * 1.4)
                 cv2.putText(frame, "STATE: ESCAPE ROUTE", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
             else:
                 print("▶ ESCAPE DONE -> RE-SEARCH WALL")
