@@ -29,10 +29,10 @@ print("LIDAR OK")
 # ── LIDAR ─────────────────────────────────────────────────────────────
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
-FRONT_RANGE  = 90
-THRESH_SLOW  = 55.0
-THRESH_TURN  = 30.0
-THRESH_STOP  = 18.0
+FRONT_RANGE  = 70        # [수정] 90 → 70 (가중 front_min 사용하므로 범위 축소)
+THRESH_SLOW  = 58.0      # [수정] 55 + 3(라이다~앞끝 오프셋)
+THRESH_TURN  = 33.0      # [수정] 30 + 3
+THRESH_STOP  = 21.0      # [수정] 18 + 3
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -69,169 +69,75 @@ threading.Thread(target=lidar_loop, daemon=True).start()
 def get_scan():
     with scan_lock: return _scan_pub.copy()
 
+# [수정] 가중 front_min — 정면(0°)에 가까울수록 더 민감하게 반응
+# 45°~70° 대각선 모서리를 정면 장애물처럼 조기 감지함
 def front_min(scan):
-    idx = np.arange(-FRONT_RANGE, FRONT_RANGE + 1) % 360
-    return float(np.min(scan[idx]))
+    angles = np.arange(-70, 71)
+    idx = angles % 360
+    weights = np.cos(np.radians(angles * 0.9))
+    weights = np.clip(weights, 0.5, 1.0)
+    weighted = scan[idx] / weights  # 가중 등가거리
+    return float(np.min(weighted))
 
 def avoid_dir(scan):
     return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
 
+# [수정] side_dist 범위를 앞쪽으로 20° 확장 (50~100°, 260~310°)
+# 기존 65~95°에서는 45~65° 사각지대에서 나타나는 모서리를 늦게 감지했음
 def side_dist(scan, side):
     if side == "L":
-        idx = np.arange(65, 96) % 360
+        idx = np.arange(50, 100) % 360
     else:
-        idx = np.arange(265, 296) % 360
+        idx = np.arange(260, 310) % 360
     return float(np.min(scan[idx]))
 
 def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
 
-# ── 코너 감지용 보조 함수 ──────────────────────────────────────────────
-#
-# 로봇 기하 요약:
-#   - 라이다: 몸체 맨앞에서 3cm 뒤 (= 로봇 기준 0° 방향 기준점)
-#   - 바퀴축: 몸체 맨뒤에서 5cm 앞 = 맨앞에서 15cm 뒤 = 라이다에서 12cm 뒤
-#   - 바퀴 외부 반폭: 20cm / 2 = 10cm (몸체보다 2cm 더 튀어남)
-#
-# 각도 기준: 0°=정면, 90°=왼쪽, 180°=후방, 270°=오른쪽
-
-def front_diag_dist(scan, follow_side):
-    """
-    추종 벽 쪽 전방 대각선 거리 (약 45~50°).
-    오목 코너 접근 시 이 값이 side_dist보다 급격히 작아짐.
-    볼록 코너 회전 중 바퀴 외부가 벽 모서리에 걸리는 것도 이 구간에서 선행 감지.
-    """
-    if follow_side == "L":
-        idx = np.arange(40, 66) % 360   # 전방 좌측 대각
-    else:
-        idx = np.arange(294, 320) % 360  # 전방 우측 대각
-    return float(np.min(scan[idx]))
-
-def rear_side_dist_follow(scan, follow_side):
-    """
-    추종 벽 쪽 후방 측면 거리 (약 120~140°).
-    라이다에서 12cm 뒤에 있는 바퀴 근방의 벽/장애물 거리.
-    볼록 코너를 돌 때 뒤쪽 바퀴가 모서리에 걸리기 직전 이 값이 급락함.
-    """
-    if follow_side == "L":
-        idx = np.arange(110, 150) % 360  # 후방 좌측
-    else:
-        idx = np.arange(210, 250) % 360  # 후방 우측
-    return float(np.min(scan[idx]))
-
-def opp_front_diag_dist(scan, follow_side):
-    """
-    추종 벽 반대편 전방 대각선 거리.
-    반대편에 돌출 장애물이 있을 때 이 값이 작아짐.
-    """
-    if follow_side == "L":
-        idx = np.arange(294, 320) % 360  # 전방 우측 대각
-    else:
-        idx = np.arange(40, 66) % 360    # 전방 좌측 대각
-    return float(np.min(scan[idx]))
-
-# ── 코너 감지 파라미터 ─────────────────────────────────────────────────
-#
-# CORNER_DIAG_THRESH:
-#   전방 대각선 거리가 이 값 미만이면 오목 코너(벽 안쪽 꺾임) 위험.
-#   바퀴 외부 반폭(10cm) + 안전여유(14cm) = 24cm.  경험상 28cm 권장.
-#
-# CORNER_REAR_THRESH:
-#   후방 측면 거리가 이 값 미만이면 바퀴가 모서리에 걸릴 위험.
-#   바퀴 외부 반폭(10cm) + 안전여유(6cm) = 16cm.
-#
-# CONVEX_DETECT_RATIO:
-#   side_dist / front_diag_dist 비율이 이 값 초과 →
-#   전방 대각은 멀고 측면은 가까움 = 볼록 코너(벽 끝) 진입.
-#   이때 급격한 WALL_LOST_W 회전 대신 완만하게 처리.
-
-CORNER_DIAG_THRESH   = 28.0   # cm - 전방 대각 오목 코너 임계
-CORNER_REAR_THRESH   = 16.0   # cm - 후방 바퀴 코너 임계
-CONVEX_DETECT_RATIO  = 1.8    # side/diag 비율 (볼록 코너 감지)
-CORNER_SLOW_V        = 0.10   # 코너 감지 시 감속 속도
-CORNER_REAR_W        = 0.75   # 후방 바퀴 걸림 회피 각속도
+# [추가] 코너 위협 감지 — 45~65° 구간(앞 대각선) 최솟값 반환
+# 모서리는 정면보다 이 각도에서 먼저 나타나므로 조기 회피 트리거에 사용
+def corner_threat(scan):
+    left_corner  = float(np.min(scan[np.arange(45, 66) % 360]))
+    right_corner = float(np.min(scan[np.arange(295, 316) % 360]))
+    return left_corner, right_corner
 
 def wall_follow(scan, fm, adir, follow_side):
-    """
-    벽 추종 + 코너 모서리 바퀴 걸림 방지.
-
-    우선순위 (위에서 아래로):
-      1. 정면 긴급 정지 / 회피
-      2. 후방 바퀴 측면 걸림 방지  ← NEW
-      3. 오목 코너 감지 (전방 대각↓) ← NEW
-      4. 볼록 코너 진입 감지          ← 개선됨
-      5. 양측 긴급 측면 회피
-      6. 벽 소실 (볼록 코너 완전 진입)← 개선됨 (완만한 회전)
-      7. 정상 PID 추종
-    """
-    sd         = side_dist(scan, follow_side)
+    global last_w
+    sd          = side_dist(scan, follow_side)
     left_close  = side_min(scan, 60, 120)
     right_close = side_min(scan, 240, 300)
+    lc, rc      = corner_threat(scan)   # [추가]
     sign = 1 if follow_side == "L" else -1
 
-    # ── 1. 정면 긴급 회피 ─────────────────────────────────────────────
+    # 벽 추종 중 코너링하다가 벽을 마주쳤을 때 반대 방향 반사 회전
     if fm < THRESH_STOP:
-        return (0.08, adir * 1.1)
+        w_bounce = -1.2 if last_w > 0 else 1.2
+        if abs(last_w) < 0.02: w_bounce = adir * 1.1
+        return (0.0, w_bounce)
+
+    # [추가] 코너 위협 처리 — THRESH_STOP보다 5cm 더 먼 거리에서 조기 회피
+    # 바퀴가 모서리에 닿기 전에 미리 방향 전환
+    if lc < THRESH_STOP + 5:
+        return (WALL_TURN_V * 0.5, 0.8)    # 왼쪽 앞 모서리 → 오른쪽으로
+    if rc < THRESH_STOP + 5:
+        return (WALL_TURN_V * 0.5, -0.8)   # 오른쪽 앞 모서리 → 왼쪽으로
+
     if fm < THRESH_TURN:
         return (WALL_TURN_V, adir * 0.85)
 
-    # ── 2. 후방 바퀴 측면 걸림 방지 ─────────────────────────────────
-    # 볼록 코너를 돌 때, 라이다보다 12cm 뒤에 있는 바퀴가 모서리에 닿기 직전
-    # 후방 측면 거리가 CORNER_REAR_THRESH 미만으로 급락함.
-    # → 추종 벽 반대 방향으로 즉시 조타해서 바퀴를 모서리에서 이탈시킴.
-    rear_sd = rear_side_dist_follow(scan, follow_side)
-    if rear_sd < CORNER_REAR_THRESH:
-        return (CORNER_SLOW_V, -sign * CORNER_REAR_W)
-
-    # ── 3. 전방 대각: 오목 코너 (벽이 안쪽으로 꺾임) ────────────────
-    # 추종 벽 쪽 45° 방향이 갑자기 막힘 → 오목 코너 접근.
-    # 반대 방향으로 조타해 바퀴가 코너 안쪽에 끼이지 않게 함.
-    fdiag = front_diag_dist(scan, follow_side)
-    if fdiag < CORNER_DIAG_THRESH:
-        # 얼마나 가까운지에 따라 조타량 비례 조절
-        urgency = float(np.clip(
-            (CORNER_DIAG_THRESH - fdiag) / CORNER_DIAG_THRESH, 0.0, 1.0
-        ))
-        w_escape = -sign * (0.4 + 0.5 * urgency)
-        return (CORNER_SLOW_V, float(np.clip(w_escape, -0.9, 0.9)))
-
-    # ── 4. 볼록 코너 진입 감지 (벽이 바깥쪽으로 끝남) ───────────────
-    # side_dist는 아직 가깝지만, 전방 대각이 멀어지는 시점 =
-    # 바퀴가 통과하기 직전 벽 모서리가 사라지는 순간.
-    # 이때 급격히 sign 방향으로 꺾으면 뒷바퀴가 모서리에 걸림.
-    # → 먼저 반대 방향으로 살짝 밀어 바퀴 간격 확보, 그 뒤 완만하게 전환.
-    if sd < WALL_TARGET * 1.5 and fdiag > sd * CONVEX_DETECT_RATIO:
-        # 전방 대각이 측면 거리의 CONVEX_DETECT_RATIO배를 넘음
-        # = 코너가 이미 전방에 있고 바퀴가 진입 중
-        w_pre = -sign * 0.35   # 잠깐 벽에서 멀어져 바퀴 이탈 공간 확보
-        return (CORNER_SLOW_V, w_pre)
-
-    # ── 5. 양측 긴급 측면 회피 ───────────────────────────────────────
     if left_close < THRESH_STOP:
         return (WALL_V * 0.7, -0.7)
     if right_close < THRESH_STOP:
         return (WALL_V * 0.7,  0.7)
 
-    # ── 6. 벽 소실 (볼록 코너 완전 통과) ────────────────────────────
-    # 기존: 즉시 WALL_LOST_W(=1.3) 급회전 → 뒷바퀴가 방금 지나온 모서리에 걸림.
-    # 개선: 후방 바퀴가 안전한지 확인 후, 완만하게 단계적으로 회전.
     if sd > WALL_TARGET * 2.0:
-        if rear_sd < CORNER_REAR_THRESH * 1.5:
-            # 후방이 아직 코너 근처 → 더 완만하게 & 약간 반대로
-            return (CORNER_SLOW_V, -sign * 0.3)
-        else:
-            # 후방 안전 → 벽 복귀 회전 (기존보다 완만하게)
-            w_lost = sign * min(WALL_LOST_W, 0.9)
-            return (0.05, w_lost)
+        return (0.05, sign * WALL_LOST_W)
 
-    # ── 7. 정상 PID 벽 추종 ─────────────────────────────────────────
     err = sd - WALL_TARGET
     w   = sign * WALL_KP * err
     if fm < THRESH_SLOW:
-        blend = float(np.clip(
-            (THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0
-        ))
+        blend = float(np.clip((THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
         w = (1 - blend) * w + blend * adir * 0.5
         v = WALL_V * (1.0 - 0.4 * blend)
     else:
@@ -241,8 +147,12 @@ def wall_follow(scan, fm, adir, follow_side):
 
 # ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
+    global last_w
     v = np.clip(v, -0.4, 0.4)
     w = np.clip(w, -1.6, 1.6)
+    if 'fm' in globals() and fm >= THRESH_STOP:
+        if abs(w) > 0.01:
+            last_w = w
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
 def stop_robot(): send_cmd(0.0, 0.0)
@@ -250,8 +160,8 @@ def stop_robot(): send_cmd(0.0, 0.0)
 # ── COLOR CONFIG ──────────────────────────────────────────────────────
 COLOR_CFG = {
     "red":    {"hsv1": ([169, 136, 114], [179, 220, 255]), "hsv2": None, "bgr":  ([20, 20, 80],  [255, 255, 255]), "draw": (0, 0, 255)},
-    "yellow": {"hsv1": ([24, 19, 193], [45, 165, 255]),    "hsv2": None, "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
-    "blue":   {"hsv1": ([98, 100, 95], [138, 207, 246]),   "hsv2": None, "bgr":  ([40,  0,   0], [255, 220, 220]), "draw": (255, 80, 0)},
+    "yellow": {"hsv1": ([25, 60, 160], [32, 161, 255]),    "hsv2": None, "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
+    "blue":    {"hsv1": ([96, 100, 95], [138, 207, 246]),   "hsv2": None, "bgr":  ([40,  0,    0], [255, 220, 220]), "draw": (255, 80, 0)},
 }
 MISSION = ["red", "yellow", "blue"]
 
@@ -279,15 +189,21 @@ ARRIVE_FORWARD_SEC = 0.8
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
-WALL_TARGET    = 20.0
-WALL_SCAN_DIST = 150.0
+WALL_TARGET    = 17.0    # [수정] 15 → 17 (바퀴 2cm 돌출 보정)
+WALL_SCAN_DIST = 60.0
 WALL_APPROACH_V = 0.20
 WALL_KP        = 0.012
 WALL_V         = 0.22
 WALL_TURN_V    = 0.10
-WALL_LOST_W    = 1.3
-WALL_SEARCH_W  = 1.1
+WALL_LOST_W    = 0.9
+WALL_SEARCH_W  = 0.9
 MISSION_TIMEOUT_SEC = 10.0
+
+# ── SEARCH ADDITION ───────────────────────────────────────────────────
+SEARCH_STEP_CM   = 15.0
+SEARCH_TURN_SEC  = 1.8
+SEARCH_TURN_W    = 0.8
+SEARCH_MOVE_V    = 0.10
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"
@@ -305,6 +221,14 @@ search_t      = None
 mission_start_t = time.time()
 hop_start_t     = None
 last_cmd      = (0.0, 0.0)
+last_w        = 0.0
+fm            = 150.0   # [추가] 전역 초기화 (send_cmd에서 globals() 참조 안전하게)
+
+# ── SEARCH STATE ──────────────────────────────────────────────────────
+search_move_cm = 0.0
+search_turning = False
+search_turn_t  = None
+last_loop_t    = time.time()
 
 print(f"START | MISSION: {MISSION}")
 
@@ -314,10 +238,15 @@ try:
         ret, frame = cap.read()
         if not ret: continue
 
+        now = time.time()
+        dt = now - last_loop_t
+        last_loop_t = now
+
         frame  = cv2.flip(frame, 1)
         H, W   = frame.shape[:2]
         cx_mid = W // 2
         hsv    = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
         scan   = get_scan()
         fm     = front_min(scan)
         adir   = avoid_dir(scan)
@@ -368,7 +297,16 @@ try:
         def centroid_in_arrive_zone():
             return (cx_obj >= arrive_x1 and cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
 
-        # ══ LIDAR 모드 ═════════════════════════════════════════════════════
+        # 탐색 회전 인터럽트 로직
+        if search_turning:
+            if now - search_turn_t < SEARCH_TURN_SEC:
+                send_cmd(0.0, SEARCH_TURN_W)
+                cv2.imshow("f", frame); cv2.waitKey(1); continue
+            else:
+                search_turning = False
+                stop_robot()
+
+        # ── LIDAR 모드 ════════════════════════════════════════════════
         if mode == "LIDAR":
             if found: detect_count += 1
             else: detect_count = 0
@@ -390,7 +328,16 @@ try:
                 if sd <= WALL_TARGET * 1.3: lidar_state = "WALL_FOLLOW"
                 else:
                     sign = 1 if follow_side == "L" else -1
-                    if fm < THRESH_STOP: send_cmd(0.08, adir * 1.0)
+                    # [수정] 코너 위협 감지 추가
+                    lc, rc = corner_threat(scan)
+                    if fm < THRESH_STOP:
+                        w_bounce = -1.0 if last_w > 0 else 1.0
+                        if abs(last_w) < 0.02: w_bounce = adir * 1.0
+                        send_cmd(0.0, w_bounce)
+                    elif lc < THRESH_STOP + 5:
+                        send_cmd(WALL_APPROACH_V * 0.4, 0.8)
+                    elif rc < THRESH_STOP + 5:
+                        send_cmd(WALL_APPROACH_V * 0.4, -0.8)
                     elif fm < THRESH_TURN: send_cmd(WALL_APPROACH_V * 0.6, adir * 0.7)
                     else: send_cmd(WALL_APPROACH_V, sign * 0.3)
 
@@ -398,8 +345,17 @@ try:
                 v, w = wall_follow(scan, fm, adir, follow_side)
                 send_cmd(v, w)
 
-        # ══ PARK 모드 ═════════════════════════════════════════════════════
+        # ── PARK 모드 ════════════════════════════════════════════════
         elif mode == "PARK":
+            if found and park_state != "SEARCH":
+                search_move_cm += SEARCH_MOVE_V * dt * 100.0
+
+            if search_move_cm >= SEARCH_STEP_CM and not found and park_state == "TRACK":
+                search_move_cm = 0.0
+                search_turning = True
+                search_turn_t = now
+                stop_robot()
+                continue
 
             if park_state == "SAFE_HOP":
                 if found:
@@ -441,6 +397,8 @@ try:
                     mission_idx += 1
                     arrive_count = 0
                     detect_count = 0
+                    search_move_cm = 0.0
+                    search_turning = False
                     if mission_idx < len(MISSION):
                         park_state = "WALL_SEARCH"
                     continue
@@ -470,7 +428,16 @@ try:
                 if sd <= WALL_TARGET * 1.3: park_state = "WALL_FOLLOW"; continue
 
                 sign = 1 if follow_side == "L" else -1
-                if fm < THRESH_STOP: v, w = 0.08, adir * 1.0
+                # [수정] 코너 위협 감지 추가
+                lc, rc = corner_threat(scan)
+                if fm < THRESH_STOP:
+                    w_bounce = -1.0 if last_w > 0 else 1.0
+                    if abs(last_w) < 0.02: w_bounce = adir * 1.0
+                    v, w = 0.0, w_bounce
+                elif lc < THRESH_STOP + 5:
+                    v, w = WALL_APPROACH_V * 0.4, 0.8
+                elif rc < THRESH_STOP + 5:
+                    v, w = WALL_APPROACH_V * 0.4, -0.8
                 elif fm < THRESH_TURN: v, w = WALL_APPROACH_V * 0.6, adir * 0.7
                 else: v, w = WALL_APPROACH_V, sign * 0.3
                 send_cmd(v, w)
@@ -502,11 +469,21 @@ try:
                         if abs(raw) < W_MIN and ex != 0: return -W_MIN if ex > 0 else W_MIN
                         return raw
 
-                    if fm >= THRESH_SLOW: v, w = reduced_v, cam_w(err_x)
+                    # [수정] 코너 위협 감지 추가 (TRACK 중에도 모서리 조기 회피)
+                    lc, rc = corner_threat(scan)
+                    if fm < THRESH_STOP:
+                        w_bounce = -1.2 if last_w > 0 else 1.2
+                        if abs(last_w) < 0.02: w_bounce = adir * 1.1
+                        v, w = 0.0, w_bounce
+                    elif lc < THRESH_STOP + 5:
+                        v, w = 0.05, 0.8
+                    elif rc < THRESH_STOP + 5:
+                        v, w = 0.05, -0.8
+                    elif fm >= THRESH_SLOW:
+                        v, w = reduced_v, cam_w(err_x)
                     else:
                         w_cam = cam_w(err_x); w_lid = adir * 0.7
-                        if fm < THRESH_STOP: v, w = 0.09, w_lid
-                        elif fm < THRESH_TURN: v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
+                        if fm < THRESH_TURN: v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
                         else: v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
 
                     last_cmd = (v, w); send_cmd(v, w)
@@ -530,3 +507,4 @@ finally:
     stop_robot()
     cap.release()
     lidar_ser.write(bytes([0xA5, 0x25]))
+    cv2.destroyAllWindows()
