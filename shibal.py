@@ -142,7 +142,7 @@ def stop_robot(): send_cmd(0.0, 0.0)
 COLOR_CFG = {
     "red":    {"hsv1": ([169, 136, 114], [179, 220, 255]), "hsv2": None, "bgr":  ([20, 20, 80],  [255, 255, 255]), "draw": (0, 0, 255)},
     "yellow": {"hsv1": ([25, 60, 160], [32, 161, 255]),    "hsv2": None, "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
-    "blue":   {"hsv1": ([96, 100, 95], [138, 207, 246]),   "hsv2": None, "bgr":  ([40,  0,   0], [255, 220, 220]), "draw": (255, 80, 0)},
+    "blue":    {"hsv1": ([96, 100, 95], [138, 207, 246]),   "hsv2": None, "bgr":  ([40,  0,    0], [255, 220, 220]), "draw": (255, 80, 0)},
 }
 MISSION = ["red", "yellow", "blue"]
 
@@ -180,6 +180,12 @@ WALL_LOST_W    = 0.9
 WALL_SEARCH_W  = 0.9     
 MISSION_TIMEOUT_SEC = 10.0  
 
+# ── SEARCH ADDITION (이식됨) ───────────────────────────────────────────
+SEARCH_STEP_CM   = 15.0
+SEARCH_TURN_SEC  = 1.8
+SEARCH_TURN_W    = 0.8
+SEARCH_MOVE_V    = 0.10
+
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"   
 mission_idx   = 0
@@ -198,6 +204,12 @@ hop_start_t     = None
 last_cmd      = (0.0, 0.0)
 last_w        = 0.0  # [추가] 충돌 직전 코너링 방향을 기억하기 위한 변수
 
+# ── SEARCH STATE (이식됨) ─────────────────────────────────────────────
+search_move_cm = 0.0
+search_turning = False
+search_turn_t  = None
+last_loop_t    = time.time()
+
 print(f"START | MISSION: {MISSION}")
 
 # ── MAIN LOOP ─────────────────────────────────────────────────────────
@@ -205,6 +217,11 @@ try:
     while True:
         ret, frame = cap.read()
         if not ret: continue
+
+        # dt 연산 추가 (이식됨)
+        now = time.time()
+        dt = now - last_loop_t
+        last_loop_t = now
 
         frame  = cv2.flip(frame, 1)
         H, W   = frame.shape[:2]
@@ -263,7 +280,17 @@ try:
         def centroid_in_arrive_zone():
             return (cx_obj >= arrive_x1 and cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
 
-        # ══ LIDAR 모드 ═════════════════════════════════════════════════════
+        # 탐색 회전 인터럽트 로직 (이식됨)
+        if search_turning:
+            if now - search_turn_t < SEARCH_TURN_SEC:
+                send_cmd(0.0, SEARCH_TURN_W)
+                cv2.imshow("f", frame); cv2.waitKey(1)
+                continue
+            else:
+                search_turning = False
+                stop_robot()
+
+        # ── LIDAR 모드 ═════════════════════════════════════════════════════
         if mode == "LIDAR":
             if found: detect_count += 1
             else: detect_count = 0
@@ -297,8 +324,18 @@ try:
                 v, w = wall_follow(scan, fm, adir, follow_side)
                 send_cmd(v, w)
 
-        # ══ PARK 모드 ═════════════════════════════════════════════════════
+        # ── PARK 모드 ═════════════════════════════════════════════════════
         elif mode == "PARK":
+            # 주행 거리 누적 및 회전 트리거 로직 (이식됨)
+            if found and park_state != "SEARCH":
+                search_move_cm += SEARCH_MOVE_V * dt * 100.0
+
+            if search_move_cm >= SEARCH_STEP_CM and not found and park_state == "TRACK":
+                search_move_cm = 0.0
+                search_turning = True
+                search_turn_t = now
+                stop_robot()
+                continue
 
             if park_state == "SAFE_HOP":
                 if found:
@@ -341,6 +378,9 @@ try:
                     mission_idx += 1
                     arrive_count = 0
                     detect_count = 0
+                    # 미션 완료 시 변수 초기화 (이식됨)
+                    search_move_cm = 0.0
+                    search_turning = False
                     if mission_idx < len(MISSION):
                         park_state = "WALL_SEARCH"
                     continue
