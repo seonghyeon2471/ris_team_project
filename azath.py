@@ -367,7 +367,7 @@ try:
                     follow_side = "L"
                     lidar_state = "WALL_APPROACH"
                 else:
-                    send_cmd(0.0, WALL_SEARCH_W)
+                    send_cmd(WALL_APPROACH_V, 0.0) # <--- 직진하도록 수정된 부분
 
             elif lidar_state == "WALL_APPROACH":
                 wall_dist, _, valid = estimate_wall(scan, follow_side)
@@ -414,7 +414,7 @@ try:
                         send_cmd(WALL_V, 0.0)
                         cv2.putText(frame, f"HOP: MOVING ({fm:.0f}cm)", (10, 45), 0, 0.5, (0, 255, 0), 2)
                     else:
-                        print("   → 새 장애물 도착! 벽 탐색 재시작")
+                        print("    → 새 장애물 도착! 벽 탐색 재시작")
                         park_state = "WALL_APPROACH"
                         mission_start_t = time.time()
                         continue
@@ -454,7 +454,7 @@ try:
                 if fm < WALL_SCAN_DIST:
                     park_state = "WALL_APPROACH"
                     continue
-                send_cmd(0.0, WALL_SEARCH_W)
+                send_cmd(WALL_APPROACH_V, 0.0) # <--- 직진하도록 수정된 부분
 
             elif park_state == "WALL_APPROACH":
                 if found:
