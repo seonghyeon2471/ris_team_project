@@ -182,6 +182,18 @@ WALL_LOST_W     = 0.9
 WALL_SEARCH_W   = 0.9     
 MISSION_TIMEOUT_SEC = 5.0  
 
+# ── 개활지(open field) 판단 파라미터 ──────────────────────────────────
+OPEN_FIELD_INIT_SPIN_SEC  = 2.0   # SAFE_HOP 진입 시 고정 스캔 회전 시간
+OPEN_FIELD_WINDOW_SEC     = 5.0   # 개활지 판단 윈도우(연속 관찰 시간)
+OPEN_FIELD_START_DIST     = 40.0  # 윈도우 시작 시점의 임계 거리
+OPEN_FIELD_SHRINK_PER_SEC = 8.0   # 1초 지날 때마다 줄어드는 임계 거리 (40→32→24→16→8→0)
+OPEN_FIELD_CLOSE_DIST     = 30.0  # 이 이하로 가까우면 시간 무관하게 즉시 WALL_APPROACH
+
+# 개활지 확정 시 180도 회전 파라미터
+SAFE_HOP_W        = 1.2           # 회전 각속도 (rad/s 가정 — 실측치로 교체 가능)
+SAFE_HOP_TURN_DEG = 180.0
+SAFE_HOP_TURN_SEC = math.radians(SAFE_HOP_TURN_DEG) / SAFE_HOP_W
+
 # ── STATE ─────────────────────────────────────────────────────────────
 mode            = "LIDAR"   
 mission_idx     = 0
@@ -197,6 +209,7 @@ park_t        = None
 search_t      = None      
 mission_start_t = time.time() 
 hop_start_t     = None        
+turn_start_t    = None        # [추가] 개활지 확정 후 180도 턴 시작 시각
 last_cmd      = (0.0, 0.0)
 last_w        = 0.0  
 
@@ -316,18 +329,53 @@ try:
                     detect_count = 0
 
                 elapsed_hop = time.time() - hop_start_t
-                if elapsed_hop < 2.0:
+                if elapsed_hop < OPEN_FIELD_INIT_SPIN_SEC:
                     send_cmd(0.0, 1.2, fm)
                 else:
-                    if fm > 40.0:
-                        send_cmd(0.0, 1.0, fm)
-                    elif fm > 30.0:
-                        send_cmd(WALL_V, 0.0, fm)
-                    else:
+                    open_t       = elapsed_hop - OPEN_FIELD_INIT_SPIN_SEC
+                    shrink_steps = int(open_t // 1.0)
+                    dyn_thresh   = max(OPEN_FIELD_START_DIST - shrink_steps * OPEN_FIELD_SHRINK_PER_SEC, 0.0)
+
+                    if fm <= OPEN_FIELD_CLOSE_DIST:
+                        # 30cm 이하로 가까운 건 시간 무관하게 곧장 접근
                         park_state = "WALL_APPROACH"
                         mission_start_t = time.time()
                         continue
+                    elif fm <= dyn_thresh:
+                        # 현재 임계거리 안으로 뭔가 들어옴 -> 그 방향으로 직진
+                        send_cmd(WALL_V, 0.0, fm)
+                    elif open_t >= OPEN_FIELD_WINDOW_SEC:
+                        # 5초 내내 임계거리 안으로 아무것도 안 들어옴 -> 개활지 확정, 180도 턴
+                        park_state = "OPEN_FIELD_TURN"
+                        turn_start_t = time.time()
+                        continue
+                    else:
+                        # 아직 판단 윈도우 진행 중, 계속 회전 스캔
+                        send_cmd(0.0, 1.0, fm)
                 
+                cv2.imshow("f", frame)
+                cv2.waitKey(1)
+                continue
+
+            if park_state == "OPEN_FIELD_TURN":
+                if found:
+                    detect_count += 1
+                    if detect_count >= DETECT_CONFIRM:
+                        detect_count = 0
+                        park_state = "TRACK"
+                        mission_start_t = time.time()
+                        continue
+                else: 
+                    detect_count = 0
+
+                elapsed_turn = time.time() - turn_start_t
+                if elapsed_turn < SAFE_HOP_TURN_SEC:
+                    send_cmd(0.0, SAFE_HOP_W, fm)
+                else:
+                    park_state = "WALL_SEARCH"
+                    mission_start_t = time.time()
+                    continue
+
                 cv2.imshow("f", frame)
                 cv2.waitKey(1)
                 continue
