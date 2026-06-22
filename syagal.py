@@ -98,7 +98,7 @@ def wall_follow(scan, fm, adir, follow_side):
     if fm < THRESH_STOP:
         w_bounce = -1.2 if last_w > 0 else 1.2
         if abs(last_w) < 0.02: w_bounce = adir * 1.1  # 직전 회전이 없었다면 기본 회피 방향 사용
-        return escape_cmd(scan, w_bounce)
+        return (0.0, w_bounce)
         
     if fm < THRESH_TURN:
         return (WALL_TURN_V, adir * 0.85)
@@ -121,42 +121,6 @@ def wall_follow(scan, fm, adir, follow_side):
         v = WALL_V
     w = float(np.clip(w, -0.9, 0.9))
     return (v, w)
-
-# ── ESCAPE (초근접 탈출: 후진 → 회전) ──────────────────────────────────
-ESCAPE_BACKUP_SEC  = 0.25   # 후진 지속 시간
-ESCAPE_BACKUP_V    = -0.18  # 후진 속도 (음수)
-REAR_RANGE         = 60     # 후방 체크 범위(180도 기준 ±60도)
-escape_active      = False
-escape_start_t     = 0.0
-escape_w_dir       = 0.0
-
-def rear_min(scan):
-    idx = np.arange(180 - REAR_RANGE, 180 + REAR_RANGE + 1) % 360
-    return float(np.min(scan[idx]))
-
-def escape_cmd(scan, w_target):
-    """
-    초근접 탈출: 1단계 후진 → 2단계 회전.
-    후방도 막혀있으면 후진을 건너뛰고 바로 회전.
-    """
-    global escape_active, escape_start_t, escape_w_dir
-    if not escape_active:
-        escape_active  = True
-        escape_start_t = time.time()
-        escape_w_dir   = w_target
-
-    rm = rear_min(scan)
-    rear_clear = rm > THRESH_STOP * 1.5
-
-    elapsed = time.time() - escape_start_t
-    if rear_clear and elapsed < ESCAPE_BACKUP_SEC:
-        return (ESCAPE_BACKUP_V, 0.0)      # 1단계: 순수 후진
-    else:
-        return (0.0, escape_w_dir)          # 2단계: 후진 끝났거나 후방도 막혔으면 회전
-
-def reset_escape():
-    global escape_active
-    escape_active = False
 
 # ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
@@ -269,7 +233,6 @@ try:
         scan   = get_scan()
         fm     = front_min(scan)
         adir   = avoid_dir(scan)
-        if fm >= THRESH_STOP: reset_escape()  # [추가] 안전 거리 확보 시 탈출 상태 초기화
 
         if mission_idx >= len(MISSION):
             stop_robot()
@@ -353,8 +316,7 @@ try:
                     if fm < THRESH_STOP: 
                         w_bounce = -1.0 if last_w > 0 else 1.0
                         if abs(last_w) < 0.02: w_bounce = adir * 1.0
-                        v_esc, w_esc = escape_cmd(scan, w_bounce)
-                        send_cmd(v_esc, w_esc)
+                        send_cmd(0.0, w_bounce)
                     elif fm < THRESH_TURN: send_cmd(WALL_APPROACH_V * 0.6, adir * 0.7)
                     else: send_cmd(WALL_APPROACH_V, sign * 0.3)
 
@@ -452,7 +414,7 @@ try:
                 if fm < THRESH_STOP: 
                     w_bounce = -1.0 if last_w > 0 else 1.0
                     if abs(last_w) < 0.02: w_bounce = adir * 1.0
-                    v, w = escape_cmd(scan, w_bounce)
+                    v, w = 0.0, w_bounce
                 elif fm < THRESH_TURN: v, w = WALL_APPROACH_V * 0.6, adir * 0.7
                 else: v, w = WALL_APPROACH_V, sign * 0.3
                 send_cmd(v, w)
@@ -491,7 +453,7 @@ try:
                         if fm < THRESH_STOP: 
                             w_bounce = -1.2 if last_w > 0 else 1.2
                             if abs(last_w) < 0.02: w_bounce = w_lid
-                            v, w = escape_cmd(scan, w_bounce)
+                            v, w = 0.0, w_bounce
                         elif fm < THRESH_TURN: v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
                         else: v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
 
