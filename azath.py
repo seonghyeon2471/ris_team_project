@@ -89,7 +89,7 @@ WALL_SCAN_START_L = 55
 WALL_SCAN_END_L   = 125
 WALL_SCAN_START_R = 235
 WALL_SCAN_END_R   = 305
-WALL_MAX_DIST     = 40.0
+WALL_MAX_DIST     = 60.0
 WALL_MIN_POINTS   = 5
 
 def estimate_wall(scan, side):
