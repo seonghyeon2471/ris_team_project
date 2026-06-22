@@ -381,7 +381,7 @@ try:
 
                 elapsed_hop = time.time() - hop_start_t
                 if elapsed_hop < 2.0:
-                    send_cmd(0.0, 1.2)
+                    send_cmd(0.0, -1.1)
                 else:
                     if fm > 130.0:
                         send_cmd(0.0, 1.0)
