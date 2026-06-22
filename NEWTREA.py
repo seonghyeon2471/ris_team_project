@@ -1,4 +1,3 @@
-#준수
 import cv2
 import serial
 import numpy as np
@@ -29,7 +28,7 @@ print("LIDAR OK")
 # ── LIDAR ─────────────────────────────────────────────────────────────
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
-FRONT_RANGE  = 90   
+FRONT_RANGE  = 90
 THRESH_SLOW  = 55.0
 THRESH_TURN  = 30.0
 THRESH_STOP  = 18.0
@@ -88,13 +87,18 @@ def side_min(scan, start, end):
     return float(np.min(scan[idx]))
 
 def wall_follow(scan, fm, adir, follow_side):
+    global last_w
     sd          = side_dist(scan, follow_side)
     left_close  = side_min(scan, 60, 120)
     right_close = side_min(scan, 240, 300)
     sign = 1 if follow_side == "L" else -1
 
     if fm < THRESH_STOP:
-        return (0.08, adir * 1.1)
+        w_bounce = -1.2 if last_w > 0 else 1.2
+        if abs(last_w) < 0.02:
+            w_bounce = adir * 1.1
+        return (0.0, w_bounce)
+
     if fm < THRESH_TURN:
         return (WALL_TURN_V, adir * 0.85)
 
@@ -119,11 +123,15 @@ def wall_follow(scan, fm, adir, follow_side):
 
 # ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
+    global last_w
     v = np.clip(v, -0.4, 0.4)
     w = np.clip(w, -1.6, 1.6)
+    if abs(w) > 0.01:
+        last_w = w
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
-def stop_robot(): send_cmd(0.0, 0.0)
+def stop_robot():
+    send_cmd(0.0, 0.0)
 
 # ── COLOR CONFIG ──────────────────────────────────────────────────────
 COLOR_CFG = {
@@ -158,31 +166,43 @@ ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
 WALL_TARGET    = 15.0
-WALL_SCAN_DIST = 60.0  
-WALL_APPROACH_V = 0.20  
+WALL_SCAN_DIST = 60.0
+WALL_APPROACH_V = 0.20
 WALL_KP        = 0.012
 WALL_V         = 0.22
 WALL_TURN_V    = 0.10
-WALL_LOST_W    = 0.9     
-WALL_SEARCH_W  = 0.9     
-MISSION_TIMEOUT_SEC = 10.0  
+WALL_LOST_W    = 0.9
+WALL_SEARCH_W  = 0.9
+MISSION_TIMEOUT_SEC = 10.0
+
+# ── SEARCH ADDITION ───────────────────────────────────────────────────
+SEARCH_STEP_CM   = 15.0
+SEARCH_TURN_SEC  = 1.8
+SEARCH_TURN_W    = 0.8
+SEARCH_MOVE_V    = 0.10
 
 # ── STATE ─────────────────────────────────────────────────────────────
-mode          = "LIDAR"   
+mode          = "LIDAR"
 mission_idx   = 0
 detect_count  = 0
 arrive_count  = 0
-follow_side   = "L"   
+follow_side   = "L"
 lidar_state   = "WALL_SEARCH"
 
-park_state    = "TRACK"   
+park_state    = "TRACK"
 last_seen_x   = 160
 last_bottom_y = 0
 park_t        = None
-search_t      = None      
-mission_start_t = time.time() 
-hop_start_t     = None        
+search_t      = None
+mission_start_t = time.time()
+hop_start_t     = None
 last_cmd      = (0.0, 0.0)
+last_w        = 0.0
+
+search_move_cm = 0.0
+search_turning = False
+search_turn_t  = None
+last_loop_t    = time.time()
 
 print(f"START | MISSION: {MISSION}")
 
@@ -190,12 +210,18 @@ print(f"START | MISSION: {MISSION}")
 try:
     while True:
         ret, frame = cap.read()
-        if not ret: continue
+        if not ret:
+            continue
+
+        now = time.time()
+        dt = now - last_loop_t
+        last_loop_t = now
 
         frame  = cv2.flip(frame, 1)
         H, W   = frame.shape[:2]
         cx_mid = W // 2
         hsv    = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
         scan   = get_scan()
         fm     = front_min(scan)
         adir   = avoid_dir(scan)
@@ -203,17 +229,15 @@ try:
         if mission_idx >= len(MISSION):
             stop_robot()
             cv2.putText(frame, "ALL MISSIONS DONE", (30, H // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            cv2.imshow("f", frame); cv2.waitKey(1); continue
+            cv2.imshow("f", frame)
+            cv2.waitKey(1)
+            continue
 
         target = MISSION[mission_idx]
         draw   = COLOR_CFG[target]["draw"]
-
-        # ★ 화면 왼쪽 상단에 현재 추적 중인 색상 표시 (예: "TARGET: RED")
-        # 해당 색상 고유의 BGR 색상으로 글씨가 나타납니다.
         cv2.putText(frame, f"TARGET: {target.upper()}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, draw, 2)
 
         is_searching = (mode == "LIDAR") or (mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH"])
-        
         if is_searching:
             if time.time() - mission_start_t > MISSION_TIMEOUT_SEC:
                 mode = "PARK"
@@ -248,10 +272,22 @@ try:
         def centroid_in_arrive_zone():
             return (cx_obj >= arrive_x1 and cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
 
-        # ══ LIDAR 모드 ═════════════════════════════════════════════════════
+        if search_turning:
+            if now - search_turn_t < SEARCH_TURN_SEC:
+                send_cmd(0.0, SEARCH_TURN_W)
+                cv2.imshow("f", frame)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    break
+                continue
+            else:
+                search_turning = False
+                stop_robot()
+
         if mode == "LIDAR":
-            if found: detect_count += 1
-            else: detect_count = 0
+            if found:
+                detect_count += 1
+            else:
+                detect_count = 0
 
             if detect_count >= DETECT_CONFIRM:
                 detect_count = 0
@@ -263,23 +299,39 @@ try:
                 if fm < WALL_SCAN_DIST:
                     follow_side = "L"
                     lidar_state = "WALL_APPROACH"
-                else: send_cmd(0.0, WALL_SEARCH_W)
+                else:
+                    send_cmd(0.0, WALL_SEARCH_W)
 
             elif lidar_state == "WALL_APPROACH":
                 sd = side_dist(scan, follow_side)
-                if sd <= WALL_TARGET * 1.3: lidar_state = "WALL_FOLLOW"
+                if sd <= WALL_TARGET * 1.3:
+                    lidar_state = "WALL_FOLLOW"
                 else:
                     sign = 1 if follow_side == "L" else -1
-                    if fm < THRESH_STOP: send_cmd(0.08, adir * 1.0)
-                    elif fm < THRESH_TURN: send_cmd(WALL_APPROACH_V * 0.6, adir * 0.7)
-                    else: send_cmd(WALL_APPROACH_V, sign * 0.3)
+                    if fm < THRESH_STOP:
+                        w_bounce = -1.0 if last_w > 0 else 1.0
+                        if abs(last_w) < 0.02:
+                            w_bounce = adir * 1.0
+                        send_cmd(0.0, w_bounce)
+                    elif fm < THRESH_TURN:
+                        send_cmd(WALL_APPROACH_V * 0.6, adir * 0.7)
+                    else:
+                        send_cmd(WALL_APPROACH_V, sign * 0.3)
 
             elif lidar_state == "WALL_FOLLOW":
                 v, w = wall_follow(scan, fm, adir, follow_side)
                 send_cmd(v, w)
 
-        # ══ PARK 모드 ═════════════════════════════════════════════════════
         elif mode == "PARK":
+            if found and park_state != "SEARCH":
+                search_move_cm += SEARCH_MOVE_V * dt * 100.0
+
+            if search_move_cm >= SEARCH_STEP_CM and not found and park_state == "TRACK":
+                search_move_cm = 0.0
+                search_turning = True
+                search_turn_t = now
+                stop_robot()
+                continue
 
             if park_state == "SAFE_HOP":
                 if found:
@@ -289,10 +341,10 @@ try:
                         park_state = "TRACK"
                         mission_start_t = time.time()
                         continue
-                else: detect_count = 0
+                else:
+                    detect_count = 0
 
                 elapsed_hop = time.time() - hop_start_t
-                
                 if elapsed_hop < 2.0:
                     send_cmd(0.0, 1.2)
                 else:
@@ -304,9 +356,10 @@ try:
                         park_state = "WALL_APPROACH"
                         mission_start_t = time.time()
                         continue
-                
-                cv2.imshow("f", frame); cv2.waitKey(1); continue
 
+                cv2.imshow("f", frame)
+                cv2.waitKey(1)
+                continue
 
             if park_state == "FORWARD":
                 elapsed = time.time() - park_t
@@ -314,7 +367,8 @@ try:
                     stop_robot()
                     park_state = "PARKING"
                     park_t = time.time()
-                else: send_cmd(*last_cmd)
+                else:
+                    send_cmd(*last_cmd)
 
             elif park_state == "PARKING":
                 stop_robot()
@@ -322,6 +376,8 @@ try:
                     mission_idx += 1
                     arrive_count = 0
                     detect_count = 0
+                    search_move_cm = 0.0
+                    search_turning = False
                     if mission_idx < len(MISSION):
                         park_state = "WALL_SEARCH"
                     continue
@@ -333,7 +389,8 @@ try:
                         detect_count = 0
                         park_state = "TRACK"
                         continue
-                else: detect_count = 0
+                else:
+                    detect_count = 0
 
                 if fm < WALL_SCAN_DIST:
                     park_state = "WALL_APPROACH"
@@ -344,66 +401,97 @@ try:
                 if found:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
-                        detect_count = 0; park_state = "TRACK"; continue
-                else: detect_count = 0
+                        detect_count = 0
+                        park_state = "TRACK"
+                        continue
+                else:
+                    detect_count = 0
 
                 sd = side_dist(scan, follow_side)
-                if sd <= WALL_TARGET * 1.3: park_state = "WALL_FOLLOW"; continue
+                if sd <= WALL_TARGET * 1.3:
+                    park_state = "WALL_FOLLOW"
+                    continue
 
                 sign = 1 if follow_side == "L" else -1
-                if fm < THRESH_STOP: v, w = 0.08, adir * 1.0
-                elif fm < THRESH_TURN: v, w = WALL_APPROACH_V * 0.6, adir * 0.7
-                else: v, w = WALL_APPROACH_V, sign * 0.3
+                if fm < THRESH_STOP:
+                    w_bounce = -1.0 if last_w > 0 else 1.0
+                    if abs(last_w) < 0.02:
+                        w_bounce = adir * 1.0
+                    v, w = 0.0, w_bounce
+                elif fm < THRESH_TURN:
+                    v, w = WALL_APPROACH_V * 0.6, adir * 0.7
+                else:
+                    v, w = WALL_APPROACH_V, sign * 0.3
                 send_cmd(v, w)
 
             elif park_state == "WALL_FOLLOW":
                 if found:
                     detect_count += 1
                     if detect_count >= DETECT_CONFIRM:
-                        detect_count = 0; park_state = "TRACK"; continue
-                else: detect_count = 0
+                        detect_count = 0
+                        park_state = "TRACK"
+                        continue
+                else:
+                    detect_count = 0
 
                 v, w = wall_follow(scan, fm, adir, follow_side)
                 send_cmd(v, w)
 
             elif park_state == "TRACK":
-                park_state = "TRACK"
                 arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
 
                 if arrive_count >= ARRIVE_CONFIRM:
-                    arrive_count = 0; park_state = "FORWARD"; park_t = time.time()
-                    send_cmd(ARRIVE_FORWARD_V, 0.0); continue
+                    arrive_count = 0
+                    park_state = "FORWARD"
+                    park_t = time.time()
+                    send_cmd(ARRIVE_FORWARD_V, 0.0)
+                    continue
+
+                err_x = cx_obj - cx_mid
+                err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
+                reduced_v = APPROACH_V * (1.0 - err_ratio)
+
+                def cam_w(ex):
+                    raw = -KP_ROT * ex
+                    if abs(raw) < W_MIN and ex != 0:
+                        return -W_MIN if ex > 0 else W_MIN
+                    return raw
+
+                if fm >= THRESH_SLOW:
+                    v, w = reduced_v, cam_w(err_x)
                 else:
-                    err_x = cx_obj - cx_mid
-                    err_ratio = min(abs(err_x) / (cx_mid * 1.0), 1.0)
-                    reduced_v = APPROACH_V * (1.0 - err_ratio)
-
-                    def cam_w(ex):
-                        raw = -KP_ROT * ex
-                        if abs(raw) < W_MIN and ex != 0: return -W_MIN if ex > 0 else W_MIN
-                        return raw
-
-                    if fm >= THRESH_SLOW: v, w = reduced_v, cam_w(err_x)
+                    w_cam = cam_w(err_x)
+                    w_lid = adir * 0.7
+                    if fm < THRESH_STOP:
+                        w_bounce = -1.2 if last_w > 0 else 1.2
+                        if abs(last_w) < 0.02:
+                            w_bounce = w_lid
+                        v, w = 0.0, w_bounce
+                    elif fm < THRESH_TURN:
+                        v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
                     else:
-                        w_cam = cam_w(err_x); w_lid = adir * 0.7
-                        if fm < THRESH_STOP: v, w = 0.09, w_lid
-                        elif fm < THRESH_TURN: v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
-                        else: v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
+                        v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
 
-                    last_cmd = (v, w); send_cmd(v, w)
+                last_cmd = (v, w)
+                send_cmd(v, w)
 
             elif park_state == "SEARCH":
-                if park_state != "SEARCH":
-                    park_state = "SEARCH"; search_t = time.time(); arrive_count = 0
+                if search_t is None:
+                    search_t = time.time()
+                    arrive_count = 0
+
                 elapsed_search = time.time() - search_t
                 if elapsed_search > 5.0:
                     park_state = "WALL_SEARCH"
+                    search_t = None
                 else:
-                    v = 0.0; w = (-1.0 if last_seen_x > cx_mid else 1.0)
+                    v = 0.0
+                    w = -1.0 if last_seen_x > cx_mid else 1.0
                     send_cmd(v, w)
 
         cv2.imshow("f", frame)
-        if cv2.waitKey(1) & 0xFF == 27: break
+        if cv2.waitKey(1) & 0xFF == 27:
+            break
 
 except KeyboardInterrupt:
     print("STOP")
