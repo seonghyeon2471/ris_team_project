@@ -105,22 +105,22 @@ def wall_follow(scan, fm, adir, follow_side):
     sign = 1 if follow_side == "L" else -1
 
     if fm < THRESH_STOP:
-        w_bounce = -1.3 if last_w > 0 else 1.3   # [수정] 1.2 → 1.3
-        if abs(last_w) < 0.02: w_bounce = adir * 1.2   # [수정] 1.1 → 1.2
+        w_bounce = -1.3 if last_w > 0 else 1.3
+        if abs(last_w) < 0.02: w_bounce = adir * 1.2
         return (0.0, w_bounce)
 
     if lc < THRESH_STOP + 5:
-        return (WALL_TURN_V * 0.5, 1.1)    # [수정] 0.8 → 1.1
+        return (WALL_TURN_V * 0.5, 1.1)
     if rc < THRESH_STOP + 5:
-        return (WALL_TURN_V * 0.5, -1.1)   # [수정] -0.8 → -1.1
+        return (WALL_TURN_V * 0.5, -1.1)
 
     if fm < THRESH_TURN:
-        return (WALL_TURN_V, adir * 1.1)   # [수정] 0.85 → 1.1
+        return (WALL_TURN_V, adir * 1.1)
 
     if left_close < THRESH_STOP:
-        return (WALL_V * 0.7, -1.0)        # [수정] -0.7 → -1.0
+        return (WALL_V * 0.7, -1.0)
     if right_close < THRESH_STOP:
-        return (WALL_V * 0.7,  1.0)        # [수정]  0.7 →  1.0
+        return (WALL_V * 0.7,  1.0)
 
     if sd > WALL_TARGET * 2.0:
         return (0.05, sign * WALL_LOST_W)
@@ -129,11 +129,11 @@ def wall_follow(scan, fm, adir, follow_side):
     w   = sign * WALL_KP * err
     if fm < THRESH_SLOW:
         blend = float(np.clip((THRESH_SLOW - fm) / (THRESH_SLOW - THRESH_TURN + 1e-6), 0.0, 1.0))
-        w = (1 - blend) * w + blend * adir * 0.9   # [수정] 0.5 → 0.9
+        w = (1 - blend) * w + blend * adir * 0.9
         v = WALL_V * (1.0 - 0.4 * blend)
     else:
         v = WALL_V
-    w = float(np.clip(w, -1.4, 1.4))   # [수정] 0.9 → 1.4
+    w = float(np.clip(w, -1.4, 1.4))
     return (v, w)
 
 # ── MOTOR ─────────────────────────────────────────────────────────────
@@ -169,7 +169,7 @@ def make_mask(frame, hsv, name):
 # ── PARAMS ────────────────────────────────────────────────────────────
 MIN_AREA       = 400
 KP_ROT         = 0.030
-W_MIN          = 0.95   # [수정] 0.20 → 0.95 (카메라 트래킹 최소 회전속도)
+W_MIN          = 0.95
 APPROACH_V     = 0.13
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
@@ -182,18 +182,18 @@ ARRIVE_CONFIRM     = 8
 
 WALL_TARGET     = 17.0
 WALL_SCAN_DIST  = 60.0
-WALL_APPROACH_V = 0.28   # [수정] 0.20 → 0.28
+WALL_APPROACH_V = 0.28
 WALL_KP         = 0.012
-WALL_V          = 0.32   # [수정] 0.22 → 0.32
-WALL_TURN_V     = 0.20   # [수정] 0.10 → 0.16
-WALL_LOST_W     = 1.1    # [수정] 0.9 → 1.1
-WALL_SEARCH_W   = 1.1    # [수정] 0.9 → 1.1
+WALL_V          = 0.32
+WALL_TURN_V     = 0.20
+WALL_LOST_W     = 1.1
+WALL_SEARCH_W   = 1.1
 MISSION_TIMEOUT_SEC = 10.0
 
 # ── SEARCH ADDITION ───────────────────────────────────────────────────
 SEARCH_STEP_CM   = 15.0
 SEARCH_TURN_SEC  = 1.8
-SEARCH_TURN_W    = 1.0   # [수정] 0.8 → 1.0
+SEARCH_TURN_W    = 1.0
 SEARCH_MOVE_V    = 0.10
 
 # ── STATE ─────────────────────────────────────────────────────────────
@@ -310,9 +310,13 @@ try:
 
             if lidar_state == "WALL_SEARCH":
                 if fm < WALL_SCAN_DIST:
-                    follow_side = "L"
+                    # ✅ 수정: 가까운 쪽 벽을 follow_side로 동적 결정
+                    left_sd  = side_dist(scan, "L")
+                    right_sd = side_dist(scan, "R")
+                    follow_side = "L" if left_sd <= right_sd else "R"
                     lidar_state = "WALL_APPROACH"
-                else: send_cmd(0.0, WALL_SEARCH_W)
+                else:
+                    send_cmd(0.0, WALL_SEARCH_W)
 
             elif lidar_state == "WALL_APPROACH":
                 sd = side_dist(scan, follow_side)
@@ -321,15 +325,15 @@ try:
                     sign = 1 if follow_side == "L" else -1
                     lc, rc = corner_threat(scan)
                     if fm < THRESH_STOP:
-                        w_bounce = -1.1 if last_w > 0 else 1.1   # [수정] 1.0 → 1.1
+                        w_bounce = -1.1 if last_w > 0 else 1.1
                         if abs(last_w) < 0.02: w_bounce = adir * 1.1
                         send_cmd(0.0, w_bounce)
                     elif lc < THRESH_STOP + 5:
-                        send_cmd(WALL_APPROACH_V * 0.4, 1.1)    # [수정] 0.8 → 1.1
+                        send_cmd(WALL_APPROACH_V * 0.4, 1.1)
                     elif rc < THRESH_STOP + 5:
-                        send_cmd(WALL_APPROACH_V * 0.4, -1.1)   # [수정] -0.8 → -1.1
-                    elif fm < THRESH_TURN: send_cmd(WALL_APPROACH_V * 0.6, adir * 1.0)  # [수정] 0.7 → 1.0
-                    else: send_cmd(WALL_APPROACH_V, sign * 0.9)  # [수정] 0.3 → 0.9
+                        send_cmd(WALL_APPROACH_V * 0.4, -1.1)
+                    elif fm < THRESH_TURN: send_cmd(WALL_APPROACH_V * 0.6, adir * 1.0)
+                    else: send_cmd(WALL_APPROACH_V, sign * 0.9)
 
             elif lidar_state == "WALL_FOLLOW":
                 v, w = wall_follow(scan, fm, adir, follow_side)
@@ -363,10 +367,14 @@ try:
                     send_cmd(0.0, 1.2)
                 else:
                     if fm > 130.0:
-                        send_cmd(0.0, 1.1)   # [수정] 1.0 → 1.1
+                        send_cmd(0.0, 1.1)
                     elif fm > 50.0:
                         send_cmd(WALL_V, 0.0)
                     else:
+                        # ✅ 수정: SAFE_HOP → WALL_APPROACH 전환 시에도 follow_side 결정
+                        left_sd  = side_dist(scan, "L")
+                        right_sd = side_dist(scan, "R")
+                        follow_side = "L" if left_sd <= right_sd else "R"
                         park_state = "WALL_APPROACH"
                         mission_start_t = time.time()
                         continue
@@ -403,6 +411,10 @@ try:
                 else: detect_count = 0
 
                 if fm < WALL_SCAN_DIST:
+                    # ✅ 수정: 가까운 쪽 벽을 follow_side로 동적 결정
+                    left_sd  = side_dist(scan, "L")
+                    right_sd = side_dist(scan, "R")
+                    follow_side = "L" if left_sd <= right_sd else "R"
                     park_state = "WALL_APPROACH"
                     continue
                 send_cmd(0.0, WALL_SEARCH_W)
@@ -420,15 +432,15 @@ try:
                 sign = 1 if follow_side == "L" else -1
                 lc, rc = corner_threat(scan)
                 if fm < THRESH_STOP:
-                    w_bounce = -1.1 if last_w > 0 else 1.1   # [수정] 1.0 → 1.1
+                    w_bounce = -1.1 if last_w > 0 else 1.1
                     if abs(last_w) < 0.02: w_bounce = adir * 1.1
                     v, w = 0.0, w_bounce
                 elif lc < THRESH_STOP + 5:
-                    v, w = WALL_APPROACH_V * 0.4, 1.1    # [수정] 0.8 → 1.1
+                    v, w = WALL_APPROACH_V * 0.4, 1.1
                 elif rc < THRESH_STOP + 5:
-                    v, w = WALL_APPROACH_V * 0.4, -1.1   # [수정] -0.8 → -1.1
-                elif fm < THRESH_TURN: v, w = WALL_APPROACH_V * 0.6, adir * 1.0  # [수정] 0.7 → 1.0
-                else: v, w = WALL_APPROACH_V, sign * 0.9  # [수정] 0.3 → 0.9
+                    v, w = WALL_APPROACH_V * 0.4, -1.1
+                elif fm < THRESH_TURN: v, w = WALL_APPROACH_V * 0.6, adir * 1.0
+                else: v, w = WALL_APPROACH_V, sign * 0.9
                 send_cmd(v, w)
 
             elif park_state == "WALL_FOLLOW":
@@ -455,23 +467,22 @@ try:
 
                     def cam_w(ex):
                         raw = -KP_ROT * ex
-                        # W_MIN=0.95이므로 오차가 있으면 무조건 0.95 이상 출력
                         if abs(raw) < W_MIN and ex != 0: return -W_MIN if ex > 0 else W_MIN
                         return raw
 
                     lc, rc = corner_threat(scan)
                     if fm < THRESH_STOP:
-                        w_bounce = -1.3 if last_w > 0 else 1.3   # [수정] 1.2 → 1.3
-                        if abs(last_w) < 0.02: w_bounce = adir * 1.2  # [수정] 1.1 → 1.2
+                        w_bounce = -1.3 if last_w > 0 else 1.3
+                        if abs(last_w) < 0.02: w_bounce = adir * 1.2
                         v, w = 0.0, w_bounce
                     elif lc < THRESH_STOP + 5:
-                        v, w = 0.05, 1.1    # [수정] 0.8 → 1.1
+                        v, w = 0.05, 1.1
                     elif rc < THRESH_STOP + 5:
-                        v, w = 0.05, -1.1   # [수정] -0.8 → -1.1
+                        v, w = 0.05, -1.1
                     elif fm >= THRESH_SLOW:
                         v, w = reduced_v, cam_w(err_x)
                     else:
-                        w_cam = cam_w(err_x); w_lid = adir * 1.0  # [수정] 0.7 → 1.0
+                        w_cam = cam_w(err_x); w_lid = adir * 1.0
                         if fm < THRESH_TURN: v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
                         else: v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
 
@@ -484,7 +495,7 @@ try:
                 if elapsed_search > 5.0:
                     park_state = "WALL_SEARCH"
                 else:
-                    v = 0.0; w = (-1.1 if last_seen_x > cx_mid else 1.1)  # [수정] 1.0 → 1.1
+                    v = 0.0; w = (-1.1 if last_seen_x > cx_mid else 1.1)
                     send_cmd(v, w)
 
         cv2.imshow("f", frame)
