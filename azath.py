@@ -30,9 +30,9 @@ print("LIDAR OK")
 EMA_ALPHA   = 0.35
 MEDIAN_K    = 2
 FRONT_RANGE = 90
-THRESH_SLOW = 55.0
-THRESH_TURN = 32.0
-THRESH_STOP = 19.0
+THRESH_SLOW = 50.0
+THRESH_TURN = 20.0
+THRESH_STOP = 15.0
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -89,7 +89,7 @@ WALL_SCAN_START_L = 55
 WALL_SCAN_END_L   = 125
 WALL_SCAN_START_R = 235
 WALL_SCAN_END_R   = 305
-WALL_MAX_DIST     = 60.0
+WALL_MAX_DIST     = 50.0
 WALL_MIN_POINTS   = 5
 
 def estimate_wall(scan, side):
@@ -242,7 +242,7 @@ ARRIVE_FORWARD_SEC = 0.8
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
-WALL_SCAN_DIST      = 150.0
+WALL_SCAN_DIST      = 50.0
 MISSION_TIMEOUT_SEC = 10.0
 
 # ── STATE ─────────────────────────────────────────────────────────────
