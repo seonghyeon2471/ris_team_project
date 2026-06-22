@@ -145,11 +145,11 @@ def wall_follow(scan, fm, adir, follow_side, current_v=None):
     if fm < THRESH_STOP:
         return (0.08, adir * 1.1), False
     if fm < THRESH_TURN:
-        return (WALL_APPROACH_V, adir * 0.85), False
+        return (WALL_APPROACH_V, adir * 1.0), False
     if left_close < THRESH_STOP:
-        return (WALL_V * 0.7, -0.7), False
+        return (WALL_V * 0.7, -1.0), False
     if right_close < THRESH_STOP:
-        return (WALL_V * 0.7, 0.7), False
+        return (WALL_V * 0.7, 1.0), False
 
     wall_dist, wall_angle, valid = estimate_wall(scan, follow_side)
     if not valid:
@@ -184,7 +184,7 @@ def wall_search_step(scan, fm, adir):
     if fm < THRESH_STOP:
         return (0.08, adir * 1.1)
     if fm < THRESH_TURN:
-        return (WALL_APPROACH_V, adir * 0.85)
+        return (WALL_APPROACH_V, adir * 1.0)
     # 평소: 전진이 주, 회전은 보조 (adir 방향으로 살짝 틀면서 직진)
     return (WALL_SEARCH_V, adir * WALL_SEARCH_W)
 
@@ -458,7 +458,7 @@ try:
                     v, w = reduced_v, cam_w(err_x)
                 else:
                     w_cam = cam_w(err_x)
-                    w_lid = adir * 0.7
+                    w_lid = adir * 1.0
                     if fm < THRESH_STOP:
                         v, w = 0.09, w_lid
                     elif fm < THRESH_TURN:
