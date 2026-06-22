@@ -31,8 +31,8 @@ EMA_ALPHA   = 0.35
 MEDIAN_K    = 2
 FRONT_RANGE = 90
 THRESH_SLOW = 40.0
-THRESH_TURN = 15.0
-THRESH_STOP = 10.0
+THRESH_TURN = 18.0
+THRESH_STOP = 14.0
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -122,7 +122,7 @@ def estimate_wall(scan, side):
     return wall_dist, wall_angle, True
 
 # ── 벽 추종 제어기 ────────────────────────────────────────────────────
-WALL_TARGET      = 13.0
+WALL_TARGET      = 15.0
 WALL_KH          = 1.20
 WALL_KD          = 0.06
 WALL_V           = 0.22
