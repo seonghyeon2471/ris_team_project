@@ -192,14 +192,14 @@ hop_start_t = None
 last_cmd = (0.0, 0.0)
 
 # ★ 정체 상태 탈출을 위한 변수
-STUCK_TIMEOUT = 6.0          # 같은 상태 지속 제한 시간 (6초)
-ESCAPE_DURATION = 1.5        # 강제 회전 및 후진 탈출 시간 (1.5초)
-last_state_t = time.time()   # 상태가 마지막으로 바뀐 시간 저장
+STUCK_TIMEOUT = 6.0
+ESCAPE_DURATION = 1.5
+last_state_t = time.time()
 prev_mode = mode
 prev_lidar_state = lidar_state
 prev_park_state = park_state
-escape_t = None              # 탈출 시작 시간 저장
-escape_dir = 1               # 탈출 회전 방향
+escape_t = None
+escape_dir = 1
 
 print(f"START | MISSION: {MISSION}")
 
@@ -287,12 +287,13 @@ try:
         if is_searching:
             if time.time() - mission_start_t > MISSION_TIMEOUT_SEC:
                 mode = "PARK"
-                park_state = "SAFE_HOP"
-                hop_start_t = time.time()
+                park_state = "WALL_SEARCH"
+                mission_start_t = time.time()
                 detect_count = 0
                 continue
-        elif park_state not in ["SAFE_HOP", "ESCAPE"]:
-            mission_start_t = time.time()
+        else:
+            if park_state not in ["ESCAPE"]:
+                mission_start_t = time.time()
 
         cx_obj, cy_obj = -1, -1
         if found:
@@ -368,34 +369,7 @@ try:
         # ── PARK 모드 ═════════════════════════════════════════════════════
         elif mode == "PARK":
 
-            if park_state == "SAFE_HOP":
-                if found:
-                    detect_count += 1
-                    if detect_count >= DETECT_CONFIRM:
-                        detect_count = 0
-                        park_state = "TRACK"
-                        mission_start_t = time.time()
-                        continue
-                else:
-                    detect_count = 0
-
-                elapsed_hop = time.time() - hop_start_t
-                if elapsed_hop < 2.0:
-                    send_cmd(0.0, -1.1)
-                else:
-                    if fm > 130.0:
-                        send_cmd(0.0, 1.0)
-                    elif fm > 50.0:
-                        send_cmd(WALL_V, 0.0)
-                    else:
-                        park_state = "WALL_APPROACH"
-                        mission_start_t = time.time()
-                        continue
-                cv2.imshow("f", frame)
-                cv2.waitKey(1)
-                continue
-
-            elif park_state == "FORWARD":
+            if park_state == "FORWARD":
                 elapsed = time.time() - park_t
                 if elapsed >= ARRIVE_FORWARD_SEC:
                     stop_robot()
