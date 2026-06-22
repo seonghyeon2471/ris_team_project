@@ -88,13 +88,18 @@ def side_min(scan, start, end):
     return float(np.min(scan[idx]))
 
 def wall_follow(scan, fm, adir, follow_side):
+    global last_w
     sd          = side_dist(scan, follow_side)
     left_close  = side_min(scan, 60, 120)
     right_close = side_min(scan, 240, 300)
     sign = 1 if follow_side == "L" else -1
 
+    # [수정] 벽 추종 중 코너링하다가 벽을 마주쳤을 때 반대 방향 반사 회전
     if fm < THRESH_STOP:
-        return (0.08, adir * 1.1)
+        w_bounce = -1.2 if last_w > 0 else 1.2
+        if abs(last_w) < 0.02: w_bounce = adir * 1.1  # 직전 회전이 없었다면 기본 회피 방향 사용
+        return (0.0, w_bounce)
+        
     if fm < THRESH_TURN:
         return (WALL_TURN_V, adir * 0.85)
 
@@ -119,8 +124,16 @@ def wall_follow(scan, fm, adir, follow_side):
 
 # ── MOTOR ─────────────────────────────────────────────────────────────
 def send_cmd(v, w):
+    global last_w
     v = np.clip(v, -0.4, 0.4)
     w = np.clip(w, -1.6, 1.6)
+    
+    # [추가] 안전 거리 확보 상태에서만 실제 주행 중인 각속도(last_w)를 업데이트
+    # 벽에 완전히 막혀 탈출 회전 명령이 나가는 중에는 충돌 전의 각속도를 유지시킵니다.
+    if 'fm' in globals() and fm >= THRESH_STOP:
+        if abs(w) > 0.01:
+            last_w = w
+            
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
 def stop_robot(): send_cmd(0.0, 0.0)
@@ -183,6 +196,7 @@ search_t      = None
 mission_start_t = time.time() 
 hop_start_t     = None        
 last_cmd      = (0.0, 0.0)
+last_w        = 0.0  # [추가] 충돌 직전 코너링 방향을 기억하기 위한 변수
 
 print(f"START | MISSION: {MISSION}")
 
@@ -196,6 +210,9 @@ try:
         H, W   = frame.shape[:2]
         cx_mid = W // 2
         hsv    = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        
+        # [수정] send_cmd에서 실시간 참조할 수 있도록 전역변수(global)로 설정
+        global fm
         scan   = get_scan()
         fm     = front_min(scan)
         adir   = avoid_dir(scan)
@@ -208,8 +225,6 @@ try:
         target = MISSION[mission_idx]
         draw   = COLOR_CFG[target]["draw"]
 
-        # ★ 화면 왼쪽 상단에 현재 추적 중인 색상 표시 (예: "TARGET: RED")
-        # 해당 색상 고유의 BGR 색상으로 글씨가 나타납니다.
         cv2.putText(frame, f"TARGET: {target.upper()}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, draw, 2)
 
         is_searching = (mode == "LIDAR") or (mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH"])
@@ -270,7 +285,11 @@ try:
                 if sd <= WALL_TARGET * 1.3: lidar_state = "WALL_FOLLOW"
                 else:
                     sign = 1 if follow_side == "L" else -1
-                    if fm < THRESH_STOP: send_cmd(0.08, adir * 1.0)
+                    # [수정] 진입 중 코너 벽 마주쳤을 때 반대 방향 반사 회전
+                    if fm < THRESH_STOP: 
+                        w_bounce = -1.0 if last_w > 0 else 1.0
+                        if abs(last_w) < 0.02: w_bounce = adir * 1.0
+                        send_cmd(0.0, w_bounce)
                     elif fm < THRESH_TURN: send_cmd(WALL_APPROACH_V * 0.6, adir * 0.7)
                     else: send_cmd(WALL_APPROACH_V, sign * 0.3)
 
@@ -351,7 +370,11 @@ try:
                 if sd <= WALL_TARGET * 1.3: park_state = "WALL_FOLLOW"; continue
 
                 sign = 1 if follow_side == "L" else -1
-                if fm < THRESH_STOP: v, w = 0.08, adir * 1.0
+                # [수정] 패널 탐색 접근 중 코너 벽 마주쳤을 때 반대 방향 반사 회전
+                if fm < THRESH_STOP: 
+                    w_bounce = -1.0 if last_w > 0 else 1.0
+                    if abs(last_w) < 0.02: w_bounce = adir * 1.0
+                    v, w = 0.0, w_bounce
                 elif fm < THRESH_TURN: v, w = WALL_APPROACH_V * 0.6, adir * 0.7
                 else: v, w = WALL_APPROACH_V, sign * 0.3
                 send_cmd(v, w)
@@ -386,7 +409,11 @@ try:
                     if fm >= THRESH_SLOW: v, w = reduced_v, cam_w(err_x)
                     else:
                         w_cam = cam_w(err_x); w_lid = adir * 0.7
-                        if fm < THRESH_STOP: v, w = 0.09, w_lid
+                        # [수정] 카메라 트래킹 중 코너링하다가 벽 마주쳤을 때 반대 방향 반사 회전
+                        if fm < THRESH_STOP: 
+                            w_bounce = -1.2 if last_w > 0 else 1.2
+                            if abs(last_w) < 0.02: w_bounce = w_lid
+                            v, w = 0.0, w_bounce
                         elif fm < THRESH_TURN: v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
                         else: v, w = reduced_v, 0.3 * w_lid + 0.7 * w_cam
 
