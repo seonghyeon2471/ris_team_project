@@ -31,9 +31,9 @@ print("LIDAR OK")
 EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
 FRONT_RANGE  = 90   
-THRESH_SLOW  = 51.0
-THRESH_TURN  = 31.0
-THRESH_STOP  = 19.0
+THRESH_SLOW  = 55.0
+THRESH_TURN  = 30.0
+THRESH_STOP  = 20.0
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -166,7 +166,7 @@ APPROACH_V     = 0.13
 PARK_SEC       = 1.2
 DETECT_CONFIRM = 6
 
-ARRIVE_Y_TOP    = int(240 * 0.85)
+ARRIVE_Y_TOP    = int(240 * 0.9)
 ARRIVE_X_MARGIN = 30
 ARRIVE_FORWARD_SEC = 0.8
 ARRIVE_FORWARD_V   = 0.13
@@ -174,11 +174,11 @@ ARRIVE_CONFIRM     = 8
 
 WALL_TARGET     = 15.0
 WALL_SCAN_DIST  = 60.0  
-WALL_APPROACH_V = 0.20  
+WALL_APPROACH_V = 0.20 
 WALL_KP         = 0.012
 WALL_V          = 0.22
-WALL_TURN_V     = 0.10
-WALL_LOST_W     = 0.9     
+WALL_TURN_V     = 0.08
+WALL_LOST_W     = 0.9    
 WALL_SEARCH_W   = 0.9     
 MISSION_TIMEOUT_SEC = 5.0  
 
