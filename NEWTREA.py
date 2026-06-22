@@ -86,6 +86,25 @@ def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
 
+# ── ESCAPE DIRECTION (anti-oscillation) ─────────────────────────────
+# fm < THRESH_STOP일 때 매 프레임 last_w 기준으로 방향을 다시 정하면
+# (이번 프레임 출력 -> 다음 프레임 last_w -> 반대 방향 선택) 식으로
+# 핑퐁 발진하면서 v=0인 채로 그 자리에 멈춘 것처럼 보이는 문제가 있었음.
+# -> 한 번 방향을 정하면 ESCAPE_SEC 동안은 무조건 그 방향을 유지.
+ESCAPE_SEC = 0.6
+
+escape_dir   = 0
+escape_end_t = 0.0
+
+def get_escape_w(adir, now):
+    global escape_dir, escape_end_t
+    if now > escape_end_t:
+        escape_dir = -1 if last_w > 0 else 1
+        if abs(last_w) < 0.02:
+            escape_dir = 1 if adir > 0 else -1
+        escape_end_t = now + ESCAPE_SEC
+    return escape_dir * 1.1
+
 def wall_follow(scan, fm, adir, follow_side):
     global last_w
     sd          = side_dist(scan, follow_side)
@@ -94,10 +113,7 @@ def wall_follow(scan, fm, adir, follow_side):
     sign = 1 if follow_side == "L" else -1
 
     if fm < THRESH_STOP:
-        w_bounce = -1.2 if last_w > 0 else 1.2
-        if abs(last_w) < 0.02:
-            w_bounce = adir * 1.1
-        return (0.0, w_bounce)
+        return (0.0, get_escape_w(adir, time.time()))
 
     if fm < THRESH_TURN:
         return (WALL_TURN_V, adir * 0.85)
@@ -309,10 +325,7 @@ try:
                 else:
                     sign = 1 if follow_side == "L" else -1
                     if fm < THRESH_STOP:
-                        w_bounce = -1.0 if last_w > 0 else 1.0
-                        if abs(last_w) < 0.02:
-                            w_bounce = adir * 1.0
-                        send_cmd(0.0, w_bounce)
+                        send_cmd(0.0, get_escape_w(adir, now))
                     elif fm < THRESH_TURN:
                         send_cmd(WALL_APPROACH_V * 0.6, adir * 0.7)
                     else:
@@ -414,10 +427,7 @@ try:
 
                 sign = 1 if follow_side == "L" else -1
                 if fm < THRESH_STOP:
-                    w_bounce = -1.0 if last_w > 0 else 1.0
-                    if abs(last_w) < 0.02:
-                        w_bounce = adir * 1.0
-                    v, w = 0.0, w_bounce
+                    v, w = 0.0, get_escape_w(adir, now)
                 elif fm < THRESH_TURN:
                     v, w = WALL_APPROACH_V * 0.6, adir * 0.7
                 else:
@@ -463,10 +473,7 @@ try:
                     w_cam = cam_w(err_x)
                     w_lid = adir * 0.7
                     if fm < THRESH_STOP:
-                        w_bounce = -1.2 if last_w > 0 else 1.2
-                        if abs(last_w) < 0.02:
-                            w_bounce = w_lid
-                        v, w = 0.0, w_bounce
+                        v, w = 0.0, get_escape_w(adir, now)
                     elif fm < THRESH_TURN:
                         v, w = 0.13, 0.7 * w_lid + 0.3 * w_cam
                     else:
