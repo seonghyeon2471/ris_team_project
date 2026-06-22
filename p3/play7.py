@@ -238,10 +238,16 @@ def wall_follow(scan, fm, adir, follow_side):
 #   계측 코드를 넣지 않아도 된다.
 last_sent_v, last_sent_w = 0.0, 0.0
 
+# send_cmd를 거치는 모든 회전 명령에 적용되는 최소 회전 속도(절대값).
+# w가 정확히 0(직진)이 아닌 한, 항상 이 값 이상의 크기로 보정된다.
+W_MIN_FLOOR = 0.9
+
 def send_cmd(v, w):
     global last_sent_v, last_sent_w
     v = np.clip(v, -0.4, 0.4)
     w = np.clip(w, -1.6, 1.6)
+    if w != 0.0 and abs(w) < W_MIN_FLOOR:
+        w = W_MIN_FLOOR if w > 0 else -W_MIN_FLOOR
     last_sent_v, last_sent_w = float(v), float(w)
     arduino_ser.write(f"{v:.3f},{-w:.3f}\n".encode())
 
