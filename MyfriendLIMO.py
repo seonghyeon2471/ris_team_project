@@ -154,7 +154,7 @@ DETECT_CONFIRM = 6
 ARRIVE_Y_TOP    = int(240 * 0.85)
 ARRIVE_X_MARGIN = 30
 ARRIVE_FORWARD_SEC = 0.8
-ARRIVE_FORWARD_V   = 0.13
+ARRIVE_FORWARD_V   = 0.15
 ARRIVE_CONFIRM     = 8
 
 WALL_TARGET    = 15.0
@@ -220,13 +220,71 @@ try:
 
         cv2.putText(frame, f"TARGET: {target.upper()}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, draw, 2)
 
-        # ★ [추가] 색상을 찾지 못한 상태에서 6초 동안 동일 상태 유지 검사 (TRACK, FORWARD, PARKING 등 제외)
+# ★ [수정] 색상을 찾지 못한 상태에서 6초 유지 + "50cm 이내 조건" 만족 시 탈출
         mask = make_mask(frame, hsv, target)
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         big    = max(cnts, key=cv2.contourArea) if cnts else None
         found = big is not None and cv2.contourArea(big) > MIN_AREA
 
         if not found and park_state != "ESCAPE":
+            # 모드나 세부 상태가 변경되었는지 확인
+            if (mode != prev_mode) or (mode == "LIDAR" and lidar_state != prev_lidar_state) or (mode == "PARK" and park_state != prev_park_state):
+                last_state_t = time.time()  # 상태가 바뀌었으므로 타이머 리셋
+                prev_mode = mode
+                prev_lidar_state = lidar_state
+                prev_park_state = park_state
+            
+            # 특정 정체 유발 상태들에서 6초가 경과했는지 검사
+            current_stuck_state = (lidar_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW"]) if mode == "LIDAR" else (park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH"])
+            
+            if current_stuck_state and (time.time() - last_state_t > STUCK_TIMEOUT):
+                
+                # ── [라이다 기반 주변 50cm 상황 분석] ──
+                # 50cm 이내에 존재하는 유효한 데이터 점들의 인덱스(각도) 추출
+                stuck_indices = np.where((scan > 3.0) & (scan <= 50.0))[0]
+                stuck_points_count = len(stuck_indices)
+                
+                # 조건 1: 50cm 이내에 아무것도 없음 (점의 개수가 5개 미만)
+                nothing_around = stuck_points_count < 5
+                
+                # 조건 2: 벽이 1개만 있음 (연속된 인덱스 군집이 1개인지 확인)
+                only_one_wall = False
+                if not nothing_around and stuck_points_count >= 5:
+                    # 각도 차이를 계산하여 끊어지는 지점(새로운 벽) 탐색
+                    # 359도와 0도의 연속성 처리를 위해 diff 계산 후 360 정렬 고려
+                    diffs = np.diff(stuck_indices)
+                    # 인덱스가 2 이상 벌어지면 다른 장애물(벽)로 판단
+                    gaps = np.where(diffs > 2)[0]
+                    cluster_count = len(gaps) + 1
+                    
+                    # 359도와 0도가 연결된 하나의 벽일 경우, 양 끝 클러스터는 하나로 묶어줌
+                    if cluster_count > 1 and stuck_indices[0] == 0 and stuck_indices[-1] == 359:
+                        cluster_count -= 1
+                    
+                    if cluster_count == 1:
+                        only_one_wall = True
+
+                # 조건 충족 시에만 탈출 감행
+                if nothing_around or only_one_wall:
+                    state_reason = "CLEAR" if nothing_around else "1-WALL"
+                    print(f"⚠️ STUCK & CONDITION MET ({state_reason}) -> START ESCAPE")
+                    mode = "PARK"
+                    park_state = "ESCAPE"
+                    escape_t = time.time()
+                    
+                    # 주변에 벽이 1개 있다면 그 벽의 반대 방향으로 꺾기
+                    if only_one_wall and stuck_points_count > 0:
+                        avg_wall_angle = np.mean(stuck_indices)
+                        # 벽이 오른쪽에 있으면(180~360) 왼쪽(1)으로, 왼쪽에 있으면(0~180) 오른쪽(-1)으로 회전
+                        escape_dir = 1 if avg_wall_angle > 180 else -1
+                    else:
+                        escape_dir = -1 if adir >= 0 else 1 
+                        
+                    detect_count = 0
+                else:
+                    # 조건이 맞지 않으면(복잡한 좁은 길 등) 탈출하지 않고 시간을 살짝 미루어 주행을 더 지켜봄
+                    print("⏳ Stuck detected, but environment too complex to escape. Waiting...")
+                    last_state_t = time.time() - (STUCK_TIMEOUT - 2.0) # 2초 뒤에 다시 체크하도록 설정
             # 모드나 세부 세부 상태가 변경되었는지 확인
             if (mode != prev_mode) or (mode == "LIDAR" and lidar_state != prev_lidar_state) or (mode == "PARK" and park_state != prev_park_state):
                 last_state_t = time.time()  # 상태가 바뀌었으므로 타이머 리셋
