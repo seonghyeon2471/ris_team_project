@@ -80,7 +80,7 @@ def front_min(scan):
     return float(np.min(scan[idx]))
 
 def avoid_dir(scan):
-    return 1 if np.mean(scan[1:90]) <= np.mean(scan[271:360]) else -1
+    return 1 if np.mean(scan[1:90]) >= np.mean(scan[271:360]) else -1
 
 def side_dist(scan, side):
     if side == "L":
