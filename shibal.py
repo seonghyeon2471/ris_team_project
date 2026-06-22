@@ -163,8 +163,8 @@ WALL_APPROACH_V = 0.20
 WALL_KP        = 0.012
 WALL_V         = 0.22
 WALL_TURN_V    = 0.10
-WALL_LOST_W    = 1.3     
-WALL_SEARCH_W  = 1.1     
+WALL_LOST_W    = 0.9     
+WALL_SEARCH_W  = 0.9     
 MISSION_TIMEOUT_SEC = 10.0  
 
 # ── STATE ─────────────────────────────────────────────────────────────
