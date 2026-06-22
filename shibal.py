@@ -319,9 +319,9 @@ try:
                 if elapsed_hop < 2.0:
                     send_cmd(0.0, 1.2, fm)
                 else:
-                    if fm > 60.0:
+                    if fm > 40.0:
                         send_cmd(0.0, 1.0, fm)
-                    elif fm > 50.0:
+                    elif fm > 30.0:
                         send_cmd(WALL_V, 0.0, fm)
                     else:
                         park_state = "WALL_APPROACH"
