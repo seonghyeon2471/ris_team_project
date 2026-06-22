@@ -184,6 +184,16 @@ mission_start_t = time.time()
 hop_start_t     = None        
 last_cmd      = (0.0, 0.0)
 
+# ★ 정체 상태 탈출을 위한 변수 추가
+STUCK_TIMEOUT = 6.0          # 같은 상태 지속 제한 시간 (6초)
+ESCAPE_DURATION = 1.5        # 강제 회전 및 후진 탈출 시간 (1.5초)
+last_state_t = time.time()   # 상태가 마지막으로 바뀐 시간 저장
+prev_mode = mode
+prev_lidar_state = lidar_state
+prev_park_state = park_state
+escape_t = None              # 탈출 시작 시간 저장
+escape_dir = 1               # 탈출 회전 방향
+
 print(f"START | MISSION: {MISSION}")
 
 # ── MAIN LOOP ─────────────────────────────────────────────────────────
@@ -208,12 +218,35 @@ try:
         target = MISSION[mission_idx]
         draw   = COLOR_CFG[target]["draw"]
 
-        # ★ 화면 왼쪽 상단에 현재 추적 중인 색상 표시 (예: "TARGET: RED")
-        # 해당 색상 고유의 BGR 색상으로 글씨가 나타납니다.
         cv2.putText(frame, f"TARGET: {target.upper()}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, draw, 2)
 
+        # ★ [추가] 색상을 찾지 못한 상태에서 6초 동안 동일 상태 유지 검사 (TRACK, FORWARD, PARKING 등 제외)
+        mask = make_mask(frame, hsv, target)
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        big    = max(cnts, key=cv2.contourArea) if cnts else None
+        found = big is not None and cv2.contourArea(big) > MIN_AREA
+
+        if not found and park_state != "ESCAPE":
+            # 모드나 세부 세부 상태가 변경되었는지 확인
+            if (mode != prev_mode) or (mode == "LIDAR" and lidar_state != prev_lidar_state) or (mode == "PARK" and park_state != prev_park_state):
+                last_state_t = time.time()  # 상태가 바뀌었으므로 타이머 리셋
+                prev_mode = mode
+                prev_lidar_state = lidar_state
+                prev_park_state = park_state
+            
+            # 특정 정체 유발 상태들에서 6초가 경과했는지 검사
+            current_stuck_state = (lidar_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW"]) if mode == "LIDAR" else (park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH"])
+            if current_stuck_state and (time.time() - last_state_t > STUCK_TIMEOUT):
+                print(f"⚠️ STUCK DETECTED ({STUCK_TIMEOUT}s) -> START ESCAPE")
+                mode = "PARK"
+                park_state = "ESCAPE"
+                escape_t = time.time()
+                # 현재 장애물 회전 방향(adir) 또는 벽면 방향의 반대 방향으로 강제 회전 설정
+                escape_dir = -1 if adir >= 0 else 1 
+                detect_count = 0
+
+        # 타임아웃 예외 처리
         is_searching = (mode == "LIDAR") or (mode == "PARK" and park_state in ["WALL_SEARCH", "WALL_APPROACH", "WALL_FOLLOW", "SEARCH"])
-        
         if is_searching:
             if time.time() - mission_start_t > MISSION_TIMEOUT_SEC:
                 mode = "PARK"
@@ -221,13 +254,8 @@ try:
                 hop_start_t = time.time()
                 detect_count = 0
                 continue
-        elif park_state not in ["SAFE_HOP"]:
+        elif park_state not in ["SAFE_HOP", "ESCAPE"]:
             mission_start_t = time.time()
-
-        mask = make_mask(frame, hsv, target)
-        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        big    = max(cnts, key=cv2.contourArea) if cnts else None
-        found = big is not None and cv2.contourArea(big) > MIN_AREA
 
         cx_obj, cy_obj = -1, -1
         if found:
@@ -247,6 +275,21 @@ try:
 
         def centroid_in_arrive_zone():
             return (cx_obj >= arrive_x1 and cx_obj <= arrive_x2 and cy_obj >= ARRIVE_Y_TOP)
+
+        # ══ PARK 모드 내 ESCAPE 상태 추가 처리 ═══════════════════════════
+        if mode == "PARK" and park_state == "ESCAPE":
+            elapsed_escape = time.time() - escape_t
+            if elapsed_escape < ESCAPE_DURATION:
+                # 안전하게 뒤로 살짝 빠지면서 반대 방향으로 강하게 턴 (후진속도 -0.1, 회전속도 escape_dir * 1.3)
+                send_cmd(-0.10, escape_dir * 1.3)
+                cv2.putText(frame, "STATE: ESCAPE ROUTE", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            else:
+                print("▶ ESCAPE DONE -> RE-SEARCH WALL")
+                # 탈출 완료 후 벽 추적부터 다시 시작하도록 상태 리셋
+                park_state = "WALL_SEARCH"
+                last_state_t = time.time()
+                mission_start_t = time.time()
+            cv2.imshow("f", frame); cv2.waitKey(1); continue
 
         # ══ LIDAR 모드 ═════════════════════════════════════════════════════
         if mode == "LIDAR":
