@@ -29,9 +29,9 @@ print("LIDAR OK")
 # ── LIDAR ─────────────────────────────────────────────────────────────
 EMA_ALPHA   = 0.35
 MEDIAN_K    = 2
-FRONT_RANGE = 90
+FRONT_RANGE = 100
 THRESH_SLOW = 55.0
-THRESH_TURN = 32.0
+THRESH_TURN = 33.0
 THRESH_STOP = 19.0
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
@@ -129,7 +129,7 @@ WALL_V           = 0.22
 WALL_TURN_V      = 0.10
 WALL_APPROACH_V  = 0.20
 WALL_LOST_W      = 0.45
-WALL_SEARCH_W    = 1.1
+WALL_SEARCH_W    = 0.8
 LOOKAHEAD_TIME   = 0.35
 MAX_W            = 0.90
 
@@ -242,7 +242,7 @@ ARRIVE_FORWARD_SEC = 0.8
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
-WALL_SCAN_DIST      = 80.0
+WALL_SCAN_DIST      = 60.0
 MISSION_TIMEOUT_SEC = 10.0
 
 # ── STATE ─────────────────────────────────────────────────────────────
