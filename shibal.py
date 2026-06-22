@@ -180,7 +180,7 @@ WALL_V          = 0.22
 WALL_TURN_V     = 0.10
 WALL_LOST_W     = 0.9     
 WALL_SEARCH_W   = 0.9     
-MISSION_TIMEOUT_SEC = 10.0  
+MISSION_TIMEOUT_SEC = 5.0  
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode            = "LIDAR"   
@@ -319,7 +319,7 @@ try:
                 if elapsed_hop < 2.0:
                     send_cmd(0.0, 1.2, fm)
                 else:
-                    if fm > 130.0:
+                    if fm > 60.0:
                         send_cmd(0.0, 1.0, fm)
                     elif fm > 50.0:
                         send_cmd(WALL_V, 0.0, fm)
