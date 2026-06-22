@@ -1,3 +1,4 @@
+#준수
 import cv2
 import serial
 import numpy as np
