@@ -1,3 +1,4 @@
+#준수
 import cv2
 import serial
 import numpy as np
@@ -30,8 +31,8 @@ EMA_ALPHA    = 0.35
 MEDIAN_K     = 2
 FRONT_RANGE  = 90   
 THRESH_SLOW  = 55.0
-THRESH_TURN  = 32.0
-THRESH_STOP  = 20.0
+THRESH_TURN  = 30.0
+THRESH_STOP  = 18.0
 
 _scan     = np.full(360, 150.0, dtype=np.float32)
 _scan_pub = np.full(360, 150.0, dtype=np.float32)
@@ -127,8 +128,8 @@ def stop_robot(): send_cmd(0.0, 0.0)
 # ── COLOR CONFIG ──────────────────────────────────────────────────────
 COLOR_CFG = {
     "red":    {"hsv1": ([169, 136, 114], [179, 220, 255]), "hsv2": None, "bgr":  ([20, 20, 80],  [255, 255, 255]), "draw": (0, 0, 255)},
-    "yellow": {"hsv1": ([24, 19, 193], [45, 165, 255]),    "hsv2": None, "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
-    "blue":   {"hsv1": ([98, 100, 95], [138, 207, 246]),   "hsv2": None, "bgr":  ([40,  0,   0], [255, 220, 220]), "draw": (255, 80, 0)},
+    "yellow": {"hsv1": ([25, 60, 160], [32, 161, 255]),    "hsv2": None, "bgr":  ([0, 80, 80],   [255, 255, 255]), "draw": (0, 200, 255)},
+    "blue":   {"hsv1": ([96, 100, 95], [138, 207, 246]),   "hsv2": None, "bgr":  ([40,  0,   0], [255, 220, 220]), "draw": (255, 80, 0)},
 }
 MISSION = ["red", "yellow", "blue"]
 
@@ -156,8 +157,8 @@ ARRIVE_FORWARD_SEC = 0.8
 ARRIVE_FORWARD_V   = 0.13
 ARRIVE_CONFIRM     = 8
 
-WALL_TARGET    = 20.0
-WALL_SCAN_DIST = 70.0  
+WALL_TARGET    = 15.0
+WALL_SCAN_DIST = 60.0  
 WALL_APPROACH_V = 0.20  
 WALL_KP        = 0.012
 WALL_V         = 0.22
