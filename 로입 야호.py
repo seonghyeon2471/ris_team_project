@@ -190,6 +190,11 @@ ARRIVE_CONFIRM     = 8
 WALL_TARGET      = 14.0    
 SIDE_STOP        = 9.5     
 BOTTLENECK_ENTER = 14.5    
+
+# 🛠️ 새롭게 추가된 파라미터 (좁은 길 중앙 정렬용)
+CENTER_KP        = 0.04
+BOTTLENECK_V     = 0.12
+
 WALL_SCAN_DIST   = 40.0    
 SIDE_SCAN_DIST   = 22.0    
 
@@ -394,7 +399,7 @@ try:
                 else: 
                     detect_count = 0
                     sd = side_dist(scan, follow_side)
-                    # 🛠️ 수정한 곳 1: 모서리를 만나 벽이 사라지면 CORNER_ESCAPE 상태로 확정 이주
+                    # 🛠️ 모서리를 만나 벽이 사라지면 CORNER_ESCAPE 상태로 확정 이주
                     if fm > WALL_SCAN_DIST and sd > SIDE_SCAN_DIST:
                         park_state = "CORNER_ESCAPE"
                         escape_t = time.time()
@@ -402,7 +407,7 @@ try:
                 v, w = wall_follow(scan, fm, follow_side, found, last_seen_x, cx_mid)
                 send_cmd(v, w)
 
-            # 🛠️ 수정한 곳 2: 뺑뺑이를 막기 위한 모퉁이 전진 탈출 루틴 구현
+            # 🛠️ 뺑뺑이를 막기 위한 모퉁이 전진 탈출 루틴
             elif park_state == "CORNER_ESCAPE":
                 if found and fm > THRESH_SLOW:
                     detect_count += 1
@@ -425,7 +430,7 @@ try:
 
             elif park_state == "TRACK":
                 if not found:
-                    park_state = "WALL_SEARCH"  # SEARCH 상태가 제거되었으므로 모서리 이탈 대비 초기화 수색 전환
+                    park_state = "WALL_SEARCH"  
                     arrive_count = 0
                     continue
 
