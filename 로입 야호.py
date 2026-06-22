@@ -205,7 +205,7 @@ WALL_V           = 0.17
 WALL_TURN_V      = 0.04    
 WALL_LOST_W      = 1.2     
 WALL_SEARCH_W    = 1.1     
-MISSION_TIMEOUT_SEC = 10.0  
+MISSION_TIMEOUT_SEC = 5.0  
 
 # ── STATE ─────────────────────────────────────────────────────────────
 mode          = "LIDAR"   
