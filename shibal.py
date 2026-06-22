@@ -185,9 +185,9 @@ MISSION_TIMEOUT_SEC = 5.0
 # ── 개활지(open field) 판단 파라미터 ──────────────────────────────────
 OPEN_FIELD_INIT_SPIN_SEC  = 2.0   # SAFE_HOP 진입 시 고정 스캔 회전 시간
 OPEN_FIELD_WINDOW_SEC     = 5.0   # 개활지 판단 윈도우(연속 관찰 시간)
-OPEN_FIELD_START_DIST     = 40.0  # 윈도우 시작 시점의 임계 거리
-OPEN_FIELD_SHRINK_PER_SEC = 8.0   # 1초 지날 때마다 줄어드는 임계 거리 (40→32→24→16→8→0)
-OPEN_FIELD_CLOSE_DIST     = 30.0  # 이 이하로 가까우면 시간 무관하게 즉시 WALL_APPROACH
+OPEN_FIELD_START_DIST     = 60.0  # 윈도우 시작 시점의 임계 거리
+OPEN_FIELD_SHRINK_PER_SEC = 8.0   # 1초 지날 때마다 줄어드는 임계 거리 (60→52→44→36→28→20)
+OPEN_FIELD_CLOSE_DIST     = 40.0  # 이 이하로 가까우면 시간 무관하게 즉시 WALL_APPROACH
 
 # 개활지 확정 시 180도 회전 파라미터
 SAFE_HOP_W        = 1.2           # 회전 각속도 (rad/s 가정 — 실측치로 교체 가능)
@@ -337,7 +337,7 @@ try:
                     dyn_thresh   = max(OPEN_FIELD_START_DIST - shrink_steps * OPEN_FIELD_SHRINK_PER_SEC, 0.0)
 
                     if fm <= OPEN_FIELD_CLOSE_DIST:
-                        # 30cm 이하로 가까운 건 시간 무관하게 곧장 접근
+                        # 가까운 건 시간 무관하게 곧장 접근
                         park_state = "WALL_APPROACH"
                         mission_start_t = time.time()
                         continue
