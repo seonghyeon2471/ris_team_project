@@ -84,6 +84,21 @@ def side_min(scan, start, end):
     idx = np.arange(start, end) % 360
     return float(np.min(scan[idx]))
 
+# [추가] 카메라 중심 기준 오프셋을 LiDAR 각도로 변환
+def cx_to_lidar_angle(cx_obj, cx_mid, frame_w):
+    if cx_obj < 0:
+        return 0.0
+    ratio = (cx_obj - cx_mid) / (frame_w / 2.0)
+    ratio = float(np.clip(ratio, -1.0, 1.0))
+    return CAM_TO_LIDAR_SIGN * ratio * (CAMERA_HFOV / 2.0)
+
+# [추가] 타겟 방향 ±HALFWIDTH 범위 내의 최단거리 반환
+def obstacle_on_target(scan, target_angle):
+    center = int(round(target_angle)) % 360
+    idx = np.arange(center - TARGET_CHECK_HALFWIDTH,
+                     center + TARGET_CHECK_HALFWIDTH + 1) % 360
+    return float(np.min(scan[idx]))
+
 # ── 벽 직선 추정 ───────────────────────────────────────────────────────
 WALL_SCAN_START_L = 55
 WALL_SCAN_END_L   = 125
@@ -245,6 +260,12 @@ ARRIVE_CONFIRM     = 8
 WALL_SCAN_DIST      = 50.0
 MISSION_TIMEOUT_SEC = 10.0
 
+# [추가] 색지 방향 장애물 검사용 파라미터
+TARGET_CLEAR_DIST      = 40.0   # 이 거리(cm)보다 가까우면 "막힘"으로 판단
+TARGET_CHECK_HALFWIDTH = 15     # 색지 방향 기준 ±15도 검사
+CAMERA_HFOV            = 60.0   # 카메라 수평 화각(deg)
+CAM_TO_LIDAR_SIGN      = 1      # 카메라-라이다 좌우 매핑 보정 (반대면 -1)
+
 # ── STATE ─────────────────────────────────────────────────────────────
 mode            = "LIDAR"
 mission_idx     = 0
@@ -266,7 +287,7 @@ dbg_wall_dist  = 0.0
 dbg_wall_angle = 0.0
 dbg_valid      = False
 
-is_warmed_up   = False # [추가] 라이다 초기화 확인용 플래그
+is_warmed_up   = False
 
 print(f"START | MISSION: {MISSION}")
 
@@ -282,11 +303,10 @@ try:
         hsv    = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         scan   = get_scan()
 
-        # ── [추가] 라이다 센서 초기화 대기 (Safe Start) ──
         if not is_warmed_up:
-            if np.mean(scan) < 149.0: # 150.0(초기값)에서 값이 변했다면 데이터 수신 시작
+            if np.mean(scan) < 149.0: 
                 is_warmed_up = True
-                mission_start_t = time.time() # 실제 출발 시점으로 타임아웃 초기화
+                mission_start_t = time.time() 
                 print("✅ LIDAR READY - 주행을 시작합니다.")
             else:
                 cv2.putText(frame, "WAIT: LIDAR WARMUP...", (20, H // 2),
@@ -294,7 +314,6 @@ try:
                 cv2.imshow("f", frame)
                 cv2.waitKey(1)
                 continue
-        # ─────────────────────────────────────────────────
 
         fm     = front_min(scan)
         adir   = avoid_dir(scan)
@@ -364,7 +383,6 @@ try:
 
             if lidar_state == "WALL_SEARCH":
                 if fm < WALL_SCAN_DIST:
-                    # 💡 수정된 부분: 더 좁은 공간(벽이 있는 쪽)을 동적으로 판단하여 추종 방향 설정
                     follow_side = "L" if adir == -1 else "R"
                     lidar_state = "WALL_APPROACH"
                 else:
@@ -453,7 +471,6 @@ try:
                     detect_count = 0
 
                 if fm < WALL_SCAN_DIST:
-                    # 💡 수정된 부분: 더 좁은 공간(벽이 있는 쪽)을 동적으로 판단하여 추종 방향 설정
                     follow_side = "L" if adir == -1 else "R"
                     park_state = "WALL_APPROACH"
                     continue
@@ -498,6 +515,20 @@ try:
                 send_cmd(v, w)
 
             elif park_state == "TRACK":
+                
+                # [추가] 색지를 추적하기 전에, 색지 방향에 장애물이 있는지 먼저 확인
+                if found:
+                    target_angle = cx_to_lidar_angle(cx_obj, cx_mid, W)
+                    target_clear = obstacle_on_target(scan, target_angle)
+                    
+                    if target_clear < TARGET_CLEAR_DIST:
+                        # 색지 방향이 막혀 있음 -> TRACK 중단, 더 넓은 쪽으로 장애물 우회
+                        arrive_count = 0
+                        follow_side = "L" if adir == -1 else "R"
+                        park_state = "WALL_APPROACH"
+                        print(f"[{target}] 경로 막힘 ({target_clear:.1f}cm)! 우회 시작")
+                        continue
+
                 arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
 
                 if arrive_count >= ARRIVE_CONFIRM:
