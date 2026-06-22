@@ -364,10 +364,11 @@ try:
 
             if lidar_state == "WALL_SEARCH":
                 if fm < WALL_SCAN_DIST:
-                    follow_side = "L"
+                    # 💡 수정된 부분: 더 좁은 공간(벽이 있는 쪽)을 동적으로 판단하여 추종 방향 설정
+                    follow_side = "L" if adir == -1 else "R"
                     lidar_state = "WALL_APPROACH"
                 else:
-                    send_cmd(WALL_APPROACH_V, 0.0) # <--- 직진하도록 수정된 부분
+                    send_cmd(WALL_APPROACH_V, 0.0)
 
             elif lidar_state == "WALL_APPROACH":
                 wall_dist, _, valid = estimate_wall(scan, follow_side)
@@ -452,9 +453,11 @@ try:
                     detect_count = 0
 
                 if fm < WALL_SCAN_DIST:
+                    # 💡 수정된 부분: 더 좁은 공간(벽이 있는 쪽)을 동적으로 판단하여 추종 방향 설정
+                    follow_side = "L" if adir == -1 else "R"
                     park_state = "WALL_APPROACH"
                     continue
-                send_cmd(WALL_APPROACH_V, 0.0) # <--- 직진하도록 수정된 부분
+                send_cmd(WALL_APPROACH_V, 0.0)
 
             elif park_state == "WALL_APPROACH":
                 if found:
