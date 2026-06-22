@@ -247,6 +247,10 @@ ARRIVE_CONFIRM     = 8
 WALL_SCAN_DIST      = 150.0
 MISSION_TIMEOUT_SEC = 6.0
 
+# TRACK 중 색을 놓쳤을 때 복구 회전
+LOST_CONFIRM = 5     # 연속 5프레임 못 찾으면 "놓침" 확정 (오탐 방지)
+LOST_TURN_W  = 1.0   # 마지막으로 본 방향 반대로 이 각속도로 회전
+
 # ── STATE ─────────────────────────────────────────────────────────────
 # 공통 상태(라이다 모드 / PARK 모드 둘 다 동일하게 사용):
 #   WALL_SEARCH -> WALL_FOLLOW (벽 찾으면 전환) -> (타겟 발견 시 PARK:TRACK)
@@ -257,6 +261,7 @@ park_state      = "TRACK"        # TRACK | FORWARD_PARK | SAFE_HOP
 mission_idx     = 0
 detect_count    = 0
 arrive_count    = 0
+lost_count      = 0
 follow_side     = "L"
 
 last_seen_x     = 160
@@ -417,6 +422,19 @@ try:
                     send_cmd(v, w)
 
             elif park_state == "TRACK":
+                if not found:
+                    lost_count += 1
+                else:
+                    lost_count = 0
+
+                if lost_count >= LOST_CONFIRM:
+                    # 마지막으로 본 위치 반대 방향으로 회전하며 재탐색
+                    w_recover = -LOST_TURN_W if last_seen_x > cx_mid else LOST_TURN_W
+                    send_cmd(0.0, w_recover)
+                    last_cmd = (0.0, w_recover)
+                    cv2.putText(frame, "TRACK: LOST -> RECOVER TURN", (10, 45), 0, 0.5, (0, 0, 255), 2)
+                    continue
+
                 arrive_count = arrive_count + 1 if centroid_in_arrive_zone() else 0
 
                 if arrive_count >= ARRIVE_CONFIRM:
